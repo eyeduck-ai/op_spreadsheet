@@ -1,0 +1,28 @@
+# Patient data exports and local copies
+*.xlsx
+*.xls
+*.csv
+*.tsv
+*.pdf
+
+# Images/screenshots that may contain PHI
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.heic
+
+# Local editor and OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+~$*
+*.tmp
+*.bak
+
+# Local dependency/build artifacts
+node_modules/
+.cache/
+dist/
+build/
