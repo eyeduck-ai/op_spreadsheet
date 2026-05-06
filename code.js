@@ -757,9 +757,11 @@ function onOpen() {
     .addItem('初始化表格格式', 'initializeSheet')
     .addItem('安裝自動同步觸發器', 'installProcessRowChangeTrigger')
     .addItem('安裝日曆反向同步觸發器', 'setupCalendarReverseSync')
-    .addItem('清除指定欄位舊日曆事件', 'clearCalendarEventsFromSpecifiedColumn');
+    .addItem('清除指定欄位舊日曆事件', 'clearCalendarEventsFromSpecifiedColumn')
+    .addSeparator()
+    .addItem(`版本：${CONFIG.VERSION}`, 'showVersionInfo');
 
-  ui.createMenu(`手術排程系統 ${CONFIG.VERSION}`)
+  ui.createMenu('手術排程系統')
     .addItem('一鍵安裝/初始化', 'setup')
     .addItem('輸出指令日期資料', 'exportDateData')
     .addItem('複製一列 (清空時間)', 'duplicateRow')
@@ -768,6 +770,10 @@ function onOpen() {
     .addSeparator()
     .addSubMenu(advancedMenu)
     .addToUi();
+}
+
+function showVersionInfo() {
+  SpreadsheetApp.getUi().alert(`手術排程系統版本：${CONFIG.VERSION}`);
 }
 
 function splitFirstLineAndRest_(value) {
