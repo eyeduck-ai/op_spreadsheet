@@ -9,9 +9,9 @@
 3. 請啟用 Calendar Advanced Service：
    - Apps Script 左側「服務」→「+」→ 選擇「Google Calendar API」。
    - 或將 `appsscript.json` 的內容套用到 Apps Script manifest。
-4. 在 `CONFIG.CALENDAR_ID` 填入要同步的 Google Calendar ID。
-5. 在 Apps Script 函式選單選擇 `setup`，執行一次並完成授權。
-6. 回到試算表並重新整理頁面，應會看到「手術排程系統」選單。
+4. 在 Apps Script 函式選單選擇 `setup`，執行一次並完成授權；若尚未設定 Calendar ID，系統會提示輸入。
+5. 回到試算表並重新整理頁面，應會看到「手術排程系統」選單。
+6. 若之後需要更換日曆，選擇「手術排程系統」→「進階/維護工具」→「設定 Calendar ID」；系統會存到 Script Properties 並重建雙向同步綁定。
 
 ## 日常使用
 
@@ -21,6 +21,7 @@
 - `歸人整合 (同病歷號合併)`：合併非 OP 的同病歷號資料。
 - `依照日期與時間排序`：依日期與時間排序 OP sheet。
 - `進階/維護工具` 子選單：
+  - `設定 Calendar ID`：輸入並儲存手術日曆 ID 到 Apps Script 的 Script Properties；儲存後會重建 Sheet → Calendar 與 Calendar → Sheet 綁定，但不會自動批次同步既有列。
   - `初始化表格格式`：只重跑格式、驗證、條件格式與時間正規化。
   - `安裝自動同步觸發器`：只重裝 Sheet → Calendar 的 onEdit trigger。
   - `安裝日曆反向同步觸發器`：建立 Calendar syncToken baseline，並安裝 Calendar → Sheet trigger。
@@ -30,6 +31,8 @@
 
 - Sheet → Calendar 自動同步需要 installable onEdit trigger；第一次請執行 `setup()`。
 - Sheet → Calendar 與 Calendar → Sheet 都需要 Calendar Advanced Service；若未啟用，`setup()` 會略過需要 Calendar API 的同步並顯示提醒。
+- Calendar ID 優先讀取 Script Properties 內的 `CALENDAR_ID`；`CONFIG.CALENDAR_ID` 只保留為舊版 fallback。
+- 更換 Calendar ID 只會重建雙向同步綁定，不會自動把既有列批次同步到新日曆；若需要同步既有資料，請再執行「一鍵安裝/初始化」。
 - 更新 `code.js` 後，請再執行一次 `setup()`，讓既有 Calendar event 套用新的標題與描述邏輯。
 - J 欄 `日曆eventID` 是系統欄位，會自動隱藏；現在只存 Google Calendar API `event.id`。
 - 日曆事件標題格式為 `病歷號 | 姓名 | Condition`；分隔符 `|` 前後空白不影響解析，例如 `123|王小明|Cataract` 也可辨識，輸入全形 `｜` 也會自動視為分隔符。
@@ -50,7 +53,7 @@
 - 這個工具會處理病患個資與醫療資訊，包含病歷號、姓名、TEL、Condition、Plan、心得、手術時間與輸出表單內容。
 - 請使用專用 Google Calendar，並將分享權限限制在實際需要排程作業的人員；日曆標題會包含病歷號、姓名與 Condition，description 會包含 TEL 與 Plan。
 - `輸出表單` 會產生病歷號、姓名、TEL、疾病、術式與補充說明，應視為含病患資料的工作表，不應公開分享或匯出到不受控的位置。
-- `清除指定欄位舊日曆事件` 可以開啟指定 Spreadsheet 並刪除 `CONFIG.CALENDAR_ID` 內對應事件；只應對可信任且你有權限管理的試算表使用。
+- `清除指定欄位舊日曆事件` 可以開啟指定 Spreadsheet 並刪除已設定 Calendar ID 內對應事件；只應對可信任且你有權限管理的試算表使用。
 - Calendar 反向同步使用的 `syncToken` 會存在 Apps Script `PropertiesService`，通常不包含病患內容，但仍應視為同步狀態資料，不要外洩。
 - Apps Script 執行記錄不應包含完整病患資料；若自行新增 log，避免輸出姓名、病歷號、電話、Plan 或完整 Calendar title/description。
 - 不要將含病患資料的 Google Sheet 匯出檔、Excel、CSV、PDF、截圖、備份檔或本地測試資料提交到 git。

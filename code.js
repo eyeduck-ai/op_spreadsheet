@@ -3,8 +3,8 @@
  *
  * 首次安裝流程：
  * 1. 將本檔貼到試算表綁定的 Apps Script 專案。
- * 2. 將 CONFIG.CALENDAR_ID 改成要同步的 Google Calendar ID。
- * 3. 手動執行 setup() 一次，完成授權、表格初始化與 onEdit trigger 安裝。
+ * 2. 手動執行 setup() 一次，完成授權、表格初始化與 trigger 安裝。
+ * 3. 若 setup 尚未提示設定，回到試算表後可用「進階/維護工具」的「設定 Calendar ID」儲存手術日曆 ID。
  *
  * 重要假設：
  * - 主要資料表名稱為 CONFIG.SHEET_OP，預設是「OP」。
@@ -12,7 +12,7 @@
  * - 病歷號是同步 Calendar 的必要欄位；有日期但沒有病歷號時不會新增或更新事件。
  */
 const CONFIG = {
-  CALENDAR_ID: 'YOUR_CALENDAR_ID_HERE', // 請替換成專屬手術日曆的ID
+  CALENDAR_ID: 'YOUR_CALENDAR_ID_HERE', // fallback：優先使用 ScriptProperties 內的 Calendar ID
   SHEET_OP: 'OP',
   SHEET_OUT: '輸出表單',
   COLS: {
@@ -47,6 +47,7 @@ const CALENDAR_SYNC_NOTE_PREFIX = '系統日曆同步：';
 const CALENDAR_SYNC_TOKEN_PROPERTY_PREFIX = 'CALENDAR_SYNC_TOKEN_';
 const CALENDAR_REVERSE_SYNC_HANDLER = 'processCalendarChange';
 const CALENDAR_TITLE_SEPARATOR = '|';
+const CALENDAR_ID_SCRIPT_PROPERTY_KEY = 'CALENDAR_ID';
 const LEGACY_API_EVENT_ID_HEADER = '日曆apiEventID';
 
 // 條件格式沒有 metadata 可標記來源，因此在 custom formula 中放入 N("...") marker。
@@ -89,7 +90,11 @@ function installProcessRowChangeTrigger() {
 function isCalendarAdvancedServiceAvailable_() {
   return typeof Calendar !== 'undefined' &&
     Calendar.Events &&
-    typeof Calendar.Events.list === 'function';
+    typeof Calendar.Events.list === 'function' &&
+    typeof Calendar.Events.get === 'function' &&
+    typeof Calendar.Events.update === 'function' &&
+    typeof Calendar.Events.insert === 'function' &&
+    typeof Calendar.Events.remove === 'function';
 }
 
 function getCalendarSyncTokenPropertyKey_(calendarId) {
@@ -107,15 +112,106 @@ function setCalendarSyncToken_(calendarId, syncToken) {
     .setProperty(getCalendarSyncTokenPropertyKey_(calendarId), syncToken);
 }
 
-function isCalendarIdConfigured_() {
-  return CONFIG.CALENDAR_ID && CONFIG.CALENDAR_ID !== 'YOUR_CALENDAR_ID_HERE';
+function normalizeCalendarId_(calendarId) {
+  const text = toCellText_(calendarId);
+  return text && text !== 'YOUR_CALENDAR_ID_HERE' ? text : '';
+}
+
+function getConfiguredCalendarId_() {
+  const propertyCalendarId = PropertiesService.getScriptProperties()
+    .getProperty(CALENDAR_ID_SCRIPT_PROPERTY_KEY);
+
+  return normalizeCalendarId_(propertyCalendarId) || normalizeCalendarId_(CONFIG.CALENDAR_ID);
+}
+
+function setConfiguredCalendarId_(calendarId) {
+  const normalizedCalendarId = normalizeCalendarId_(calendarId);
+  if (!normalizedCalendarId) return '';
+
+  PropertiesService.getScriptProperties()
+    .setProperty(CALENDAR_ID_SCRIPT_PROPERTY_KEY, normalizedCalendarId);
+
+  return normalizedCalendarId;
+}
+
+function isCalendarIdConfigured_(calendarId) {
+  return Boolean(arguments.length > 0 ? normalizeCalendarId_(calendarId) : getConfiguredCalendarId_());
+}
+
+function promptAndSaveCalendarId_(options) {
+  const settings = options || {};
+  const ui = SpreadsheetApp.getUi();
+  const currentCalendarId = getConfiguredCalendarId_();
+  const message = settings.message || (currentCalendarId
+    ? `目前 Calendar ID：${currentCalendarId}\n請輸入要使用的手術日曆 Calendar ID：`
+    : '請輸入要使用的手術日曆 Calendar ID：');
+  const response = ui.prompt('設定 Calendar ID', message, ui.ButtonSet.OK_CANCEL);
+  if (response.getSelectedButton() !== ui.Button.OK) {
+    return {
+      ok: false,
+      status: 'cancelled',
+      calendarId: currentCalendarId,
+      message: 'Calendar ID 設定已取消。'
+    };
+  }
+
+  const savedCalendarId = setConfiguredCalendarId_(response.getResponseText());
+  if (!savedCalendarId) {
+    return {
+      ok: false,
+      status: 'blank',
+      calendarId: currentCalendarId,
+      message: 'Calendar ID 不可空白，未更新設定。'
+    };
+  }
+
+  return {
+    ok: true,
+    status: 'saved',
+    calendarId: savedCalendarId,
+    message: `Calendar ID 已儲存：${savedCalendarId}`
+  };
+}
+
+function promptAndSaveCalendarId() {
+  const ui = SpreadsheetApp.getUi();
+  const saveResult = promptAndSaveCalendarId_();
+
+  if (!saveResult.ok) {
+    ui.alert(saveResult.message);
+    return saveResult;
+  }
+
+  installProcessRowChangeTrigger_(false);
+  const reverseSyncResult = setupCalendarReverseSync_(false);
+  const reverseSyncMessage = reverseSyncResult.ok
+    ? reverseSyncResult.message
+    : `Calendar 反向同步未啟用：${reverseSyncResult.message}`;
+  const result = {
+    ok: true,
+    bindingOk: reverseSyncResult.ok,
+    calendarId: saveResult.calendarId,
+    saveResult,
+    reverseSyncResult
+  };
+
+  ui.alert(
+    'Calendar ID 設定完成',
+    `${saveResult.message}\n` +
+      '已安裝 Sheet 自動同步觸發器。\n' +
+      `${reverseSyncMessage}\n` +
+      '未自動批次同步既有列；若需同步既有資料，請執行「一鍵安裝/初始化」。',
+    ui.ButtonSet.OK
+  );
+
+  return result;
 }
 
 function initializeCalendarSyncToken_(calendarId) {
-  if (!isCalendarIdConfigured_()) {
+  if (!isCalendarIdConfigured_(calendarId)) {
     return {
       ok: false,
-      message: 'CONFIG.CALENDAR_ID 尚未設定，無法建立 Calendar 反向同步 baseline。'
+      message: 'Calendar ID 尚未設定，無法建立 Calendar 反向同步 baseline。'
     };
   }
 
@@ -169,15 +265,17 @@ function initializeCalendarSyncToken_(calendarId) {
 }
 
 function initializeCalendarSyncToken() {
-  const result = initializeCalendarSyncToken_(CONFIG.CALENDAR_ID);
+  const result = initializeCalendarSyncToken_(getConfiguredCalendarId_());
   SpreadsheetApp.getUi().alert(result.message);
 }
 
 function installCalendarChangeTrigger_(showAlert) {
-  if (!isCalendarIdConfigured_()) {
+  const calendarId = getConfiguredCalendarId_();
+
+  if (!isCalendarIdConfigured_(calendarId)) {
     const result = {
       ok: false,
-      message: 'CONFIG.CALENDAR_ID 尚未設定，未安裝 Calendar 反向同步觸發器。'
+      message: 'Calendar ID 尚未設定，未安裝 Calendar 反向同步觸發器。'
     };
     if (showAlert) SpreadsheetApp.getUi().alert(result.message);
     return result;
@@ -198,7 +296,7 @@ function installCalendarChangeTrigger_(showAlert) {
       .forEach(trigger => ScriptApp.deleteTrigger(trigger));
 
     ScriptApp.newTrigger(CALENDAR_REVERSE_SYNC_HANDLER)
-      .forUserCalendar(CONFIG.CALENDAR_ID)
+      .forUserCalendar(calendarId)
       .onEventUpdated()
       .create();
 
@@ -223,7 +321,8 @@ function installCalendarChangeTrigger() {
 }
 
 function setupCalendarReverseSync_(showAlert) {
-  const tokenResult = initializeCalendarSyncToken_(CONFIG.CALENDAR_ID);
+  const calendarId = getConfiguredCalendarId_();
+  const tokenResult = initializeCalendarSyncToken_(calendarId);
   if (!tokenResult.ok) {
     if (showAlert) SpreadsheetApp.getUi().alert(tokenResult.message);
     return tokenResult;
@@ -268,12 +367,33 @@ function setup() {
     return;
   }
 
-  const syncResult = batchSyncAllEvents_(false);
+  let calendarIdPromptMessage = '';
+  if (!isCalendarIdConfigured_()) {
+    const calendarIdResult = promptAndSaveCalendarId_({
+      message: 'Calendar ID 尚未設定。\n請輸入要使用的手術日曆 Calendar ID；若取消，Calendar 同步會略過。'
+    });
+    calendarIdPromptMessage = `\n${calendarIdResult.message}`;
+  }
+
+  const hasCalendarId = isCalendarIdConfigured_();
+  const syncResult = hasCalendarId
+    ? batchSyncAllEvents_(false)
+    : {
+        ok: false,
+        message: 'Calendar ID 尚未設定。',
+        processedCount: 0,
+        statusCounts: {}
+      };
   const syncMessage = syncResult.ok
     ? '\n' + buildBatchSyncSummaryMessage_(syncResult)
     : `\n批次同步未執行：${syncResult.message}`;
   installProcessRowChangeTrigger_(false);
-  const reverseSyncResult = setupCalendarReverseSync_(false);
+  const reverseSyncResult = hasCalendarId
+    ? setupCalendarReverseSync_(false)
+    : {
+        ok: false,
+        message: 'Calendar ID 尚未設定。'
+      };
   const reverseSyncMessage = reverseSyncResult.ok
     ? `\n${reverseSyncResult.message}`
     : `\nCalendar 反向同步未啟用：${reverseSyncResult.message}`;
@@ -283,6 +403,7 @@ function setup() {
     '一鍵設定完成',
     `已完成表格初始化、Sheet 自動同步觸發器安裝，並刷新「手術排程系統」選單。\n` +
       `時間欄位已轉換 ${initResult.timeResult.normalizedCount} 格，格式錯誤 ${initResult.timeResult.errorCount} 格。` +
+      calendarIdPromptMessage +
       syncMessage +
       reverseSyncMessage +
       initResult.mismatchMessage,
@@ -631,6 +752,8 @@ function parseCalendarDescription_(description) {
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   const advancedMenu = ui.createMenu('進階/維護工具')
+    .addItem('設定 Calendar ID', 'promptAndSaveCalendarId')
+    .addSeparator()
     .addItem('初始化表格格式', 'initializeSheet')
     .addItem('安裝自動同步觸發器', 'installProcessRowChangeTrigger')
     .addItem('安裝日曆反向同步觸發器', 'setupCalendarReverseSync')
@@ -1263,6 +1386,21 @@ function batchSyncAllEvents_(showAlert) {
     return emptyResult;
   }
 
+  if (!isCalendarIdConfigured_()) {
+    const noCalendarIdResult = {
+      ok: false,
+      message: 'Calendar ID 尚未設定，批次同步未執行。',
+      processedCount: 0,
+      statusCounts: {}
+    };
+
+    if (showAlert) {
+      SpreadsheetApp.getUi().alert(noCalendarIdResult.message);
+    }
+
+    return noCalendarIdResult;
+  }
+
   let processedCount = 0;
   const statusCounts = {};
 
@@ -1551,6 +1689,13 @@ function syncCalendarChangesToSheet_(calendarId) {
     };
   }
 
+  if (!isCalendarIdConfigured_(calendarId)) {
+    return {
+      ok: false,
+      message: 'Calendar ID 尚未設定，Calendar 反向同步未執行。'
+    };
+  }
+
   if (!isCalendarAdvancedServiceAvailable_()) {
     return {
       ok: false,
@@ -1635,12 +1780,12 @@ function syncCalendarChangesToSheet_(calendarId) {
 }
 
 function syncCalendarChangesToSheet() {
-  const result = syncCalendarChangesToSheet_(CONFIG.CALENDAR_ID);
+  const result = syncCalendarChangesToSheet_(getConfiguredCalendarId_());
   SpreadsheetApp.getUi().alert(result.message);
 }
 
 function processCalendarChange(e) {
-  const calendarId = e && e.calendarId ? e.calendarId : CONFIG.CALENDAR_ID;
+  const calendarId = e && e.calendarId ? e.calendarId : getConfiguredCalendarId_();
 
   withCalendarSyncLock_(() => {
     const result = syncCalendarChangesToSheet_(calendarId);
@@ -1765,6 +1910,25 @@ function buildCalendarApiEventResource_(title, description, dateObj, timeInfo, t
   return resource;
 }
 
+function buildCalendarApiUpdateResource_(existingEvent, eventResource) {
+  const updateResource = Object.assign({}, existingEvent || {});
+
+  updateResource.summary = eventResource.summary;
+  updateResource.description = eventResource.description;
+  updateResource.colorId = eventResource.colorId;
+  updateResource.start = Object.assign({}, eventResource.start);
+  updateResource.end = Object.assign({}, eventResource.end);
+
+  return updateResource;
+}
+
+function updateCalendarApiEvent_(calendarId, eventId, eventResource) {
+  const existingEvent = Calendar.Events.get(calendarId, eventId);
+  const updateResource = buildCalendarApiUpdateResource_(existingEvent, eventResource);
+
+  return Calendar.Events.update(updateResource, calendarId, eventId);
+}
+
 function removeCalendarApiEvent_(calendarId, eventId) {
   if (!eventId || !isCalendarAdvancedServiceAvailable_()) {
     return {
@@ -1887,9 +2051,10 @@ function clearSystemCalendarSyncNote_(range) {
 
 function clearCalendarEventsFromSpecifiedColumn() {
   const ui = SpreadsheetApp.getUi();
+  const calendarId = getConfiguredCalendarId_();
 
-  if (!isCalendarIdConfigured_()) {
-    ui.alert('CONFIG.CALENDAR_ID 尚未設定，未清除日曆事件。');
+  if (!isCalendarIdConfigured_(calendarId)) {
+    ui.alert('Calendar ID 尚未設定，未清除日曆事件。');
     return;
   }
 
@@ -1953,7 +2118,7 @@ function clearCalendarEventsFromSpecifiedColumn() {
 
       result.scannedCount++;
       const cell = idRange.getCell(index + 1, 1);
-      const deleteResult = deleteCalendarEventByPossibleId_(CONFIG.CALENDAR_ID, eventId);
+      const deleteResult = deleteCalendarEventByPossibleId_(calendarId, eventId);
 
       if (deleteResult.ok) {
         cell.clearContent();
@@ -2018,6 +2183,12 @@ function syncToCalendar(sheet, row) {
   const planText = toCellText_(plan);
   const chartNoCell = sheet.getRange(row, CONFIG.COLS.CHART_NO);
   const eventIdCell = sheet.getRange(row, CONFIG.COLS.EVENT_ID);
+  const calendarId = getConfiguredCalendarId_();
+
+  if (!isCalendarIdConfigured_(calendarId)) {
+    setCalendarSyncNote_(eventIdCell, 'Calendar ID 尚未設定，請先用「設定 Calendar ID」儲存手術日曆 ID。');
+    return 'skipped_no_calendar_id';
+  }
 
   if (!isCalendarAdvancedServiceAvailable_()) {
     setCalendarSyncNote_(eventIdCell, '需啟用 Calendar Advanced Service 才能同步日曆。');
@@ -2028,7 +2199,7 @@ function syncToCalendar(sheet, row) {
     clearCalendarSyncNote_(chartNoCell);
 
     if (eventId) {
-      const deleteResult = deleteCalendarEventByPossibleId_(CONFIG.CALENDAR_ID, eventId);
+      const deleteResult = deleteCalendarEventByPossibleId_(calendarId, eventId);
       if (!deleteResult.ok) {
         setCalendarSyncNote_(eventIdCell, `刪除日曆事件失敗：${deleteResult.message}`);
         return 'skipped_delete_failed';
@@ -2074,7 +2245,7 @@ function syncToCalendar(sheet, row) {
 
   if (eventId) {
     try {
-      const updatedEvent = Calendar.Events.patch(eventResource, CONFIG.CALENDAR_ID, eventId);
+      const updatedEvent = updateCalendarApiEvent_(calendarId, eventId, eventResource);
       eventIdCell.setValue(updatedEvent.id || eventId);
       clearSystemCalendarSyncNote_(eventIdCell);
       return 'updated';
@@ -2087,7 +2258,7 @@ function syncToCalendar(sheet, row) {
   }
 
   try {
-    const createdEvent = Calendar.Events.insert(eventResource, CONFIG.CALENDAR_ID);
+    const createdEvent = Calendar.Events.insert(eventResource, calendarId);
     eventIdCell.setValue(createdEvent.id);
     clearSystemCalendarSyncNote_(eventIdCell);
     return 'created';
