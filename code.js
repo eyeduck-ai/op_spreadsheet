@@ -12,6 +12,7 @@
  * - 病歷號是同步 Calendar 的必要欄位；有日期但沒有病歷號時不會新增或更新事件。
  */
 const CONFIG = {
+  VERSION: '2026.05.06',
   CALENDAR_ID: 'YOUR_CALENDAR_ID_HERE', // fallback：優先使用 ScriptProperties 內的 Calendar ID
   SHEET_OP: 'OP',
   SHEET_OUT: '輸出表單',
@@ -753,13 +754,12 @@ function onOpen() {
   const ui = SpreadsheetApp.getUi();
   const advancedMenu = ui.createMenu('進階/維護工具')
     .addItem('設定 Calendar ID', 'promptAndSaveCalendarId')
-    .addSeparator()
     .addItem('初始化表格格式', 'initializeSheet')
     .addItem('安裝自動同步觸發器', 'installProcessRowChangeTrigger')
     .addItem('安裝日曆反向同步觸發器', 'setupCalendarReverseSync')
     .addItem('清除指定欄位舊日曆事件', 'clearCalendarEventsFromSpecifiedColumn');
 
-  ui.createMenu('手術排程系統')
+  ui.createMenu(`手術排程系統 ${CONFIG.VERSION}`)
     .addItem('一鍵安裝/初始化', 'setup')
     .addItem('輸出指令日期資料', 'exportDateData')
     .addItem('複製一列 (清空時間)', 'duplicateRow')
