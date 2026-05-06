@@ -26,3 +26,7 @@ node_modules/
 .cache/
 dist/
 build/
+
+# Google Apps Script clasp credentials/config
+.clasprc.json
+.clasp.json
