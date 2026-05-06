@@ -48,6 +48,15 @@
 - 水晶體清單只列出成功解析到 `IOL(...)` 或 `MSICS(...)` 的病人，並依品牌排序。
 - 若想使用 Google Sheets 圖形按鈕，可將圖形指定給 `setup` 或其他公開函式。
 
+## Fork 與自動部署
+
+- 這個 repository 只包含 Apps Script 程式碼與部署設定，不包含任何 Google Spreadsheet 資料。
+- Fork 使用者需要建立自己的 spreadsheet-bound Apps Script 專案，並把自己的 Script ID 寫入本機 `.clasp.json`。
+- GitHub Actions 自動部署需要設定自己的 repository secrets：`CLASP_JSON` 與 `CLASPRC_JSON`。
+- `CLASPRC_JSON` 內含 Google OAuth refresh token，能代表授權帳號更新 Apps Script；只能放在 GitHub Secrets 或本機私密環境，不能提交到 git。
+- `.clasp.json` 可能包含個人 Apps Script project ID，預設也不提交；請用 GitHub Secret `CLASP_JSON` 提供給 workflow。
+- 本專案的 workflow 只在 `master` push 時執行 `clasp push --force`，不會因外部 fork 的 pull request 自動部署。
+
 ## 隱私與資料安全
 
 - 這個工具會處理病患個資與醫療資訊，包含病歷號、姓名、TEL、Condition、Plan、心得、手術時間與輸出表單內容。
