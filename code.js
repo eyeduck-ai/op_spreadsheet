@@ -12,7 +12,7 @@
  * - 病歷號是同步 Calendar 的必要欄位；有日期但沒有病歷號時不會新增或更新事件。
  */
 const CONFIG = {
-  VERSION: '2026.05.08',
+  VERSION: '2026.05.09',
   CALENDAR_ID: 'YOUR_CALENDAR_ID_HERE', // fallback：優先使用 ScriptProperties 內的 Calendar ID
   SHEET_OP: 'OP',
   SHEET_OUT: '輸出表單',
@@ -46,6 +46,13 @@ const CONFIG = {
   }
 };
 
+const AUTO_EXPORT_UPCOMING_DAYS = 7;
+const AUTO_EXPORT_DAILY_HOUR = 6;
+const AUTO_EXPORT_DAILY_MINUTE = 0;
+const AUTO_EXPORT_EDIT_DELAY_MS = 5 * 60 * 1000;
+const AUTO_EXPORT_DAILY_HANDLER = 'exportUpcomingWeekData';
+const AUTO_EXPORT_PENDING_HANDLER = 'runPendingUpcomingWeekExport';
+
 const TIME_ERROR_NOTE_PREFIX = '系統時間檢查：';
 const CALENDAR_SYNC_NOTE_PREFIX = '系統日曆同步：';
 const CALENDAR_SYNC_TOKEN_PROPERTY_PREFIX = 'CALENDAR_SYNC_TOKEN_';
@@ -66,6 +73,19 @@ const CONDITIONAL_FORMAT_MARKERS = {
   PLAN_YELLOW_MAIN: 'SYSTEM_CF_PLAN_YELLOW_MAIN',
   PLAN_YELLOW_TAG: 'SYSTEM_CF_PLAN_YELLOW_TAG'
 };
+
+function deleteTriggersByHandler_(handlerFunctionName) {
+  let deletedCount = 0;
+
+  ScriptApp.getProjectTriggers()
+    .filter(trigger => trigger.getHandlerFunction() === handlerFunctionName)
+    .forEach(trigger => {
+      ScriptApp.deleteTrigger(trigger);
+      deletedCount++;
+    });
+
+  return deletedCount;
+}
 
 /**
  * 安裝 processRowChange 的 installable onEdit trigger。
@@ -362,6 +382,7 @@ function setupCalendarReverseSync() {
  * 第一次安裝建議只手動執行這個函式：
  * - 初始化 OP sheet 標題、格式、資料驗證與條件格式
  * - 安裝 Calendar 同步用 installable onEdit trigger
+ * - 安裝未來一周清單自動輸出 time-driven trigger
  * - 立即刷新自訂選單
  * - 批次同步既有列，讓 event title/description 等新邏輯套到既有日曆事件
  *
@@ -406,6 +427,10 @@ function setup() {
   const reverseSyncMessage = reverseSyncResult.ok
     ? `\n${reverseSyncResult.message}`
     : `\nCalendar 反向同步未啟用：${reverseSyncResult.message}`;
+  const autoExportResult = installAutoExportTriggers_(false);
+  const autoExportMessage = autoExportResult.ok
+    ? `\n${autoExportResult.message}`
+    : `\n自動輸出觸發器未啟用：${autoExportResult.message}`;
   onOpen();
 
   ui.alert(
@@ -415,6 +440,7 @@ function setup() {
       calendarIdPromptMessage +
       syncMessage +
       reverseSyncMessage +
+      autoExportMessage +
       initResult.mismatchMessage,
     ui.ButtonSet.OK
   );
@@ -428,6 +454,22 @@ function withCalendarSyncLock_(callback) {
 
   if (!lock.tryLock(10000)) {
     console.warn('無法取得日曆同步鎖，本次執行略過。');
+    return false;
+  }
+
+  try {
+    callback();
+    return true;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function withAutoExportLock_(callback) {
+  const lock = LockService.getDocumentLock() || LockService.getScriptLock();
+
+  if (!lock.tryLock(10000)) {
+    console.warn('無法取得自動輸出鎖，本次輸出略過。');
     return false;
   }
 
@@ -944,12 +986,14 @@ function onOpen() {
     .addItem('初始化表格格式', 'initializeSheet')
     .addItem('安裝自動同步觸發器', 'installProcessRowChangeTrigger')
     .addItem('安裝日曆反向同步觸發器', 'setupCalendarReverseSync')
+    .addItem('安裝自動輸出觸發器', 'installAutoExportTriggers')
     .addItem('清除指定欄位舊日曆事件', 'clearCalendarEventsFromSpecifiedColumn')
     .addSeparator()
     .addItem(`版本：${CONFIG.VERSION}`, 'showVersionInfo');
 
   ui.createMenu('手術排程系統')
     .addItem('輸出指令日期資料', 'exportDateData')
+    .addItem('立即輸出未來一周', 'exportUpcomingWeekDataFromMenu')
     .addItem('複製一列 (清空時間)', 'duplicateRow')
     .addItem('歸人整合 (同病歷號合併)', 'mergePatientRecords')
     .addItem('依照日期與時間排序', 'sortSheetByDateTime')
@@ -983,86 +1027,80 @@ function joinNonEmptyLines_(values) {
 /**
  * 1: 輸出指令日期資料
  */
-function exportDateData() {
-  return runMenuAction_('輸出指令日期資料', ui => {
-  const response = ui.prompt('輸出指定日期資料', '請輸入日期 (格式如: 2026/5/11):', ui.ButtonSet.OK_CANCEL);
+function formatExportDate_(date) {
+  return Utilities.formatDate(date, Session.getScriptTimeZone(), 'yyyy/MM/dd');
+}
 
-  if (response.getSelectedButton() !== ui.Button.OK) return;
-  const targetDateStr = response.getResponseText().trim();
-  const targetDateObj = new Date(targetDateStr);
+function parseExportDate_(value) {
+  const date = new Date(value);
+  return isNaN(date.getTime()) ? null : date;
+}
 
-  if (isNaN(targetDateObj.getTime())) {
-    ui.alert('錯誤', '日期格式不正確，請重新執行。', ui.ButtonSet.OK);
-    return;
+function buildSurgeryExportItemsFromRow_(row, cols) {
+  const conditionStr = String(getRowFieldValue_(row, cols, 'COND'));
+  let disease = conditionStr;
+  let surgery = '';
+
+  if (conditionStr.includes('s/p')) {
+    const parts = conditionStr.split('s/p');
+    disease = parts[0].trim();
+    surgery = parts.slice(1).join('s/p').trim();
   }
 
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const context = getOpSheetContext_();
-  const sheetOp = context.sheet;
-  let sheetOut = ss.getSheetByName(CONFIG.SHEET_OUT);
-  const cols = context.columns;
+  const surgeryParts = splitFirstLineAndRest_(surgery);
+  const surgeryMain = surgeryParts.firstLine;
+  const supplementalNote = joinNonEmptyLines_([
+    surgeryParts.rest,
+    getRowFieldValue_(row, cols, 'PLAN')
+  ]);
+  const patientRow = [
+    getRowFieldValue_(row, cols, 'CHART_NO'),
+    getRowFieldValue_(row, cols, 'NAME'),
+    getRowFieldValue_(row, cols, 'TEL'),
+    getRowFieldValue_(row, cols, 'TIME'),
+    disease,
+    surgeryMain,
+    supplementalNote
+  ];
+  const iolMatch = surgery.match(/IOL\(([^)]+)\)/i) || surgery.match(/MSICS\(([^)]+)\)/i);
+  let iolRow = null;
 
-  if (!sheetOut) {
-    sheetOut = ss.insertSheet(CONFIG.SHEET_OUT);
-  } else {
-    sheetOut.clear();
+  if (iolMatch) {
+    const iolDetails = iolMatch[1].trim().split(/\s+/);
+    iolRow = [
+      getRowFieldValue_(row, cols, 'NAME'),
+      iolDetails[0] || '',
+      iolDetails[1] || '',
+      iolDetails[2] || ''
+    ];
   }
 
-  const data = sheetOp.getRange(1, 1, sheetOp.getLastRow(), getTableLastColumn_(sheetOp, cols)).getValues();
-  const targetDateValue = Utilities.formatDate(targetDateObj, Session.getScriptTimeZone(), 'yyyy/MM/dd');
+  return {
+    iolRow,
+    patientRow
+  };
+}
 
-  let iolList = [];
-  let patientList = [];
+function buildSurgeryExportDataForDate_(data, cols, targetDateObj) {
+  const targetDateText = formatExportDate_(targetDateObj);
+  const iolList = [];
+  const patientList = [];
 
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
     const tagVal = String(getRowFieldValue_(row, cols, 'TAG')).trim();
     const dateVal = getRowFieldValue_(row, cols, 'DATE');
-    if (!dateVal) continue;
 
-    // 強化日期物件解析
+    if (!dateVal || tagVal !== 'OP') continue;
+
     const rowDateObj = new Date(dateVal);
     if (isNaN(rowDateObj.getTime())) continue;
-    const rowDateStr = Utilities.formatDate(rowDateObj, Session.getScriptTimeZone(), 'yyyy/MM/dd');
 
-    if (rowDateStr === targetDateValue && tagVal === 'OP') {
-      const conditionStr = String(getRowFieldValue_(row, cols, 'COND'));
+    if (formatExportDate_(rowDateObj) !== targetDateText) continue;
 
-      let disease = conditionStr;
-      let surgery = "";
-      if (conditionStr.includes("s/p")) {
-        const parts = conditionStr.split("s/p");
-        disease = parts[0].trim();
-        surgery = parts.slice(1).join("s/p").trim();
-      }
-
-      const surgeryParts = splitFirstLineAndRest_(surgery);
-      const surgeryMain = surgeryParts.firstLine;
-      const supplementalNote = joinNonEmptyLines_([
-        surgeryParts.rest,
-        getRowFieldValue_(row, cols, 'PLAN')
-      ]);
-      let brand = "", target = "", power = "";
-      const iolMatch = surgery.match(/IOL\(([^)]+)\)/i) || surgery.match(/MSICS\(([^)]+)\)/i);
-      if (iolMatch) {
-        // 強化：先 trim 再 split 避免多餘空白導致陣列錯位
-        const iolDetails = iolMatch[1].trim().split(/\s+/);
-        brand = iolDetails[0] || "";
-        target = iolDetails[1] || "";
-        power = iolDetails[2] || "";
-        iolList.push([getRowFieldValue_(row, cols, 'NAME'), brand, target, power]);
-      }
-
-      patientList.push([
-        getRowFieldValue_(row, cols, 'CHART_NO'),
-        getRowFieldValue_(row, cols, 'NAME'),
-        getRowFieldValue_(row, cols, 'TEL'),
-        getRowFieldValue_(row, cols, 'TIME'),
-        disease,
-        surgeryMain,
-        supplementalNote
-      ]);
-    }
+    const items = buildSurgeryExportItemsFromRow_(row, cols);
+    if (items.iolRow) iolList.push(items.iolRow);
+    patientList.push(items.patientRow);
   }
 
   iolList.sort((a, b) => {
@@ -1072,31 +1110,280 @@ function exportDateData() {
     return String(a[0] || '').localeCompare(String(b[0] || ''), 'zh-Hant');
   });
 
-  const iolStartRow = 1;
-  const iolStartCol = 1;
-  sheetOut.getRange(iolStartRow, iolStartCol).setValue(`[ ${targetDateStr} 水晶體清單 ]`).setFontWeight('bold');
-  if (iolList.length > 0) {
-    sheetOut.getRange(iolStartRow + 1, iolStartCol, 1, 4).setValues([["姓名", "品牌", "目標度數", "水晶體度數"]]).setBackground('#efefef');
-    sheetOut.getRange(iolStartRow + 2, iolStartCol, iolList.length, 4).setValues(iolList);
-  } else {
-    sheetOut.getRange(iolStartRow + 1, iolStartCol).setValue("本日無水晶體資料");
+  return {
+    date: new Date(targetDateObj.getTime()),
+    dateText: targetDateText,
+    iolList,
+    patientList
+  };
+}
+
+function buildUpcomingExportDates_(startDateObj, dayCount) {
+  const baseDate = new Date(startDateObj.getTime());
+  const dates = [];
+
+  baseDate.setHours(0, 0, 0, 0);
+
+  for (let i = 0; i < dayCount; i++) {
+    dates.push(addDays_(baseDate, i));
   }
 
-  const patientStartRow = 1;
+  return dates;
+}
+
+function getSurgeryExportSourceData_() {
+  const context = getOpSheetContext_();
+  const sheetOp = context.sheet;
+  const cols = context.columns;
+  const lastRow = sheetOp.getLastRow();
+  const data = lastRow > 0
+    ? sheetOp.getRange(1, 1, lastRow, getTableLastColumn_(sheetOp, cols)).getValues()
+    : [];
+
+  return {
+    columns: cols,
+    data
+  };
+}
+
+function getOrCreateOutputSheet_(spreadsheet) {
+  return spreadsheet.getSheetByName(CONFIG.SHEET_OUT) || spreadsheet.insertSheet(CONFIG.SHEET_OUT);
+}
+
+function writeSurgeryExportSection_(sheetOut, startRow, exportData) {
+  const iolStartCol = 1;
   const patientStartCol = 6;
-  sheetOut.getRange(patientStartRow, patientStartCol).setValue(`[ ${targetDateStr} 病人清單 ]`).setFontWeight('bold');
-  if (patientList.length > 0) {
-    sheetOut.getRange(patientStartRow + 1, patientStartCol, 1, 7)
-      .setValues([["病歷號", "姓名", "TEL", "時間", "疾病", "術式", "補充說明"]])
+
+  sheetOut.getRange(startRow, iolStartCol)
+    .setValue(`[ ${exportData.dateText} 水晶體清單 ]`)
+    .setFontWeight('bold');
+
+  if (exportData.iolList.length > 0) {
+    sheetOut.getRange(startRow + 1, iolStartCol, 1, 4)
+      .setValues([['姓名', '品牌', '目標度數', '水晶體度數']])
       .setBackground('#efefef');
-    sheetOut.getRange(patientStartRow + 2, patientStartCol, patientList.length, 7).setValues(patientList);
+    sheetOut.getRange(startRow + 2, iolStartCol, exportData.iolList.length, 4)
+      .setValues(exportData.iolList);
   } else {
-    sheetOut.getRange(patientStartRow + 1, patientStartCol).setValue("本日無病人資料");
+    sheetOut.getRange(startRow + 1, iolStartCol).setValue('本日無水晶體資料');
   }
+
+  sheetOut.getRange(startRow, patientStartCol)
+    .setValue(`[ ${exportData.dateText} 病人清單 ]`)
+    .setFontWeight('bold');
+
+  if (exportData.patientList.length > 0) {
+    sheetOut.getRange(startRow + 1, patientStartCol, 1, 7)
+      .setValues([['病歷號', '姓名', 'TEL', '時間', '疾病', '術式', '補充說明']])
+      .setBackground('#efefef');
+    sheetOut.getRange(startRow + 2, patientStartCol, exportData.patientList.length, 7)
+      .setValues(exportData.patientList);
+  } else {
+    sheetOut.getRange(startRow + 1, patientStartCol).setValue('本日無病人資料');
+  }
+
+  const iolBlockHeight = exportData.iolList.length > 0 ? exportData.iolList.length + 2 : 2;
+  const patientBlockHeight = exportData.patientList.length > 0 ? exportData.patientList.length + 2 : 2;
+
+  return startRow + Math.max(iolBlockHeight, patientBlockHeight) + 2;
+}
+
+function writeSingleDateExport_(targetDateObj) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const source = getSurgeryExportSourceData_();
+  const sheetOut = getOrCreateOutputSheet_(ss);
+  const exportData = buildSurgeryExportDataForDate_(source.data, source.columns, targetDateObj);
+
+  sheetOut.clear();
+  writeSurgeryExportSection_(sheetOut, 1, exportData);
+  sheetOut.autoResizeColumns(1, 12);
+
+  return {
+    ok: true,
+    startDateText: exportData.dateText,
+    endDateText: exportData.dateText,
+    dayCount: 1,
+    exports: [exportData]
+  };
+}
+
+function writeUpcomingWeekExport_(startDateObj) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const source = getSurgeryExportSourceData_();
+  const sheetOut = getOrCreateOutputSheet_(ss);
+  const targetDates = buildUpcomingExportDates_(startDateObj, AUTO_EXPORT_UPCOMING_DAYS);
+  const exports = [];
+  let nextRow = 1;
+
+  sheetOut.clear();
+
+  targetDates.forEach(date => {
+    const exportData = buildSurgeryExportDataForDate_(source.data, source.columns, date);
+    exports.push(exportData);
+    nextRow = writeSurgeryExportSection_(sheetOut, nextRow, exportData);
+  });
 
   sheetOut.autoResizeColumns(1, 12);
-  ui.alert('完成', `已成功將 ${targetDateStr} 的資料分析匯出至「輸出表單」。`, ui.ButtonSet.OK);
+
+  return {
+    ok: true,
+    startDateText: exports.length ? exports[0].dateText : '',
+    endDateText: exports.length ? exports[exports.length - 1].dateText : '',
+    dayCount: exports.length,
+    exports
+  };
+}
+
+function exportSingleDateData_(targetDateObj) {
+  let result = null;
+  const executed = withAutoExportLock_(() => {
+    result = writeSingleDateExport_(targetDateObj);
   });
+
+  if (!executed) {
+    throw new Error('目前有另一個輸出作業正在執行，本次輸出未執行。');
+  }
+
+  return result;
+}
+
+function exportUpcomingWeekData_() {
+  let result = null;
+  const executed = withAutoExportLock_(() => {
+    result = writeUpcomingWeekExport_(new Date());
+  });
+
+  if (!executed) {
+    return {
+      ok: false,
+      status: 'locked',
+      message: '目前有另一個輸出作業正在執行，本次自動輸出未執行。'
+    };
+  }
+
+  return result;
+}
+
+function exportDateData() {
+  return runMenuAction_('輸出指令日期資料', ui => {
+    const response = ui.prompt('輸出指定日期資料', '請輸入日期 (格式如: 2026/5/11):', ui.ButtonSet.OK_CANCEL);
+
+    if (response.getSelectedButton() !== ui.Button.OK) return null;
+
+    const targetDateObj = parseExportDate_(response.getResponseText().trim());
+    if (!targetDateObj) {
+      ui.alert('錯誤', '日期格式不正確，請重新執行。', ui.ButtonSet.OK);
+      return null;
+    }
+
+    const result = exportSingleDateData_(targetDateObj);
+    ui.alert('完成', `已成功將 ${result.startDateText} 的資料分析匯出至「輸出表單」。`, ui.ButtonSet.OK);
+    return result;
+  });
+}
+
+function exportUpcomingWeekData() {
+  return exportUpcomingWeekData_();
+}
+
+function exportUpcomingWeekDataFromMenu() {
+  return runMenuAction_('立即輸出未來一周', ui => {
+    const result = exportUpcomingWeekData_();
+
+    if (!result.ok) {
+      throw new Error(result.message);
+    }
+
+    ui.alert(
+      '完成',
+      `已成功將 ${result.startDateText} 至 ${result.endDateText} 的資料匯出至「輸出表單」。`,
+      ui.ButtonSet.OK
+    );
+
+    return result;
+  });
+}
+
+function deletePendingAutoExportTriggers_() {
+  return deleteTriggersByHandler_(AUTO_EXPORT_PENDING_HANDLER);
+}
+
+function scheduleUpcomingWeekExport_() {
+  try {
+    deletePendingAutoExportTriggers_();
+    ScriptApp.newTrigger(AUTO_EXPORT_PENDING_HANDLER)
+      .timeBased()
+      .after(AUTO_EXPORT_EDIT_DELAY_MS)
+      .create();
+
+    return {
+      ok: true,
+      message: '已排程 5 分鐘後更新未來一周輸出表單。'
+    };
+  } catch (err) {
+    const message = `排程未來一周自動輸出失敗：${err.message || err}`;
+    console.warn(message);
+
+    return {
+      ok: false,
+      message
+    };
+  }
+}
+
+function runPendingUpcomingWeekExport() {
+  deletePendingAutoExportTriggers_();
+  const result = exportUpcomingWeekData_();
+
+  if (result && result.status === 'locked') {
+    scheduleUpcomingWeekExport_();
+  }
+
+  return result;
+}
+
+function installAutoExportTriggers_(showAlert) {
+  let deletedCount = 0;
+
+  try {
+    deletedCount += deleteTriggersByHandler_(AUTO_EXPORT_DAILY_HANDLER);
+    deletedCount += deletePendingAutoExportTriggers_();
+
+    ScriptApp.newTrigger(AUTO_EXPORT_DAILY_HANDLER)
+      .timeBased()
+      .atHour(AUTO_EXPORT_DAILY_HOUR)
+      .nearMinute(AUTO_EXPORT_DAILY_MINUTE)
+      .everyDays(1)
+      .create();
+
+    const result = {
+      ok: true,
+      deletedCount,
+      message: '已安裝未來一周自動輸出觸發器：每日約 06:00 執行，修改後會延遲 5 分鐘更新。'
+    };
+
+    if (showAlert) {
+      SpreadsheetApp.getUi().alert(result.message);
+    }
+
+    return result;
+  } catch (err) {
+    const result = {
+      ok: false,
+      deletedCount,
+      message: err.message || String(err)
+    };
+
+    if (showAlert) {
+      SpreadsheetApp.getUi().alert(`自動輸出觸發器安裝失敗：${result.message}`);
+    }
+
+    return result;
+  }
+}
+
+function installAutoExportTriggers() {
+  return runMenuAction_('安裝自動輸出觸發器', () => installAutoExportTriggers_(true));
 }
 
 /**
@@ -2191,13 +2478,18 @@ function syncCalendarChangesToSheet() {
 
 function processCalendarChange(e) {
   const calendarId = e && e.calendarId ? e.calendarId : getConfiguredCalendarId_();
+  let syncResult = null;
 
-  withCalendarSyncLock_(() => {
-    const result = syncCalendarChangesToSheet_(calendarId);
-    if (!result.ok) {
-      console.warn(result.message);
+  const executed = withCalendarSyncLock_(() => {
+    syncResult = syncCalendarChangesToSheet_(calendarId);
+    if (!syncResult.ok) {
+      console.warn(syncResult.message);
     }
   });
+
+  if (executed && syncResult && syncResult.ok && syncResult.processedCount > 0) {
+    scheduleUpcomingWeekExport_();
+  }
 }
 
 /**
@@ -2212,6 +2504,7 @@ function processRowChange(e) {
 
   const sheet = e.range.getSheet();
   if (sheet.getName() !== CONFIG.SHEET_OP) return;
+  let shouldScheduleExport = false;
 
   withCalendarSyncLock_(() => {
     const startRow = e.range.getRow();
@@ -2239,6 +2532,8 @@ function processRowChange(e) {
       const currentRow = startRow + i;
       if (currentRow < 2) continue;
 
+      shouldScheduleExport = true;
+
       // 處理手打時間轉換
       // 僅在「單一時間儲存格」編輯時自動改寫顯示值，避免整批貼上時改壞範圍。
       if (numRows === 1 && numCols === 1 && startCol === cols.TIME) {
@@ -2260,6 +2555,10 @@ function processRowChange(e) {
       syncToCalendar(sheet, currentRow, cols);
     }
   });
+
+  if (shouldScheduleExport) {
+    scheduleUpcomingWeekExport_();
+  }
 }
 
 function isCalendarEventNotFoundError_(err) {

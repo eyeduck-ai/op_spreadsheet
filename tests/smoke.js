@@ -5,8 +5,25 @@ const vm = require('vm');
 
 const codePath = path.join(__dirname, '..', 'code.js');
 const code = fs.readFileSync(codePath, 'utf8');
+
+function pad2(value) {
+  return String(value).padStart(2, '0');
+}
+
 const context = {
-  console
+  console,
+  Session: {
+    getScriptTimeZone: () => 'Asia/Taipei'
+  },
+  Utilities: {
+    formatDate: date => {
+      return `${date.getFullYear()}/${pad2(date.getMonth() + 1)}/${pad2(date.getDate())}`;
+    },
+    formatString: (format, ...values) => {
+      let index = 0;
+      return format.replace(/%02d/g, () => pad2(values[index++]));
+    }
+  }
 };
 
 vm.createContext(context);
@@ -24,6 +41,10 @@ function makeHeaderSheet(headers) {
 
 function rowFromObject(headers, values) {
   return headers.map(header => Object.prototype.hasOwnProperty.call(values, header) ? values[header] : '');
+}
+
+function toPlain(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 function testHeaderMappingWithCustomColumn() {
@@ -101,10 +122,82 @@ function testConditionalFormulaBuilding() {
   assert.strictEqual(gaExpression, 'ISNUMBER(SEARCH("GA", $H2))');
 }
 
+function testSurgeryExportDataForDate() {
+  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', '日曆eventID'];
+  const cols = context.buildFieldColumnInfo_(makeHeaderSheet(headers)).columns;
+  const targetDate = new Date(2026, 4, 9);
+  const data = [
+    headers,
+    rowFromObject(headers, {
+      '病歷號': '001',
+      '姓名': '王小明',
+      TEL: '0911',
+      Tag: 'OP',
+      Condition: 'Cataract s/p PE/IOL(B -0.5 20.0)\n術後注意',
+      '日期': new Date(2026, 4, 9),
+      '時間': '08:30',
+      Plan: '帶藥'
+    }),
+    rowFromObject(headers, {
+      '病歷號': '002',
+      '姓名': '陳小美',
+      TEL: '0922',
+      Tag: 'OP',
+      Condition: 'Cataract s/p MSICS(A -1.0 21.5)',
+      '日期': new Date(2026, 4, 9),
+      '時間': '09:30',
+      Plan: 'APPLY'
+    }),
+    rowFromObject(headers, {
+      '病歷號': '003',
+      '姓名': '非手術',
+      Tag: 'FU',
+      Condition: 'Cataract s/p PE/IOL(C -0.5 22.0)',
+      '日期': new Date(2026, 4, 9)
+    }),
+    rowFromObject(headers, {
+      '病歷號': '004',
+      '姓名': '隔日手術',
+      Tag: 'OP',
+      Condition: 'Cataract s/p PE/IOL(D -0.5 23.0)',
+      '日期': new Date(2026, 4, 10)
+    })
+  ];
+
+  const result = context.buildSurgeryExportDataForDate_(data, cols, targetDate);
+
+  assert.strictEqual(result.dateText, '2026/05/09');
+  assert.deepStrictEqual(toPlain(result.iolList), [
+    ['陳小美', 'A', '-1.0', '21.5'],
+    ['王小明', 'B', '-0.5', '20.0']
+  ]);
+  assert.deepStrictEqual(toPlain(result.patientList), [
+    ['001', '王小明', '0911', '08:30', 'Cataract', 'PE/IOL(B -0.5 20.0)', '術後注意\n帶藥'],
+    ['002', '陳小美', '0922', '09:30', 'Cataract', 'MSICS(A -1.0 21.5)', 'APPLY']
+  ]);
+}
+
+function testUpcomingExportDatesIncludeSevenDays() {
+  const dates = context.buildUpcomingExportDates_(new Date(2026, 4, 9, 15, 30), 7)
+    .map(date => context.formatExportDate_(date));
+
+  assert.deepStrictEqual(toPlain(dates), [
+    '2026/05/09',
+    '2026/05/10',
+    '2026/05/11',
+    '2026/05/12',
+    '2026/05/13',
+    '2026/05/14',
+    '2026/05/15'
+  ]);
+}
+
 testHeaderMappingWithCustomColumn();
 testTimeNoteRoundTrip();
 testMergeBlocksTrackedAbsorbedRows();
 testMergeCombinesSafeTextFields();
 testConditionalFormulaBuilding();
+testSurgeryExportDataForDate();
+testUpcomingExportDatesIncludeSevenDays();
 
 console.log('Smoke tests passed');
