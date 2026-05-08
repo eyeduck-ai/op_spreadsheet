@@ -980,23 +980,23 @@ function parseCalendarDescription_(description) {
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   const maintenanceMenu = ui.createMenu('維護工具')
-    .addItem('一鍵安裝', 'setup')
+    .addItem('安裝', 'setup')
     .addSeparator()
-    .addItem('設定 Calendar ID', 'promptAndSaveCalendarId')
-    .addItem('初始化表格格式', 'initializeSheet')
-    .addItem('安裝自動同步觸發器', 'installProcessRowChangeTrigger')
-    .addItem('安裝日曆反向同步觸發器', 'setupCalendarReverseSync')
-    .addItem('安裝自動輸出觸發器', 'installAutoExportTriggers')
-    .addItem('清除指定欄位舊日曆事件', 'clearCalendarEventsFromSpecifiedColumn')
+    .addItem('設定日曆', 'promptAndSaveCalendarId')
+    .addItem('初始化表格', 'initializeSheet')
+    .addItem('安裝同步', 'installProcessRowChangeTrigger')
+    .addItem('安裝反向同步', 'setupCalendarReverseSync')
+    .addItem('安裝自動輸出', 'installAutoExportTriggers')
+    .addItem('清除舊事件', 'clearCalendarEventsFromSpecifiedColumn')
     .addSeparator()
     .addItem(`版本：${CONFIG.VERSION}`, 'showVersionInfo');
 
   ui.createMenu('手術排程系統')
-    .addItem('輸出指令日期資料', 'exportDateData')
-    .addItem('立即輸出未來一周', 'exportUpcomingWeekDataFromMenu')
-    .addItem('複製一列 (清空時間)', 'duplicateRow')
-    .addItem('歸人整合 (同病歷號合併)', 'mergePatientRecords')
-    .addItem('依照日期與時間排序', 'sortSheetByDateTime')
+    .addItem('輸出日期', 'exportDateData')
+    .addItem('輸出一週', 'exportUpcomingWeekDataFromMenu')
+    .addItem('複製列', 'duplicateRow')
+    .addItem('歸人整合', 'mergePatientRecords')
+    .addItem('日期排序', 'sortSheetByDateTime')
     .addSeparator()
     .addSubMenu(maintenanceMenu)
     .addToUi();
@@ -1831,7 +1831,7 @@ function buildTableRangesExcludingColumns_(sheet, startRow, numRows, lastColumn,
  * 套用系統條件格式，並保留使用者自己新增的其他條件格式。
  *
  * Plan 命中 APPLY 時淡綠優先；命中問/補/通知時淡黃。
- * 時間欄命中 GA 時只讓時間格變紅，避免和整列底色互相覆蓋。
+ * Plan 底色不套到 Tag 欄；時間欄命中 GA 時只讓時間格變紅，避免和整列底色互相覆蓋。
  */
 function applyConditionalFormatting_(sheet, columns) {
   const dataRowCount = sheet.getMaxRows() - 1;
@@ -1846,12 +1846,9 @@ function applyConditionalFormatting_(sheet, columns) {
   const applyExpression = buildKeywordExpression_(columns.PLAN, CONFIG.PLAN_GREEN_KEYWORDS);
   const yellowExpression = buildKeywordExpression_(columns.PLAN, CONFIG.PLAN_YELLOW_KEYWORDS);
   const timeGaExpression = buildKeywordExpression_(columns.TIME, CONFIG.TIME_GA_KEYWORDS);
-  const hasPlanColorExpression = applyExpression && yellowExpression
-    ? `OR(${applyExpression}, ${yellowExpression})`
-    : (applyExpression || yellowExpression || 'FALSE');
 
   systemRules.push(SpreadsheetApp.newConditionalFormatRule()
-    .whenFormulaSatisfied(`=AND($${tagColLetter}2="OP", NOT(${hasPlanColorExpression}), N(${toSheetFormulaString_(CONDITIONAL_FORMAT_MARKERS.OP_RED)})=0)`)
+    .whenFormulaSatisfied(`=AND($${tagColLetter}2="OP", N(${toSheetFormulaString_(CONDITIONAL_FORMAT_MARKERS.OP_RED)})=0)`)
     .setBackground('#F4CCCC')
     .setFontColor('#CC0000')
     .setRanges([tagRange])
@@ -1867,7 +1864,10 @@ function applyConditionalFormatting_(sheet, columns) {
     );
   }
 
-  const nonTimeTableRanges = buildTableRangesExcludingColumns_(sheet, 2, dataRowCount, lastColumn, [columns.TIME]);
+  const planColorRanges = buildTableRangesExcludingColumns_(sheet, 2, dataRowCount, lastColumn, [
+    columns.TAG,
+    columns.TIME
+  ]);
 
   if (applyExpression) {
     const greenFormula = `=AND(${applyExpression}, N(${toSheetFormulaString_(CONDITIONAL_FORMAT_MARKERS.PLAN_GREEN)})=0)`;
@@ -1876,7 +1876,7 @@ function applyConditionalFormatting_(sheet, columns) {
     systemRules.push(SpreadsheetApp.newConditionalFormatRule()
       .whenFormulaSatisfied(greenFormula)
       .setBackground('#D9EAD3')
-      .setRanges(nonTimeTableRanges)
+      .setRanges(planColorRanges)
       .build()
     );
 
@@ -1896,7 +1896,7 @@ function applyConditionalFormatting_(sheet, columns) {
     systemRules.push(SpreadsheetApp.newConditionalFormatRule()
       .whenFormulaSatisfied(yellowFormula)
       .setBackground('#FFF2CC')
-      .setRanges(nonTimeTableRanges)
+      .setRanges(planColorRanges)
       .build()
     );
 

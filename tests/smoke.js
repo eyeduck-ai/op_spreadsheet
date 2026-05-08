@@ -122,6 +122,99 @@ function testConditionalFormulaBuilding() {
   assert.strictEqual(gaExpression, 'ISNUMBER(SEARCH("GA", $H2))');
 }
 
+function makeConditionalFormatSheet(headers) {
+  let rules = [];
+
+  return {
+    getMaxRows: () => 20,
+    getMaxColumns: () => headers.length,
+    getLastRow: () => 5,
+    getLastColumn: () => headers.length,
+    getConditionalFormatRules: () => [],
+    setConditionalFormatRules: nextRules => {
+      rules = nextRules;
+    },
+    getCapturedRules: () => rules,
+    getRange: (row, column, numRows, numColumns) => ({
+      row,
+      column,
+      numRows,
+      numColumns,
+      getRow: () => row,
+      getColumn: () => column,
+      getNumRows: () => numRows,
+      getNumColumns: () => numColumns,
+      getValues: () => row === 1 ? [headers.slice(column - 1, column - 1 + numColumns)] : []
+    })
+  };
+}
+
+function installConditionalFormatMock() {
+  context.SpreadsheetApp = {
+    BooleanCriteria: {
+      CUSTOM_FORMULA: 'CUSTOM_FORMULA',
+      TEXT_EQUAL_TO: 'TEXT_EQUAL_TO'
+    },
+    newConditionalFormatRule: () => {
+      const rule = {
+        formula: '',
+        background: '',
+        fontColor: '',
+        ranges: []
+      };
+      return {
+        whenFormulaSatisfied(formula) {
+          rule.formula = formula;
+          return this;
+        },
+        setBackground(background) {
+          rule.background = background;
+          return this;
+        },
+        setFontColor(fontColor) {
+          rule.fontColor = fontColor;
+          return this;
+        },
+        setRanges(ranges) {
+          rule.ranges = ranges;
+          return this;
+        },
+        build() {
+          return rule;
+        }
+      };
+    }
+  };
+}
+
+function testConditionalFormattingKeepsTagIndependent() {
+  installConditionalFormatMock();
+  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', '日曆eventID'];
+  const sheet = makeConditionalFormatSheet(headers);
+  const columns = context.buildFieldColumnInfo_(makeHeaderSheet(headers)).columns;
+
+  context.applyConditionalFormatting_(sheet, columns);
+
+  const rules = sheet.getCapturedRules();
+  const opRule = rules.find(rule => rule.formula.includes('SYSTEM_CF_OP_RED'));
+  const greenRule = rules.find(rule => rule.formula.includes('SYSTEM_CF_PLAN_GREEN"'));
+  const yellowRule = rules.find(rule => rule.formula.includes('SYSTEM_CF_PLAN_YELLOW"'));
+
+  assert.ok(opRule);
+  assert.ok(!opRule.formula.includes('NOT('));
+  assert.deepStrictEqual(Array.from(opRule.ranges.map(range => range.column)), [columns.TAG]);
+
+  [greenRule, yellowRule].forEach(rule => {
+    assert.ok(rule);
+    rule.ranges.forEach(range => {
+      assert.notStrictEqual(range.column, columns.TAG);
+      assert.notStrictEqual(range.column, columns.TIME);
+      assert.ok(range.column + range.numColumns - 1 < columns.TAG || range.column > columns.TAG);
+      assert.ok(range.column + range.numColumns - 1 < columns.TIME || range.column > columns.TIME);
+    });
+  });
+}
+
 function testSurgeryExportDataForDate() {
   const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', '日曆eventID'];
   const cols = context.buildFieldColumnInfo_(makeHeaderSheet(headers)).columns;
@@ -197,6 +290,7 @@ testTimeNoteRoundTrip();
 testMergeBlocksTrackedAbsorbedRows();
 testMergeCombinesSafeTextFields();
 testConditionalFormulaBuilding();
+testConditionalFormattingKeepsTagIndependent();
 testSurgeryExportDataForDate();
 testUpcomingExportDatesIncludeSevenDays();
 
