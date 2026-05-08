@@ -11,44 +11,55 @@
    - 或將 `appsscript.json` 的內容套用到 Apps Script manifest。
 4. 在 Apps Script 函式選單選擇 `setup`，執行一次並完成授權；若尚未設定 Calendar ID，系統會提示輸入。
 5. 回到試算表並重新整理頁面，應會看到「手術排程系統」選單。
-6. 若之後需要更換日曆，選擇「手術排程系統」→「進階/維護工具」→「設定 Calendar ID」；系統會存到 Script Properties 並重建雙向同步綁定。
+6. 若之後需要更換日曆，選擇「手術排程系統」→「維護工具」→「設定 Calendar ID」；系統會存到 Script Properties 並重建雙向同步綁定。
 
 ## 日常使用
 
-- `進階/維護工具` 子選單底部會顯示目前部署版本，例如 `版本：2026.05.06`。
-- `一鍵安裝/初始化`：重新初始化表格格式、批次同步既有日曆事件，並重裝 Sheet/Calendar 觸發器。
+- `維護工具` 子選單底部會顯示目前部署版本，例如 `版本：2026.05.08`。
+- `維護工具` → `一鍵安裝`：重新初始化表格格式、批次同步既有日曆事件，並重裝 Sheet/Calendar 觸發器。
 - `輸出指令日期資料`：輸出指定日期的 OP 病人與 IOL 清單；水晶體清單與病人清單會橫向並排。
 - `複製一列 (清空時間)`：複製目前列，並清空日期、時間、eventID。
-- `歸人整合 (同病歷號合併)`：合併非 OP 的同病歷號資料。
+- `複製一列 (清空時間)` 只能在 `OP` 工作表執行，避免誤改輸出表單或其他工作表。
+- `歸人整合 (同病歷號合併)`：合併非 OP 的同病歷號資料；若將被合併移除的列含日期、時間或 eventID，會中止並提示列號。
 - `依照日期與時間排序`：依日期與時間排序 OP sheet。
-- `進階/維護工具` 子選單：
+- `維護工具` 子選單：
+  - `一鍵安裝`：執行完整初始化、觸發器安裝與既有列批次同步。
   - `設定 Calendar ID`：輸入並儲存手術日曆 ID 到 Apps Script 的 Script Properties；儲存後會重建 Sheet → Calendar 與 Calendar → Sheet 綁定，但不會自動批次同步既有列。
   - `初始化表格格式`：只重跑格式、驗證、條件格式與時間正規化。
   - `安裝自動同步觸發器`：只重裝 Sheet → Calendar 的 onEdit trigger。
   - `安裝日曆反向同步觸發器`：建立 Calendar syncToken baseline，並安裝 Calendar → Sheet trigger。
   - `清除指定欄位舊日曆事件`：輸入 Spreadsheet URL/ID、工作表名稱與日曆 ID 欄位，刪除對應日曆事件；成功後只清空該 ID 儲存格。
-  - `版本：2026.05.06`：顯示目前部署版本。
+  - `版本：2026.05.08`：顯示目前部署版本。
 
 ## 注意事項
 
 - Sheet → Calendar 自動同步需要 installable onEdit trigger；第一次請執行 `setup()`。
 - Sheet → Calendar 與 Calendar → Sheet 都需要 Calendar Advanced Service；若未啟用，`setup()` 會略過需要 Calendar API 的同步並顯示提醒。
 - Calendar ID 優先讀取 Script Properties 內的 `CALENDAR_ID`；`CONFIG.CALENDAR_ID` 只保留為舊版 fallback。
-- 更換 Calendar ID 只會重建雙向同步綁定，不會自動把既有列批次同步到新日曆；若需要同步既有資料，請再執行「一鍵安裝/初始化」。
+- 更換 Calendar ID 只會重建雙向同步綁定，不會自動把既有列批次同步到新日曆；若需要同步既有資料，請再執行「一鍵安裝」。
 - 更新 `code.js` 後，請再執行一次 `setup()`，讓既有 Calendar event 套用新的標題與描述邏輯。
-- J 欄 `日曆eventID` 是系統欄位，會自動隱藏；現在只存 Google Calendar API `event.id`。
+- 系統依第 1 列欄位名稱辨識資料欄；可以在資料表中間新增自訂欄位，但必要欄名需保留且避免重複。
+- `日曆eventID` 是系統欄位，初始化時會依實際欄位位置自動隱藏；現在只存 Google Calendar API `event.id`。
+- Plan 欄包含 `問`、`補`、`通知` 時資料列會套淡黃色；包含 `APPLY` 時套淡綠色且優先於淡黃色。
+- 時間欄包含 `GA` 時，該時間儲存格會套紅底，Calendar 仍會以全天事件處理並把 `GA` 放入描述備註。
 - 日曆事件標題格式為 `病歷號 | 姓名 | Condition`；分隔符 `|` 前後空白不影響解析，例如 `123|王小明|Cataract` 也可辨識，輸入全形 `｜` 也會自動視為分隔符。
 - 反向同步仍會嘗試辨識舊標題格式 `病歷號 姓名 - Condition`，方便逐步轉換。
 - description 會包含 TEL 與 Plan，例如 `TEL: 09xxxxxxxx`、`Plan: PE/IOL OD`。
 - 有日期但沒有病歷號的列不會同步日曆，系統會在病歷號欄加 note 提醒。
 - 時間欄空白或填入 `GA` 這類非時間備註時，會建立全天事件；`2460`、`25:00` 這類無效時間仍會被擋下。
+- Calendar 反向同步遇到 description 內的 `Time note: GA` 時，會把 `GA` 保留回時間欄。
 - 清空日期時，如果該列已有 eventID，系統會刪除對應 Calendar event 並清空 eventID。
 - 日曆事件被刪除時，反向同步會清空日期、時間與 eventID，並在「心得」欄加 note 標記「日曆已刪除」。
-- 從雙欄版本升級時，初始化會移除舊系統欄 K 欄 `日曆apiEventID`。
+- 從雙欄版本升級時，初始化會依欄名辨識舊系統欄 `日曆apiEventID`，必要時將值補回 `日曆eventID` 後移除舊欄。
 - 清除舊日曆事件工具從指定欄位第 2 列開始處理；刪除成功或事件已不存在時，只清空該 ID 儲存格，不會更動病歷號、姓名、日期、時間、Plan、心得等同列資料。
 - 輸出表單中，病人清單的「術式」只保留換行前第一段；換行後文字會和原 Plan 欄完整內容合併到「補充說明」欄。
 - 水晶體清單只列出成功解析到 `IOL(...)` 或 `MSICS(...)` 的病人，並依品牌排序。
 - 若想使用 Google Sheets 圖形按鈕，可將圖形指定給 `setup` 或其他公開函式。
+
+## 本地檢查
+
+- 語法檢查：`node --check code.js`
+- Smoke tests：`node tests/smoke.js`
 
 ## Fork 與自動部署
 

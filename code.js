@@ -4,37 +4,40 @@
  * 首次安裝流程：
  * 1. 將本檔貼到試算表綁定的 Apps Script 專案。
  * 2. 手動執行 setup() 一次，完成授權、表格初始化與 trigger 安裝。
- * 3. 若 setup 尚未提示設定，回到試算表後可用「進階/維護工具」的「設定 Calendar ID」儲存手術日曆 ID。
+ * 3. 若 setup 尚未提示設定，回到試算表後可用「維護工具」的「設定 Calendar ID」儲存手術日曆 ID。
  *
  * 重要假設：
  * - 主要資料表名稱為 CONFIG.SHEET_OP，預設是「OP」。
- * - A:J 是系統管理欄位，欄位順序由 CONFIG.COLS 固定。
+ * - 系統欄位由第 1 列欄位名稱辨識，欄位順序可以調整或插入自訂欄位。
  * - 病歷號是同步 Calendar 的必要欄位；有日期但沒有病歷號時不會新增或更新事件。
  */
 const CONFIG = {
-  VERSION: '2026.05.06',
+  VERSION: '2026.05.08',
   CALENDAR_ID: 'YOUR_CALENDAR_ID_HERE', // fallback：優先使用 ScriptProperties 內的 Calendar ID
   SHEET_OP: 'OP',
   SHEET_OUT: '輸出表單',
-  COLS: {
-    CHART_NO: 1, // A欄: 病歷號
-    NAME: 2,     // B欄: 姓名
-    TEL: 3,      // C欄: TEL
-    TAG: 4,      // D欄: Tag
-    COND: 5,     // E欄: Condition
-    DATE: 6,     // F欄: 日期
-    TIME: 7,     // G欄: 時間
-    PLAN: 8,     // H欄: Plan
-    MEMO: 9,     // I欄: 心得
-    EVENT_ID: 10 // J欄: 隱藏的 Calendar API event ID
+  FIELD_KEYS: ['CHART_NO', 'NAME', 'TEL', 'TAG', 'COND', 'DATE', 'TIME', 'PLAN', 'MEMO', 'EVENT_ID'],
+  FIELD_HEADERS: {
+    CHART_NO: '病歷號',
+    NAME: '姓名',
+    TEL: 'TEL',
+    TAG: 'Tag',
+    COND: 'Condition',
+    DATE: '日期',
+    TIME: '時間',
+    PLAN: 'Plan',
+    MEMO: '心得',
+    EVENT_ID: '日曆eventID'
   },
 
   HEADERS: ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', '日曆eventID'],
   TAG_OPTIONS: ['CATA', 'Eyelid', 'Retina', 'OP', 'FU', 'Suture IOL', 'Complication'],
 
   // 條件格式化關鍵字：
-  // 只要 Plan 欄包含以下任一字彙，就會套用條件格式。
-  CONDITIONAL_FORMAT_KEYWORDS: ['通知', 'APPLY'],
+  // Plan 欄包含黃色關鍵字時套淡黃；包含綠色關鍵字時套淡綠。
+  PLAN_YELLOW_KEYWORDS: ['問', '補', '通知'],
+  PLAN_GREEN_KEYWORDS: ['APPLY'],
+  TIME_GA_KEYWORDS: ['GA'],
 
   COLORS: {
     NO_TIME: '5',
@@ -55,6 +58,11 @@ const LEGACY_API_EVENT_ID_HEADER = '日曆apiEventID';
 // initializeSheet() 重新執行時會用這些 marker 辨識並替換系統規則，同時保留使用者自訂規則。
 const CONDITIONAL_FORMAT_MARKERS = {
   OP_RED: 'SYSTEM_CF_OP_RED',
+  PLAN_YELLOW: 'SYSTEM_CF_PLAN_YELLOW',
+  PLAN_YELLOW_TIME: 'SYSTEM_CF_PLAN_YELLOW_TIME',
+  PLAN_GREEN: 'SYSTEM_CF_PLAN_GREEN',
+  PLAN_GREEN_TIME: 'SYSTEM_CF_PLAN_GREEN_TIME',
+  TIME_GA: 'SYSTEM_CF_TIME_GA',
   PLAN_YELLOW_MAIN: 'SYSTEM_CF_PLAN_YELLOW_MAIN',
   PLAN_YELLOW_TAG: 'SYSTEM_CF_PLAN_YELLOW_TAG'
 };
@@ -201,7 +209,7 @@ function promptAndSaveCalendarId() {
     `${saveResult.message}\n` +
       '已安裝 Sheet 自動同步觸發器。\n' +
       `${reverseSyncMessage}\n` +
-      '未自動批次同步既有列；若需同步既有資料，請執行「一鍵安裝/初始化」。',
+      '未自動批次同步既有列；若需同步既有資料，請執行「一鍵安裝」。',
     ui.ButtonSet.OK
   );
 
@@ -349,7 +357,7 @@ function setupCalendarReverseSync() {
 }
 
 /**
- * 一鍵安裝/初始化入口。
+ * 一鍵安裝入口。
  *
  * 第一次安裝建議只手動執行這個函式：
  * - 初始化 OP sheet 標題、格式、資料驗證與條件格式
@@ -401,7 +409,7 @@ function setup() {
   onOpen();
 
   ui.alert(
-    '一鍵設定完成',
+    '一鍵安裝完成',
     `已完成表格初始化、Sheet 自動同步觸發器安裝，並刷新「手術排程系統」選單。\n` +
       `時間欄位已轉換 ${initResult.timeResult.normalizedCount} 格，格式錯誤 ${initResult.timeResult.errorCount} 格。` +
       calendarIdPromptMessage +
@@ -642,6 +650,178 @@ function toSingleLineText_(value) {
   return toCellText_(value).replace(/\s+/g, ' ');
 }
 
+function mergeText_(a, b) {
+  a = String(a || '').trim();
+  b = String(b || '').trim();
+  if (!a) return b;
+  if (!b) return a;
+  if (a === b) return a;
+  return a + "\n" + b;
+}
+
+function getFieldHeaderToKeyMap_() {
+  const map = {};
+
+  CONFIG.FIELD_KEYS.forEach(fieldKey => {
+    map[CONFIG.FIELD_HEADERS[fieldKey]] = fieldKey;
+  });
+
+  return map;
+}
+
+function getDefaultColumnForField_(fieldKey) {
+  const index = CONFIG.HEADERS.indexOf(CONFIG.FIELD_HEADERS[fieldKey]);
+  return index === -1 ? 0 : index + 1;
+}
+
+function getSheetHeaderValues_(sheet) {
+  const scanColumnCount = Math.max(
+    1,
+    Math.min(sheet.getMaxColumns(), Math.max(sheet.getLastColumn(), CONFIG.HEADERS.length))
+  );
+
+  return sheet.getRange(1, 1, 1, scanColumnCount).getValues()[0];
+}
+
+function getLastHeaderColumnFromValues_(headerValues) {
+  for (let i = headerValues.length - 1; i >= 0; i--) {
+    if (toCellText_(headerValues[i])) return i + 1;
+  }
+
+  return 0;
+}
+
+function getLastHeaderColumn_(sheet) {
+  const headerValues = getSheetHeaderValues_(sheet);
+  return getLastHeaderColumnFromValues_(headerValues) || Math.min(sheet.getMaxColumns(), CONFIG.HEADERS.length);
+}
+
+function formatColumnList_(columns) {
+  return columns.map(columnToLetter_).join(', ');
+}
+
+function formatFieldHeaderList_(fieldKeys) {
+  return fieldKeys
+    .map(fieldKey => `「${CONFIG.FIELD_HEADERS[fieldKey] || fieldKey}」`)
+    .join('、');
+}
+
+function buildFieldColumnInfo_(sheet) {
+  const headerValues = getSheetHeaderValues_(sheet);
+  const headerToKey = getFieldHeaderToKeyMap_();
+  const columns = {};
+  const duplicateColumnsByHeader = {};
+  const legacyEventIdColumns = [];
+
+  headerValues.forEach((value, index) => {
+    const header = toCellText_(value);
+    if (!header) return;
+
+    if (header === LEGACY_API_EVENT_ID_HEADER) {
+      legacyEventIdColumns.push(index + 1);
+    }
+
+    const fieldKey = headerToKey[header];
+    if (!fieldKey) return;
+
+    if (columns[fieldKey]) {
+      if (!duplicateColumnsByHeader[header]) {
+        duplicateColumnsByHeader[header] = [columns[fieldKey]];
+      }
+      duplicateColumnsByHeader[header].push(index + 1);
+      return;
+    }
+
+    columns[fieldKey] = index + 1;
+  });
+
+  const missingKeys = CONFIG.FIELD_KEYS.filter(fieldKey => !columns[fieldKey]);
+  const duplicateMessages = Object.keys(duplicateColumnsByHeader).map(header => {
+    return `「${header}」出現在 ${formatColumnList_(duplicateColumnsByHeader[header])} 欄，系統會使用最左側欄位。`;
+  });
+
+  return {
+    columns,
+    missingKeys,
+    duplicateMessages,
+    legacyEventIdColumns,
+    lastHeaderColumn: getLastHeaderColumnFromValues_(headerValues) || CONFIG.HEADERS.length
+  };
+}
+
+function getRequiredSheetColumnInfo_(sheet) {
+  const info = buildFieldColumnInfo_(sheet);
+
+  if (info.missingKeys.length > 0) {
+    throw new Error(`缺少必要欄位 ${formatFieldHeaderList_(info.missingKeys)}，請先執行「一鍵安裝」或「初始化表格格式」。`);
+  }
+
+  return info;
+}
+
+function getRequiredSheetColumns_(sheet) {
+  return getRequiredSheetColumnInfo_(sheet).columns;
+}
+
+function getTableLastColumn_(sheet, columns) {
+  const columnValues = columns ? Object.values(columns) : [];
+  const requiredLastColumn = columnValues.length > 0
+    ? Math.max.apply(null, columnValues)
+    : CONFIG.HEADERS.length;
+
+  return Math.max(getLastHeaderColumn_(sheet), requiredLastColumn);
+}
+
+function getRowFieldValue_(rowValues, columns, fieldKey) {
+  return rowValues[columns[fieldKey] - 1];
+}
+
+function setRowFieldValue_(rowValues, columns, fieldKey, value) {
+  const index = columns[fieldKey] - 1;
+
+  while (rowValues.length <= index) {
+    rowValues.push('');
+  }
+
+  rowValues[index] = value;
+}
+
+function getOpSheetOrThrow_() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_OP);
+
+  if (!sheet) {
+    throw new Error(`找不到「${CONFIG.SHEET_OP}」工作表。`);
+  }
+
+  return sheet;
+}
+
+function getOpSheetContext_() {
+  const sheet = getOpSheetOrThrow_();
+
+  return {
+    sheet,
+    columns: getRequiredSheetColumns_(sheet)
+  };
+}
+
+function runMenuAction_(title, callback) {
+  const ui = SpreadsheetApp.getUi();
+
+  try {
+    return callback(ui);
+  } catch (err) {
+    ui.alert(title, err.message || String(err), ui.ButtonSet.OK);
+    return null;
+  }
+}
+
+function assertActiveOpSheet_(sheet) {
+  if (!sheet || sheet.getName() !== CONFIG.SHEET_OP) {
+    throw new Error(`請先切換到「${CONFIG.SHEET_OP}」工作表後再執行。`);
+  }
+}
+
 function buildCalendarTitle_(chartNoText, patientNameText, conditionText) {
   return [chartNoText, patientNameText, conditionText]
     .map(value => toSingleLineText_(value))
@@ -707,8 +887,10 @@ function parseCalendarDescription_(description) {
   const result = {
     hasTel: false,
     hasPlan: false,
+    hasTimeNote: false,
     tel: '',
-    plan: ''
+    plan: '',
+    timeNote: ''
   };
   let activeField = '';
 
@@ -729,8 +911,11 @@ function parseCalendarDescription_(description) {
       return;
     }
 
-    if (/^Time note\s*[:：]/i.test(line)) {
+    const timeNoteMatch = line.match(/^Time note\s*[:：]\s*(.*)$/i);
+    if (timeNoteMatch) {
       activeField = '';
+      result.hasTimeNote = true;
+      result.timeNote = timeNoteMatch[1].trim();
       return;
     }
 
@@ -752,7 +937,9 @@ function parseCalendarDescription_(description) {
  */
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
-  const advancedMenu = ui.createMenu('進階/維護工具')
+  const maintenanceMenu = ui.createMenu('維護工具')
+    .addItem('一鍵安裝', 'setup')
+    .addSeparator()
     .addItem('設定 Calendar ID', 'promptAndSaveCalendarId')
     .addItem('初始化表格格式', 'initializeSheet')
     .addItem('安裝自動同步觸發器', 'installProcessRowChangeTrigger')
@@ -762,13 +949,12 @@ function onOpen() {
     .addItem(`版本：${CONFIG.VERSION}`, 'showVersionInfo');
 
   ui.createMenu('手術排程系統')
-    .addItem('一鍵安裝/初始化', 'setup')
     .addItem('輸出指令日期資料', 'exportDateData')
     .addItem('複製一列 (清空時間)', 'duplicateRow')
     .addItem('歸人整合 (同病歷號合併)', 'mergePatientRecords')
     .addItem('依照日期與時間排序', 'sortSheetByDateTime')
     .addSeparator()
-    .addSubMenu(advancedMenu)
+    .addSubMenu(maintenanceMenu)
     .addToUi();
 }
 
@@ -798,7 +984,7 @@ function joinNonEmptyLines_(values) {
  * 1: 輸出指令日期資料
  */
 function exportDateData() {
-  const ui = SpreadsheetApp.getUi();
+  return runMenuAction_('輸出指令日期資料', ui => {
   const response = ui.prompt('輸出指定日期資料', '請輸入日期 (格式如: 2026/5/11):', ui.ButtonSet.OK_CANCEL);
 
   if (response.getSelectedButton() !== ui.Button.OK) return;
@@ -811,8 +997,10 @@ function exportDateData() {
   }
 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheetOp = ss.getSheetByName(CONFIG.SHEET_OP);
+  const context = getOpSheetContext_();
+  const sheetOp = context.sheet;
   let sheetOut = ss.getSheetByName(CONFIG.SHEET_OUT);
+  const cols = context.columns;
 
   if (!sheetOut) {
     sheetOut = ss.insertSheet(CONFIG.SHEET_OUT);
@@ -820,7 +1008,7 @@ function exportDateData() {
     sheetOut.clear();
   }
 
-  const data = sheetOp.getDataRange().getValues();
+  const data = sheetOp.getRange(1, 1, sheetOp.getLastRow(), getTableLastColumn_(sheetOp, cols)).getValues();
   const targetDateValue = Utilities.formatDate(targetDateObj, Session.getScriptTimeZone(), 'yyyy/MM/dd');
 
   let iolList = [];
@@ -828,8 +1016,8 @@ function exportDateData() {
 
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
-    const tagVal = String(row[CONFIG.COLS.TAG - 1]).trim();
-    const dateVal = row[CONFIG.COLS.DATE - 1];
+    const tagVal = String(getRowFieldValue_(row, cols, 'TAG')).trim();
+    const dateVal = getRowFieldValue_(row, cols, 'DATE');
     if (!dateVal) continue;
 
     // 強化日期物件解析
@@ -838,7 +1026,7 @@ function exportDateData() {
     const rowDateStr = Utilities.formatDate(rowDateObj, Session.getScriptTimeZone(), 'yyyy/MM/dd');
 
     if (rowDateStr === targetDateValue && tagVal === 'OP') {
-      const conditionStr = String(row[CONFIG.COLS.COND - 1]);
+      const conditionStr = String(getRowFieldValue_(row, cols, 'COND'));
 
       let disease = conditionStr;
       let surgery = "";
@@ -852,7 +1040,7 @@ function exportDateData() {
       const surgeryMain = surgeryParts.firstLine;
       const supplementalNote = joinNonEmptyLines_([
         surgeryParts.rest,
-        row[CONFIG.COLS.PLAN - 1]
+        getRowFieldValue_(row, cols, 'PLAN')
       ]);
       let brand = "", target = "", power = "";
       const iolMatch = surgery.match(/IOL\(([^)]+)\)/i) || surgery.match(/MSICS\(([^)]+)\)/i);
@@ -862,14 +1050,14 @@ function exportDateData() {
         brand = iolDetails[0] || "";
         target = iolDetails[1] || "";
         power = iolDetails[2] || "";
-        iolList.push([row[CONFIG.COLS.NAME - 1], brand, target, power]);
+        iolList.push([getRowFieldValue_(row, cols, 'NAME'), brand, target, power]);
       }
 
       patientList.push([
-        row[CONFIG.COLS.CHART_NO - 1],
-        row[CONFIG.COLS.NAME - 1],
-        row[CONFIG.COLS.TEL - 1],
-        row[CONFIG.COLS.TIME - 1],
+        getRowFieldValue_(row, cols, 'CHART_NO'),
+        getRowFieldValue_(row, cols, 'NAME'),
+        getRowFieldValue_(row, cols, 'TEL'),
+        getRowFieldValue_(row, cols, 'TIME'),
         disease,
         surgeryMain,
         supplementalNote
@@ -908,19 +1096,23 @@ function exportDateData() {
 
   sheetOut.autoResizeColumns(1, 12);
   ui.alert('完成', `已成功將 ${targetDateStr} 的資料分析匯出至「輸出表單」。`, ui.ButtonSet.OK);
+  });
 }
 
 /**
  * 2: 複製一列
  */
 function duplicateRow() {
+  return runMenuAction_('複製一列', () => {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  assertActiveOpSheet_(sheet);
   const activeCell = sheet.getActiveCell();
   const activeRow = activeCell.getRow();
 
   if (activeRow < 2) return;
 
   const lastCol = sheet.getLastColumn();
+  const cols = getRequiredSheetColumns_(sheet);
   sheet.insertRowAfter(activeRow);
 
   const sourceRange = sheet.getRange(activeRow, 1, 1, lastCol);
@@ -928,60 +1120,37 @@ function duplicateRow() {
 
   sourceRange.copyTo(targetRange);
 
-  sheet.getRange(activeRow + 1, CONFIG.COLS.DATE).clearContent();
-  sheet.getRange(activeRow + 1, CONFIG.COLS.TIME).clearContent();
-  if (lastCol >= CONFIG.COLS.EVENT_ID) {
-    sheet.getRange(activeRow + 1, CONFIG.COLS.EVENT_ID).clearContent();
-  }
+  sheet.getRange(activeRow + 1, cols.DATE).clearContent();
+  sheet.getRange(activeRow + 1, cols.TIME).clearContent();
+  sheet.getRange(activeRow + 1, cols.EVENT_ID).clearContent();
+  });
 }
 
 /**
  * 3: 歸人整合
  */
 function mergePatientRecords() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_OP);
+  return runMenuAction_('歸人整合', ui => {
+  const context = getOpSheetContext_();
+  const sheet = context.sheet;
   const dataRange = sheet.getDataRange();
   const data = dataRange.getValues();
   if (data.length < 2) return;
 
-  const headers = data[0];
-  let grouped = {};
-  let finalRows = [];
+  const cols = context.columns;
+  const result = buildMergedPatientRows_(data, cols);
 
-  const mergeText = (a, b) => {
-    a = String(a).trim();
-    b = String(b).trim();
-    if (!a) return b;
-    if (!b) return a;
-    if (a === b) return a;
-    return a + "\n" + b;
-  };
-
-  for (let i = 1; i < data.length; i++) {
-    let row = [...data[i]];
-    const chartNo = row[CONFIG.COLS.CHART_NO - 1];
-    const name = row[CONFIG.COLS.NAME - 1];
-    const tag = row[CONFIG.COLS.TAG - 1];
-
-    if (tag === 'OP' || !chartNo || !name) {
-      finalRows.push(row);
-    } else {
-      const key = `${chartNo}_${name}`;
-      if (!grouped[key]) {
-        grouped[key] = row;
-        finalRows.push(grouped[key]);
-      } else {
-        grouped[key][CONFIG.COLS.COND - 1] = mergeText(grouped[key][CONFIG.COLS.COND - 1], row[CONFIG.COLS.COND - 1]);
-        grouped[key][CONFIG.COLS.PLAN - 1] = mergeText(grouped[key][CONFIG.COLS.PLAN - 1], row[CONFIG.COLS.PLAN - 1]);
-        grouped[key][CONFIG.COLS.MEMO - 1] = mergeText(grouped[key][CONFIG.COLS.MEMO - 1], row[CONFIG.COLS.MEMO - 1]);
-
-        if (grouped[key][CONFIG.COLS.TAG - 1] !== row[CONFIG.COLS.TAG - 1]) {
-          grouped[key][CONFIG.COLS.TAG - 1] = mergeText(grouped[key][CONFIG.COLS.TAG - 1], row[CONFIG.COLS.TAG - 1]);
-        }
-      }
-    }
+  if (!result.ok) {
+    ui.alert(
+      '歸人整合中止',
+      '以下將被合併移除的列含有日期、時間或日曆 eventID，為避免日曆事件失去追蹤，本次未更動資料：\n' +
+        result.blockedRows.join(', '),
+      ui.ButtonSet.OK
+    );
+    return;
   }
 
+  const finalRows = result.rows;
   const lastRow = sheet.getLastRow();
   const lastCol = sheet.getLastColumn();
 
@@ -991,26 +1160,82 @@ function mergePatientRecords() {
   }
 
   if (finalRows.length > 0) {
-    sheet.getRange(2, 1, finalRows.length, headers.length).setValues(finalRows);
+    sheet.getRange(2, 1, finalRows.length, data[0].length).setValues(finalRows);
   }
 
-  SpreadsheetApp.getUi().alert('歸人整合完成', '所有非 OP 的同病人紀錄已合併。', SpreadsheetApp.getUi().ButtonSet.OK);
+  ui.alert('歸人整合完成', '所有非 OP 的同病人紀錄已合併。', ui.ButtonSet.OK);
+  });
+}
+
+function buildMergedPatientRows_(data, cols) {
+  const grouped = {};
+  const finalRows = [];
+  const blockedRows = [];
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i].slice();
+    const chartNo = getRowFieldValue_(row, cols, 'CHART_NO');
+    const name = getRowFieldValue_(row, cols, 'NAME');
+    const tag = getRowFieldValue_(row, cols, 'TAG');
+
+    if (tag === 'OP' || !chartNo || !name) {
+      finalRows.push(row);
+    } else {
+      const key = `${chartNo}_${name}`;
+      if (!grouped[key]) {
+        grouped[key] = row;
+        finalRows.push(grouped[key]);
+      } else {
+        if (rowHasCalendarTrackingData_(row, cols)) {
+          blockedRows.push(i + 1);
+          continue;
+        }
+
+        setRowFieldValue_(grouped[key], cols, 'TEL', mergeText_(getRowFieldValue_(grouped[key], cols, 'TEL'), getRowFieldValue_(row, cols, 'TEL')));
+        setRowFieldValue_(grouped[key], cols, 'COND', mergeText_(getRowFieldValue_(grouped[key], cols, 'COND'), getRowFieldValue_(row, cols, 'COND')));
+        setRowFieldValue_(grouped[key], cols, 'PLAN', mergeText_(getRowFieldValue_(grouped[key], cols, 'PLAN'), getRowFieldValue_(row, cols, 'PLAN')));
+        setRowFieldValue_(grouped[key], cols, 'MEMO', mergeText_(getRowFieldValue_(grouped[key], cols, 'MEMO'), getRowFieldValue_(row, cols, 'MEMO')));
+
+        if (getRowFieldValue_(grouped[key], cols, 'TAG') !== getRowFieldValue_(row, cols, 'TAG')) {
+          setRowFieldValue_(grouped[key], cols, 'TAG', mergeText_(getRowFieldValue_(grouped[key], cols, 'TAG'), getRowFieldValue_(row, cols, 'TAG')));
+        }
+      }
+    }
+  }
+
+  return {
+    ok: blockedRows.length === 0,
+    rows: finalRows,
+    blockedRows
+  };
+}
+
+function rowHasCalendarTrackingData_(row, cols) {
+  return Boolean(
+    getRowFieldValue_(row, cols, 'DATE') ||
+      getRowFieldValue_(row, cols, 'TIME') ||
+      toCellText_(getRowFieldValue_(row, cols, 'EVENT_ID'))
+  );
 }
 
 /**
  * 4: 依照日期與時間排序
  */
 function sortSheetByDateTime() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_OP);
+  return runMenuAction_('依照日期與時間排序', () => {
+  const context = getOpSheetContext_();
+  const sheet = context.sheet;
   const lastRow = sheet.getLastRow();
   const lastCol = sheet.getLastColumn();
   if (lastRow < 2) return;
 
+  const cols = context.columns;
   const range = sheet.getRange(2, 1, lastRow - 1, lastCol);
   range.sort([
-    { column: CONFIG.COLS.DATE, ascending: true },
-    { column: CONFIG.COLS.TIME, ascending: true }
+    { column: cols.DATE, ascending: true },
+    { column: cols.TIME, ascending: true }
   ]);
+  });
 }
 
 function ensureMinimumSheetSize_(sheet) {
@@ -1026,58 +1251,128 @@ function ensureMinimumSheetSize_(sheet) {
   }
 }
 
-function removeLegacyApiEventIdColumn_(sheet) {
-  const legacyColumn = CONFIG.COLS.EVENT_ID + 1;
-
-  if (sheet.getMaxColumns() < legacyColumn) return false;
-
-  const headerText = String(sheet.getRange(1, legacyColumn).getValue() || '').trim();
-  if (headerText !== LEGACY_API_EVENT_ID_HEADER) return false;
-
-  sheet.deleteColumn(legacyColumn);
-  return true;
+function ensureSheetHasColumn_(sheet, column) {
+  if (sheet.getMaxColumns() < column) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), column - sheet.getMaxColumns());
+  }
 }
 
-function ensureHeaders_(sheet) {
-  const headerRange = sheet.getRange(1, 1, 1, CONFIG.HEADERS.length);
-  const values = headerRange.getValues()[0];
-  const nextValues = values.slice();
-  const mismatches = [];
-  let hasChanges = false;
+function migrateLegacyApiEventIdColumn_(sheet) {
+  const info = buildFieldColumnInfo_(sheet);
+  let currentEventIdColumn = info.columns.EVENT_ID || 0;
+  const legacyColumns = info.legacyEventIdColumns.slice();
 
-  CONFIG.HEADERS.forEach((expectedHeader, index) => {
-    const currentValue = values[index];
-    const currentText = currentValue === null || currentValue === undefined
-      ? ''
-      : String(currentValue).trim();
+  if (legacyColumns.length === 0) {
+    return {
+      changed: false,
+      message: ''
+    };
+  }
 
-    if (!currentText) {
-      nextValues[index] = expectedHeader;
-      hasChanges = true;
-      return;
+  let renamedLegacyColumn = false;
+  let deletedLegacyCount = 0;
+  let copiedValueCount = 0;
+
+  if (!currentEventIdColumn) {
+    currentEventIdColumn = legacyColumns.shift();
+    sheet.getRange(1, currentEventIdColumn).setValue(CONFIG.FIELD_HEADERS.EVENT_ID);
+    renamedLegacyColumn = true;
+  }
+
+  legacyColumns.sort((a, b) => b - a).forEach(legacyColumn => {
+    const lastRow = sheet.getLastRow();
+
+    if (lastRow >= 2 && currentEventIdColumn && legacyColumn !== currentEventIdColumn) {
+      const currentRange = sheet.getRange(2, currentEventIdColumn, lastRow - 1, 1);
+      const legacyValues = sheet.getRange(2, legacyColumn, lastRow - 1, 1).getValues();
+      const currentValues = currentRange.getValues();
+      let hasCopiedValues = false;
+
+      legacyValues.forEach((rowValues, index) => {
+        if (!toCellText_(currentValues[index][0]) && toCellText_(rowValues[0])) {
+          currentValues[index][0] = rowValues[0];
+          copiedValueCount++;
+          hasCopiedValues = true;
+        }
+      });
+
+      if (hasCopiedValues) {
+        currentRange.setValues(currentValues);
+      }
     }
 
-    if (currentText !== expectedHeader) {
-      mismatches.push(`${columnToLetter_(index + 1)}1：目前為「${currentText}」，建議為「${expectedHeader}」`);
+    sheet.deleteColumn(legacyColumn);
+    deletedLegacyCount++;
+
+    if (legacyColumn < currentEventIdColumn) {
+      currentEventIdColumn--;
     }
   });
 
-  if (hasChanges) {
-    headerRange.setValues([nextValues]);
+  const messageParts = [];
+  if (renamedLegacyColumn) {
+    messageParts.push(`已將舊系統欄位「${LEGACY_API_EVENT_ID_HEADER}」改為「${CONFIG.FIELD_HEADERS.EVENT_ID}」。`);
+  }
+  if (deletedLegacyCount > 0) {
+    messageParts.push(`已移除 ${deletedLegacyCount} 個舊系統欄位「${LEGACY_API_EVENT_ID_HEADER}」。`);
+  }
+  if (copiedValueCount > 0) {
+    messageParts.push(`已從舊欄位補回 ${copiedValueCount} 格日曆 ID。`);
   }
 
-  return mismatches;
+  return {
+    changed: true,
+    message: messageParts.join('\n')
+  };
 }
 
-function applyDataFormats_(sheet) {
+function ensureHeaders_(sheet) {
+  const headerValues = getSheetHeaderValues_(sheet);
+  const hasAnyHeader = headerValues.some(value => Boolean(toCellText_(value)));
+  const addedHeaders = [];
+
+  if (!hasAnyHeader) {
+    ensureSheetHasColumn_(sheet, CONFIG.HEADERS.length);
+    sheet.getRange(1, 1, 1, CONFIG.HEADERS.length).setValues([CONFIG.HEADERS]);
+
+    const emptySheetInfo = buildFieldColumnInfo_(sheet);
+    return {
+      columns: emptySheetInfo.columns,
+      duplicateMessages: emptySheetInfo.duplicateMessages,
+      addedHeaders: CONFIG.HEADERS.slice()
+    };
+  }
+
+  let info = buildFieldColumnInfo_(sheet);
+  let nextColumn = getLastHeaderColumn_(sheet) + 1;
+
+  info.missingKeys.forEach(fieldKey => {
+    ensureSheetHasColumn_(sheet, nextColumn);
+    const header = CONFIG.FIELD_HEADERS[fieldKey];
+    sheet.getRange(1, nextColumn).setValue(header);
+    addedHeaders.push(header);
+    nextColumn++;
+  });
+
+  info = buildFieldColumnInfo_(sheet);
+
+  return {
+    columns: info.columns,
+    duplicateMessages: info.duplicateMessages,
+    addedHeaders
+  };
+}
+
+function applyDataFormats_(sheet, columns) {
   const dataRowCount = sheet.getMaxRows() - 1;
+  if (dataRowCount <= 0) return;
 
-  sheet.getRange(2, CONFIG.COLS.TEL, dataRowCount, 1).setNumberFormat('@');
-  sheet.getRange(2, CONFIG.COLS.TIME, dataRowCount, 1).setNumberFormat('@');
-  sheet.getRange(2, CONFIG.COLS.DATE, dataRowCount, 1).setNumberFormat('yyyy/mm/dd');
-  sheet.getRange(2, CONFIG.COLS.EVENT_ID, dataRowCount, 1).setNumberFormat('@');
+  sheet.getRange(2, columns.TEL, dataRowCount, 1).setNumberFormat('@');
+  sheet.getRange(2, columns.TIME, dataRowCount, 1).setNumberFormat('@');
+  sheet.getRange(2, columns.DATE, dataRowCount, 1).setNumberFormat('yyyy/mm/dd');
+  sheet.getRange(2, columns.EVENT_ID, dataRowCount, 1).setNumberFormat('@');
 
-  const tagRange = sheet.getRange(2, CONFIG.COLS.TAG, dataRowCount, 1);
+  const tagRange = sheet.getRange(2, columns.TAG, dataRowCount, 1);
   const ruleValidation = SpreadsheetApp.newDataValidation()
     .requireValueInList(CONFIG.TAG_OPTIONS, true)
     .setAllowInvalid(true)
@@ -1085,21 +1380,36 @@ function applyDataFormats_(sheet) {
   tagRange.setDataValidation(ruleValidation);
 }
 
-function applyRowDataFormats_(sheet, row) {
-  sheet.getRange(row, CONFIG.COLS.TEL).setNumberFormat('@');
-  sheet.getRange(row, CONFIG.COLS.TIME).setNumberFormat('@');
-  sheet.getRange(row, CONFIG.COLS.DATE).setNumberFormat('yyyy/mm/dd');
-  sheet.getRange(row, CONFIG.COLS.EVENT_ID).setNumberFormat('@');
+function applyTableAlignment_(sheet, columns) {
+  const lastColumn = getTableLastColumn_(sheet, columns);
+  if (lastColumn <= 0) return;
+
+  const rowCount = Math.max(sheet.getLastRow(), 2);
+  sheet.getRange(1, 1, rowCount, lastColumn)
+    .setHorizontalAlignment('left')
+    .setVerticalAlignment('top');
+}
+
+function applyRowDataFormats_(sheet, row, columns) {
+  const cols = columns || getRequiredSheetColumns_(sheet);
+  sheet.getRange(row, cols.TEL).setNumberFormat('@');
+  sheet.getRange(row, cols.TIME).setNumberFormat('@');
+  sheet.getRange(row, cols.DATE).setNumberFormat('yyyy/mm/dd');
+  sheet.getRange(row, cols.EVENT_ID).setNumberFormat('@');
 
   const ruleValidation = SpreadsheetApp.newDataValidation()
     .requireValueInList(CONFIG.TAG_OPTIONS, true)
     .setAllowInvalid(true)
     .build();
-  sheet.getRange(row, CONFIG.COLS.TAG).setDataValidation(ruleValidation);
+  sheet.getRange(row, cols.TAG).setDataValidation(ruleValidation);
+
+  sheet.getRange(row, 1, 1, getTableLastColumn_(sheet, cols))
+    .setHorizontalAlignment('left')
+    .setVerticalAlignment('top');
 }
 
-function hideSystemColumns_(sheet) {
-  sheet.hideColumns(CONFIG.COLS.EVENT_ID);
+function hideSystemColumns_(sheet, columns) {
+  sheet.hideColumns(columns.EVENT_ID);
 }
 
 function getConditionalRuleFormula_(rule) {
@@ -1122,17 +1432,19 @@ function rangeMatchesSingleColumn_(range, column) {
   return range.getRow() === 2 && range.getColumn() === column && range.getNumColumns() === 1;
 }
 
-function rangeMatchesMainTable_(range) {
-  return range.getRow() === 2 && range.getColumn() === 1 && range.getNumColumns() === CONFIG.HEADERS.length;
+function rangeMatchesMainTable_(range, sheet) {
+  return range.getRow() === 2 &&
+    range.getColumn() === 1 &&
+    range.getNumColumns() === getLastHeaderColumn_(sheet);
 }
 
 function rangeMatchesLegacyMainTable_(range) {
   return range.getRow() === 2 &&
     range.getColumn() === 1 &&
-    (range.getNumColumns() === CONFIG.COLS.EVENT_ID || range.getNumColumns() === CONFIG.COLS.EVENT_ID + 1);
+    (range.getNumColumns() === CONFIG.HEADERS.length || range.getNumColumns() === CONFIG.HEADERS.length + 1);
 }
 
-function isLegacyOpConditionalRule_(rule) {
+function isLegacyOpConditionalRule_(rule, columns) {
   const condition = rule.getBooleanCondition();
 
   if (!condition || condition.getCriteriaType() !== SpreadsheetApp.BooleanCriteria.TEXT_EQUAL_TO) {
@@ -1146,46 +1458,53 @@ function isLegacyOpConditionalRule_(rule) {
     values.length > 0 &&
     String(values[0]) === 'OP' &&
     ranges.length > 0 &&
-    ranges.every(range => rangeMatchesSingleColumn_(range, CONFIG.COLS.TAG));
+    ranges.every(range => {
+      return rangeMatchesSingleColumn_(range, columns.TAG) ||
+        rangeMatchesSingleColumn_(range, getDefaultColumnForField_('TAG'));
+    });
 }
 
-function isLegacyPlanConditionalRule_(rule) {
+function isLegacyPlanConditionalRule_(rule, sheet, columns) {
   const formula = getConditionalRuleFormula_(rule);
+  const planReferences = [
+    '$' + columnToLetter_(columns.PLAN) + '2',
+    '$' + columnToLetter_(getDefaultColumnForField_('PLAN')) + '2'
+  ];
 
-  if (!formula || formula.indexOf('SEARCH(') === -1 || formula.indexOf('$' + columnToLetter_(CONFIG.COLS.PLAN) + '2') === -1) {
+  if (!formula || formula.indexOf('SEARCH(') === -1 || !planReferences.some(reference => formula.indexOf(reference) !== -1)) {
     return false;
   }
 
   const ranges = rule.getRanges();
-  return ranges.length === 1 && (rangeMatchesMainTable_(ranges[0]) || rangeMatchesLegacyMainTable_(ranges[0]));
+  return ranges.length === 1 && (rangeMatchesMainTable_(ranges[0], sheet) || rangeMatchesLegacyMainTable_(ranges[0]));
 }
 
-function isManagedConditionalRule_(rule) {
+function isManagedConditionalRule_(rule, sheet, columns) {
   return conditionalRuleHasSystemMarker_(rule) ||
-    isLegacyOpConditionalRule_(rule) ||
-    isLegacyPlanConditionalRule_(rule);
+    isLegacyOpConditionalRule_(rule, columns) ||
+    isLegacyPlanConditionalRule_(rule, sheet, columns);
 }
 
-function getRetainedConditionalRules_(sheet) {
+function getRetainedConditionalRules_(sheet, columns) {
   return sheet.getConditionalFormatRules()
-    .filter(rule => !isManagedConditionalRule_(rule));
+    .filter(rule => !isManagedConditionalRule_(rule, sheet, columns));
 }
 
 /**
- * 將 CONFIG.CONDITIONAL_FORMAT_KEYWORDS 轉成可套在第 2 列起始的條件格式公式片段。
+ * 將關鍵字轉成可套在第 2 列起始的條件格式公式片段。
  *
- * 條件格式公式會從範圍左上角的列開始相對套用，所以 Plan 欄固定寫成 $H2。
+ * 條件格式公式會從範圍左上角的列開始相對套用，所以欄位固定寫成 $欄名2。
  */
-function buildPlanKeywordExpression_() {
-  const keywords = (CONFIG.CONDITIONAL_FORMAT_KEYWORDS || [])
+function buildKeywordExpression_(column, keywords) {
+  const activeKeywords = (keywords || [])
     .map(keyword => String(keyword).trim())
     .filter(Boolean);
 
-  if (keywords.length === 0) return '';
+  if (activeKeywords.length === 0) return '';
 
-  const planColLetter = columnToLetter_(CONFIG.COLS.PLAN);
-  const formulaParts = keywords.map(keyword => {
-    return `ISNUMBER(SEARCH(${toSheetFormulaString_(keyword)}, $${planColLetter}2))`;
+  const columnLetter = columnToLetter_(column);
+  const formulaParts = activeKeywords.map(keyword => {
+    return `ISNUMBER(SEARCH(${toSheetFormulaString_(keyword)}, $${columnLetter}2))`;
   });
 
   return formulaParts.length === 1
@@ -1193,50 +1512,111 @@ function buildPlanKeywordExpression_() {
     : `OR(${formulaParts.join(',')})`;
 }
 
+function buildTableRangesExcludingColumns_(sheet, startRow, numRows, lastColumn, excludedColumns) {
+  const excluded = {};
+  const ranges = [];
+  let column = 1;
+
+  excludedColumns.forEach(excludedColumn => {
+    excluded[excludedColumn] = true;
+  });
+
+  while (column <= lastColumn) {
+    while (column <= lastColumn && excluded[column]) {
+      column++;
+    }
+
+    const startColumn = column;
+
+    while (column <= lastColumn && !excluded[column]) {
+      column++;
+    }
+
+    if (startColumn <= lastColumn) {
+      ranges.push(sheet.getRange(startRow, startColumn, numRows, column - startColumn));
+    }
+  }
+
+  return ranges;
+}
+
 /**
  * 套用系統條件格式，並保留使用者自己新增的其他條件格式。
  *
- * OP 紅底要優先於 Plan 黃底：
- * - A:C、E:J 命中 Plan 關鍵字時套黃底。
- * - D 欄只有在 Tag 不是 OP 時才套 Plan 黃底。
- * - D 欄 Tag=OP 時永遠套紅底。
+ * Plan 命中 APPLY 時淡綠優先；命中問/補/通知時淡黃。
+ * 時間欄命中 GA 時只讓時間格變紅，避免和整列底色互相覆蓋。
  */
-function applyConditionalFormatting_(sheet) {
+function applyConditionalFormatting_(sheet, columns) {
   const dataRowCount = sheet.getMaxRows() - 1;
-  const retainedRules = getRetainedConditionalRules_(sheet);
+  if (dataRowCount <= 0) return;
+
+  const retainedRules = getRetainedConditionalRules_(sheet, columns);
   const systemRules = [];
-  const tagColLetter = columnToLetter_(CONFIG.COLS.TAG);
-  const tagRange = sheet.getRange(2, CONFIG.COLS.TAG, dataRowCount, 1);
+  const lastColumn = getTableLastColumn_(sheet, columns);
+  const tagColLetter = columnToLetter_(columns.TAG);
+  const tagRange = sheet.getRange(2, columns.TAG, dataRowCount, 1);
+  const timeRange = sheet.getRange(2, columns.TIME, dataRowCount, 1);
+  const applyExpression = buildKeywordExpression_(columns.PLAN, CONFIG.PLAN_GREEN_KEYWORDS);
+  const yellowExpression = buildKeywordExpression_(columns.PLAN, CONFIG.PLAN_YELLOW_KEYWORDS);
+  const timeGaExpression = buildKeywordExpression_(columns.TIME, CONFIG.TIME_GA_KEYWORDS);
+  const hasPlanColorExpression = applyExpression && yellowExpression
+    ? `OR(${applyExpression}, ${yellowExpression})`
+    : (applyExpression || yellowExpression || 'FALSE');
 
   systemRules.push(SpreadsheetApp.newConditionalFormatRule()
-    .whenFormulaSatisfied(`=AND($${tagColLetter}2="OP", N(${toSheetFormulaString_(CONDITIONAL_FORMAT_MARKERS.OP_RED)})=0)`)
+    .whenFormulaSatisfied(`=AND($${tagColLetter}2="OP", NOT(${hasPlanColorExpression}), N(${toSheetFormulaString_(CONDITIONAL_FORMAT_MARKERS.OP_RED)})=0)`)
     .setBackground('#F4CCCC')
     .setFontColor('#CC0000')
     .setRanges([tagRange])
     .build()
   );
 
-  const planKeywordExpression = buildPlanKeywordExpression_();
+  if (timeGaExpression) {
+    systemRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(`=AND(${timeGaExpression}, N(${toSheetFormulaString_(CONDITIONAL_FORMAT_MARKERS.TIME_GA)})=0)`)
+      .setBackground('#F4CCCC')
+      .setRanges([timeRange])
+      .build()
+    );
+  }
 
-  if (planKeywordExpression) {
-    const planMainRanges = [
-      sheet.getRange(2, 1, dataRowCount, CONFIG.COLS.TAG - 1),
-      sheet.getRange(2, CONFIG.COLS.COND, dataRowCount, CONFIG.HEADERS.length - CONFIG.COLS.COND + 1)
-    ];
-    const planMainFormula = `=AND(${planKeywordExpression}, N(${toSheetFormulaString_(CONDITIONAL_FORMAT_MARKERS.PLAN_YELLOW_MAIN)})=0)`;
-    const planTagFormula = `=AND($${tagColLetter}2<>"OP", ${planKeywordExpression}, N(${toSheetFormulaString_(CONDITIONAL_FORMAT_MARKERS.PLAN_YELLOW_TAG)})=0)`;
+  const nonTimeTableRanges = buildTableRangesExcludingColumns_(sheet, 2, dataRowCount, lastColumn, [columns.TIME]);
+
+  if (applyExpression) {
+    const greenFormula = `=AND(${applyExpression}, N(${toSheetFormulaString_(CONDITIONAL_FORMAT_MARKERS.PLAN_GREEN)})=0)`;
+    const greenTimeFormula = `=AND(${applyExpression}, NOT(${timeGaExpression || 'FALSE'}), N(${toSheetFormulaString_(CONDITIONAL_FORMAT_MARKERS.PLAN_GREEN_TIME)})=0)`;
 
     systemRules.push(SpreadsheetApp.newConditionalFormatRule()
-      .whenFormulaSatisfied(planMainFormula)
-      .setBackground('#FFF2CC')
-      .setRanges(planMainRanges)
+      .whenFormulaSatisfied(greenFormula)
+      .setBackground('#D9EAD3')
+      .setRanges(nonTimeTableRanges)
       .build()
     );
 
     systemRules.push(SpreadsheetApp.newConditionalFormatRule()
-      .whenFormulaSatisfied(planTagFormula)
+      .whenFormulaSatisfied(greenTimeFormula)
+      .setBackground('#D9EAD3')
+      .setRanges([timeRange])
+      .build()
+    );
+  }
+
+  if (yellowExpression) {
+    const notApplyExpression = applyExpression ? `NOT(${applyExpression})` : 'TRUE';
+    const yellowFormula = `=AND(${notApplyExpression}, ${yellowExpression}, N(${toSheetFormulaString_(CONDITIONAL_FORMAT_MARKERS.PLAN_YELLOW)})=0)`;
+    const yellowTimeFormula = `=AND(${notApplyExpression}, ${yellowExpression}, NOT(${timeGaExpression || 'FALSE'}), N(${toSheetFormulaString_(CONDITIONAL_FORMAT_MARKERS.PLAN_YELLOW_TIME)})=0)`;
+
+    systemRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(yellowFormula)
       .setBackground('#FFF2CC')
-      .setRanges([tagRange])
+      .setRanges(nonTimeTableRanges)
+      .build()
+    );
+
+    systemRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(yellowTimeFormula)
+      .setBackground('#FFF2CC')
+      .setRanges([timeRange])
       .build()
     );
   }
@@ -1250,14 +1630,14 @@ function applyConditionalFormatting_(sheet) {
  * 支援使用者常見輸入：1330、830、13:30、Sheets 時間序列值與 Date 物件。
  * 無法解析的值不覆蓋，改在時間欄留下系統 note。
  */
-function normalizeExistingTimes_(sheet) {
+function normalizeExistingTimes_(sheet, columns) {
   const lastRow = sheet.getLastRow();
 
   if (lastRow < 2) {
     return { normalizedCount: 0, errorCount: 0 };
   }
 
-  const timeRange = sheet.getRange(2, CONFIG.COLS.TIME, lastRow - 1, 1);
+  const timeRange = sheet.getRange(2, columns.TIME, lastRow - 1, 1);
   const values = timeRange.getValues();
   let normalizedCount = 0;
   let errorCount = 0;
@@ -1265,7 +1645,7 @@ function normalizeExistingTimes_(sheet) {
   values.forEach((rowValues, index) => {
     const row = index + 2;
     const value = rowValues[0];
-    const timeCell = sheet.getRange(row, CONFIG.COLS.TIME);
+    const timeCell = sheet.getRange(row, columns.TIME);
 
     if (value === null || value === undefined || value === '') {
       clearTimeErrorNote_(timeCell);
@@ -1309,27 +1689,33 @@ function initializeSheet_(showAlert) {
   }
 
   ensureMinimumSheetSize_(sheet);
-  const removedLegacyColumn = removeLegacyApiEventIdColumn_(sheet);
-  const headerMismatches = ensureHeaders_(sheet);
-  applyDataFormats_(sheet);
-  const timeResult = normalizeExistingTimes_(sheet);
-  applyConditionalFormatting_(sheet);
-  hideSystemColumns_(sheet);
+  const legacyColumnResult = migrateLegacyApiEventIdColumn_(sheet);
+  const headerResult = ensureHeaders_(sheet);
+  const columns = headerResult.columns;
+  applyDataFormats_(sheet, columns);
+  applyTableAlignment_(sheet, columns);
+  const timeResult = normalizeExistingTimes_(sheet, columns);
+  applyConditionalFormatting_(sheet, columns);
+  hideSystemColumns_(sheet, columns);
 
-  const mismatchMessage = headerMismatches.length > 0
-    ? `\n\n以下標題已存在且未覆蓋：\n${headerMismatches.join('\n')}`
+  const addedHeaderMessage = headerResult.addedHeaders.length > 0
+    ? `\n已補齊欄位：${headerResult.addedHeaders.map(header => `「${header}」`).join('、')}。`
     : '';
-  const legacyColumnMessage = removedLegacyColumn
-    ? '\n已移除舊系統欄位「日曆apiEventID」。'
+  const duplicateHeaderMessage = headerResult.duplicateMessages.length > 0
+    ? `\n\n以下必要欄位名稱重複，系統會使用最左側欄位：\n${headerResult.duplicateMessages.join('\n')}`
+    : '';
+  const legacyColumnMessage = legacyColumnResult.message
+    ? '\n' + legacyColumnResult.message
     : '';
 
   if (showAlert) {
     ui.alert(
       '初始化完成',
-      `已完成標題補齊、欄位格式、Tag 下拉選單、條件格式與既有時間正規化。\n` +
+      `已完成欄位確認、欄位格式、靠左靠上對齊、Tag 下拉選單、條件格式與既有時間正規化。\n` +
         `時間欄位已轉換 ${timeResult.normalizedCount} 格，格式錯誤 ${timeResult.errorCount} 格。` +
+        addedHeaderMessage +
         legacyColumnMessage +
-        mismatchMessage,
+        duplicateHeaderMessage,
       ui.ButtonSet.OK
     );
   }
@@ -1337,7 +1723,7 @@ function initializeSheet_(showAlert) {
   return {
     ok: true,
     timeResult,
-    mismatchMessage: legacyColumnMessage + mismatchMessage
+    mismatchMessage: addedHeaderMessage + legacyColumnMessage + duplicateHeaderMessage
   };
 }
 
@@ -1375,7 +1761,7 @@ function buildBatchSyncSummaryMessage_(syncResult) {
 }
 
 function batchSyncAllEvents_(showAlert) {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_OP);
+  const sheet = getOpSheetOrThrow_();
   const lastRow = sheet.getLastRow();
 
   if (lastRow < 2) {
@@ -1407,21 +1793,22 @@ function batchSyncAllEvents_(showAlert) {
     return noCalendarIdResult;
   }
 
+  const cols = getRequiredSheetColumns_(sheet);
   let processedCount = 0;
   const statusCounts = {};
 
   const executed = withCalendarSyncLock_(() => {
-    const data = sheet.getRange(2, 1, lastRow - 1, CONFIG.COLS.EVENT_ID).getValues();
+    const data = sheet.getRange(2, 1, lastRow - 1, getTableLastColumn_(sheet, cols)).getValues();
 
     for (let i = 0; i < data.length; i++) {
       const row = i + 2;
-      const dateVal = data[i][CONFIG.COLS.DATE - 1];
-      const eventId = data[i][CONFIG.COLS.EVENT_ID - 1];
+      const dateVal = getRowFieldValue_(data[i], cols, 'DATE');
+      const eventId = getRowFieldValue_(data[i], cols, 'EVENT_ID');
 
       // 有日期：新增或更新
       // 無日期但有 eventId：刪除既有事件
       if (dateVal || eventId) {
-        const status = syncToCalendar(sheet, row);
+        const status = syncToCalendar(sheet, row, cols);
         statusCounts[status] = (statusCounts[status] || 0) + 1;
 
         if (['created', 'updated', 'deleted'].indexOf(status) !== -1) {
@@ -1460,7 +1847,7 @@ function batchSyncAllEvents_(showAlert) {
 }
 
 function batchSyncAllEvents() {
-  batchSyncAllEvents_(true);
+  return runMenuAction_('批次同步日曆事件', () => batchSyncAllEvents_(true));
 }
 
 function isCalendarSyncTokenInvalidError_(err) {
@@ -1472,13 +1859,14 @@ function isCalendarSyncTokenInvalidError_(err) {
 
 function buildCalendarEventRowIndex_(sheet) {
   const index = {
-    byEventId: {}
+    byEventId: {},
+    columns: getRequiredSheetColumns_(sheet)
   };
   const lastRow = sheet.getLastRow();
 
   if (lastRow < 2) return index;
 
-  const values = sheet.getRange(2, CONFIG.COLS.EVENT_ID, lastRow - 1, 1).getValues();
+  const values = sheet.getRange(2, index.columns.EVENT_ID, lastRow - 1, 1).getValues();
 
   values.forEach((rowValues, indexOffset) => {
     const row = indexOffset + 2;
@@ -1584,44 +1972,55 @@ function addCalendarDeletedMemoNote_(range) {
   range.setNote(existingNote ? `${existingNote}\n${message}` : message);
 }
 
-function markSheetRowCalendarDeleted_(sheet, row) {
-  sheet.getRange(row, CONFIG.COLS.DATE).clearContent();
-  sheet.getRange(row, CONFIG.COLS.TIME).clearContent();
-  sheet.getRange(row, CONFIG.COLS.EVENT_ID).clearContent();
-  addCalendarDeletedMemoNote_(sheet.getRange(row, CONFIG.COLS.MEMO));
+function markSheetRowCalendarDeleted_(sheet, row, columns) {
+  const cols = columns || getRequiredSheetColumns_(sheet);
+  sheet.getRange(row, cols.DATE).clearContent();
+  sheet.getRange(row, cols.TIME).clearContent();
+  sheet.getRange(row, cols.EVENT_ID).clearContent();
+  addCalendarDeletedMemoNote_(sheet.getRange(row, cols.MEMO));
 }
 
-function updateSheetRowFromCalendarApiEvent_(sheet, row, event, dateTimeInfo) {
-  const rowRange = sheet.getRange(row, 1, 1, CONFIG.COLS.EVENT_ID);
+function getSheetTimeValueFromCalendarEvent_(dateTimeInfo, descriptionInfo) {
+  if (dateTimeInfo && dateTimeInfo.isAllDay && descriptionInfo && descriptionInfo.hasTimeNote) {
+    return descriptionInfo.timeNote;
+  }
+
+  return dateTimeInfo ? dateTimeInfo.timeText : '';
+}
+
+function updateSheetRowFromCalendarApiEvent_(sheet, row, event, dateTimeInfo, columns) {
+  const cols = columns || getRequiredSheetColumns_(sheet);
+  const rowRange = sheet.getRange(row, 1, 1, getTableLastColumn_(sheet, cols));
   const values = rowRange.getValues()[0];
   const titleInfo = parseCalendarTitle_(event.summary || '');
   const descriptionInfo = parseCalendarDescription_(event.description || '');
 
   if (titleInfo.ok) {
-    values[CONFIG.COLS.CHART_NO - 1] = titleInfo.chartNo;
-    values[CONFIG.COLS.NAME - 1] = titleInfo.patientName;
-    values[CONFIG.COLS.COND - 1] = titleInfo.condition;
+    setRowFieldValue_(values, cols, 'CHART_NO', titleInfo.chartNo);
+    setRowFieldValue_(values, cols, 'NAME', titleInfo.patientName);
+    setRowFieldValue_(values, cols, 'COND', titleInfo.condition);
   } else {
     console.warn(`第 ${row} 列 Calendar 標題解析失敗，保留原病人欄位。`);
   }
 
   if (descriptionInfo.hasTel) {
-    values[CONFIG.COLS.TEL - 1] = descriptionInfo.tel;
+    setRowFieldValue_(values, cols, 'TEL', descriptionInfo.tel);
   }
 
   if (descriptionInfo.hasPlan) {
-    values[CONFIG.COLS.PLAN - 1] = descriptionInfo.plan;
+    setRowFieldValue_(values, cols, 'PLAN', descriptionInfo.plan);
   }
 
-  values[CONFIG.COLS.DATE - 1] = dateTimeInfo.date;
-  values[CONFIG.COLS.TIME - 1] = dateTimeInfo.timeText;
-  values[CONFIG.COLS.EVENT_ID - 1] = toCellText_(event.id) || values[CONFIG.COLS.EVENT_ID - 1];
+  setRowFieldValue_(values, cols, 'DATE', dateTimeInfo.date);
+  setRowFieldValue_(values, cols, 'TIME', getSheetTimeValueFromCalendarEvent_(dateTimeInfo, descriptionInfo));
+  setRowFieldValue_(values, cols, 'EVENT_ID', toCellText_(event.id) || getRowFieldValue_(values, cols, 'EVENT_ID'));
 
   rowRange.setValues([values]);
-  applyRowDataFormats_(sheet, row);
+  applyRowDataFormats_(sheet, row, cols);
 }
 
-function appendSheetRowFromCalendarApiEvent_(sheet, event, dateTimeInfo) {
+function appendSheetRowFromCalendarApiEvent_(sheet, event, dateTimeInfo, columns) {
+  const cols = columns || getRequiredSheetColumns_(sheet);
   const titleInfo = parseCalendarTitle_(event.summary || '');
 
   if (!titleInfo.ok) {
@@ -1630,24 +2029,24 @@ function appendSheetRowFromCalendarApiEvent_(sheet, event, dateTimeInfo) {
   }
 
   const descriptionInfo = parseCalendarDescription_(event.description || '');
-  const rowValues = new Array(CONFIG.HEADERS.length).fill('');
-  rowValues[CONFIG.COLS.CHART_NO - 1] = titleInfo.chartNo;
-  rowValues[CONFIG.COLS.NAME - 1] = titleInfo.patientName;
-  rowValues[CONFIG.COLS.TEL - 1] = descriptionInfo.hasTel ? descriptionInfo.tel : '';
-  rowValues[CONFIG.COLS.TAG - 1] = tagFromCalendarApiEvent_(event);
-  rowValues[CONFIG.COLS.COND - 1] = titleInfo.condition;
-  rowValues[CONFIG.COLS.DATE - 1] = dateTimeInfo.date;
-  rowValues[CONFIG.COLS.TIME - 1] = dateTimeInfo.timeText;
-  rowValues[CONFIG.COLS.PLAN - 1] = descriptionInfo.hasPlan ? descriptionInfo.plan : '';
-  rowValues[CONFIG.COLS.EVENT_ID - 1] = toCellText_(event.id);
+  const rowValues = new Array(getTableLastColumn_(sheet, cols)).fill('');
+  setRowFieldValue_(rowValues, cols, 'CHART_NO', titleInfo.chartNo);
+  setRowFieldValue_(rowValues, cols, 'NAME', titleInfo.patientName);
+  setRowFieldValue_(rowValues, cols, 'TEL', descriptionInfo.hasTel ? descriptionInfo.tel : '');
+  setRowFieldValue_(rowValues, cols, 'TAG', tagFromCalendarApiEvent_(event));
+  setRowFieldValue_(rowValues, cols, 'COND', titleInfo.condition);
+  setRowFieldValue_(rowValues, cols, 'DATE', dateTimeInfo.date);
+  setRowFieldValue_(rowValues, cols, 'TIME', getSheetTimeValueFromCalendarEvent_(dateTimeInfo, descriptionInfo));
+  setRowFieldValue_(rowValues, cols, 'PLAN', descriptionInfo.hasPlan ? descriptionInfo.plan : '');
+  setRowFieldValue_(rowValues, cols, 'EVENT_ID', toCellText_(event.id));
 
   const row = sheet.getLastRow() + 1;
   if (row > sheet.getMaxRows()) {
     sheet.insertRowsAfter(sheet.getMaxRows(), 1);
   }
 
-  sheet.getRange(row, 1, 1, CONFIG.HEADERS.length).setValues([rowValues]);
-  applyRowDataFormats_(sheet, row);
+  sheet.getRange(row, 1, 1, rowValues.length).setValues([rowValues]);
+  applyRowDataFormats_(sheet, row, cols);
 
   return row;
 }
@@ -1659,7 +2058,7 @@ function processCalendarApiEventChange_(sheet, rowIndex, event) {
 
   if (event.status === 'cancelled') {
     if (!row) return 'skipped_deleted_unmatched';
-    markSheetRowCalendarDeleted_(sheet, row);
+    markSheetRowCalendarDeleted_(sheet, row, rowIndex.columns);
     return 'deleted_marked';
   }
 
@@ -1674,12 +2073,12 @@ function processCalendarApiEventChange_(sheet, rowIndex, event) {
   }
 
   if (row) {
-    updateSheetRowFromCalendarApiEvent_(sheet, row, event, dateTimeInfo);
+    updateSheetRowFromCalendarApiEvent_(sheet, row, event, dateTimeInfo, rowIndex.columns);
     updateCalendarEventRowIndex_(rowIndex, row, event);
     return 'updated';
   }
 
-  const newRow = appendSheetRowFromCalendarApiEvent_(sheet, event, dateTimeInfo);
+  const newRow = appendSheetRowFromCalendarApiEvent_(sheet, event, dateTimeInfo, rowIndex.columns);
   if (!newRow) return 'skipped_invalid_title';
 
   updateCalendarEventRowIndex_(rowIndex, newRow, event);
@@ -1820,9 +2219,17 @@ function processRowChange(e) {
     const startCol = e.range.getColumn();
     const numCols = e.range.getNumColumns();
     const endCol = startCol + numCols - 1;
+    let cols;
+
+    try {
+      cols = getRequiredSheetColumns_(sheet);
+    } catch (err) {
+      console.warn(err.message || err);
+      return;
+    }
 
     // 檢查編輯範圍是否涵蓋我們關注的欄位
-    const watchCols = Object.values(CONFIG.COLS);
+    const watchCols = Object.values(cols);
     const isWatchColEdited = watchCols.some(col => col >= startCol && col <= endCol);
 
     if (!isWatchColEdited) return;
@@ -1834,7 +2241,7 @@ function processRowChange(e) {
 
       // 處理手打時間轉換
       // 僅在「單一時間儲存格」編輯時自動改寫顯示值，避免整批貼上時改壞範圍。
-      if (numRows === 1 && numCols === 1 && startCol === CONFIG.COLS.TIME) {
+      if (numRows === 1 && numCols === 1 && startCol === cols.TIME) {
         const timeInfo = resolveCalendarTime_(e.range.getValue());
 
         if (timeInfo.errorMessage) {
@@ -1850,7 +2257,7 @@ function processRowChange(e) {
         }
       }
 
-      syncToCalendar(sheet, currentRow);
+      syncToCalendar(sheet, currentRow, cols);
     }
   });
 }
@@ -2170,25 +2577,26 @@ function clearCalendarEventsFromSpecifiedColumn() {
  *
  * 回傳狀態字串給 batchSyncAllEvents() 統計用。
  */
-function syncToCalendar(sheet, row) {
-  const rowData = sheet.getRange(row, 1, 1, Math.max(CONFIG.COLS.EVENT_ID, sheet.getLastColumn())).getValues()[0];
-  const chartNo = rowData[CONFIG.COLS.CHART_NO - 1];
-  const patientName = rowData[CONFIG.COLS.NAME - 1];
-  const tel = rowData[CONFIG.COLS.TEL - 1];
-  const tag = rowData[CONFIG.COLS.TAG - 1];
-  const condition = rowData[CONFIG.COLS.COND - 1];
-  const dateVal = rowData[CONFIG.COLS.DATE - 1];
-  const timeVal = rowData[CONFIG.COLS.TIME - 1];
-  const plan = rowData[CONFIG.COLS.PLAN - 1];
-  const eventId = toCellText_(rowData[CONFIG.COLS.EVENT_ID - 1]);
+function syncToCalendar(sheet, row, columns) {
+  const cols = columns || getRequiredSheetColumns_(sheet);
+  const rowData = sheet.getRange(row, 1, 1, getTableLastColumn_(sheet, cols)).getValues()[0];
+  const chartNo = getRowFieldValue_(rowData, cols, 'CHART_NO');
+  const patientName = getRowFieldValue_(rowData, cols, 'NAME');
+  const tel = getRowFieldValue_(rowData, cols, 'TEL');
+  const tag = getRowFieldValue_(rowData, cols, 'TAG');
+  const condition = getRowFieldValue_(rowData, cols, 'COND');
+  const dateVal = getRowFieldValue_(rowData, cols, 'DATE');
+  const timeVal = getRowFieldValue_(rowData, cols, 'TIME');
+  const plan = getRowFieldValue_(rowData, cols, 'PLAN');
+  const eventId = toCellText_(getRowFieldValue_(rowData, cols, 'EVENT_ID'));
   const chartNoText = toCellText_(chartNo);
   const patientNameText = toSingleLineText_(patientName);
   const telText = toCellText_(tel);
   const tagText = toCellText_(tag);
   const conditionText = toSingleLineText_(condition);
   const planText = toCellText_(plan);
-  const chartNoCell = sheet.getRange(row, CONFIG.COLS.CHART_NO);
-  const eventIdCell = sheet.getRange(row, CONFIG.COLS.EVENT_ID);
+  const chartNoCell = sheet.getRange(row, cols.CHART_NO);
+  const eventIdCell = sheet.getRange(row, cols.EVENT_ID);
   const calendarId = getConfiguredCalendarId_();
 
   if (!isCalendarIdConfigured_(calendarId)) {
@@ -2234,7 +2642,7 @@ function syncToCalendar(sheet, row) {
   const dateObj = new Date(dateVal);
   if (isNaN(dateObj.getTime())) return 'skipped_invalid_date';
 
-  const timeCell = sheet.getRange(row, CONFIG.COLS.TIME);
+  const timeCell = sheet.getRange(row, cols.TIME);
   const timeInfo = resolveCalendarTime_(timeVal);
 
   if (timeInfo.errorMessage) {
