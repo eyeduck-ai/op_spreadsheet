@@ -39,6 +39,42 @@ function makeHeaderSheet(headers) {
   };
 }
 
+function makeDataSheet(headers, rows) {
+  const data = [headers].concat(rows.map(row => row.slice()));
+  const notes = {};
+
+  return {
+    rows: data,
+    notes,
+    getMaxColumns: () => headers.length,
+    getLastColumn: () => headers.length,
+    getLastRow: () => data.length,
+    getRange: (row, column, numRows, numColumns) => ({
+      getValues: () => data
+        .slice(row - 1, row - 1 + numRows)
+        .map(dataRow => dataRow.slice(column - 1, column - 1 + numColumns)),
+      getCell: (relativeRow, relativeColumn) => {
+        const rowIndex = row + relativeRow - 2;
+        const columnIndex = column + relativeColumn - 2;
+        const noteKey = `${rowIndex}:${columnIndex}`;
+
+        return {
+          clearContent: () => {
+            data[rowIndex][columnIndex] = '';
+          },
+          getNote: () => notes[noteKey] || '',
+          clearNote: () => {
+            notes[noteKey] = '';
+          },
+          setNote: note => {
+            notes[noteKey] = note;
+          }
+        };
+      }
+    })
+  };
+}
+
 function rowFromObject(headers, values) {
   return headers.map(header => Object.prototype.hasOwnProperty.call(values, header) ? values[header] : '');
 }
@@ -63,6 +99,16 @@ function testHeaderMappingWithCustomColumn() {
     MEMO: 10,
     EVENT_ID: 11
   });
+}
+
+function testEventIdColumnLookupWithMovedHeader() {
+  const headers = ['病歷號', '日曆eventID', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得'];
+  assert.strictEqual(context.getEventIdColumnForSheet_(makeHeaderSheet(headers)), 2);
+}
+
+function testEventIdColumnLookupMissingHeader() {
+  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得'];
+  assert.strictEqual(context.getEventIdColumnForSheet_(makeHeaderSheet(headers)), 0);
 }
 
 function testTimeNoteRoundTrip() {
@@ -215,6 +261,118 @@ function testConditionalFormattingKeepsTagIndependent() {
   });
 }
 
+function testClearOldEventsUsesFixedOpEventIdColumn() {
+  const originalSpreadsheetApp = context.SpreadsheetApp;
+  const originalGetConfiguredCalendarId = context.getConfiguredCalendarId_;
+  const originalIsCalendarAdvancedServiceAvailable = context.isCalendarAdvancedServiceAvailable_;
+  const originalWithCalendarSyncLock = context.withCalendarSyncLock_;
+  const originalDeleteCalendarEventByPossibleId = context.deleteCalendarEventByPossibleId_;
+  const headers = ['病歷號', '姓名', '日曆eventID', 'TEL'];
+  const opSheet = makeDataSheet(headers, [
+    ['001', '王小明', 'evt_deleted', '0911'],
+    ['002', '陳小美', '', '0922'],
+    ['003', '林大明', 'evt_missing', '0933'],
+    ['004', '黃小美', 'evt_failed', '0944']
+  ]);
+  const alerts = [];
+  const deleteCalls = [];
+  const ui = {
+    Button: { OK: 'OK' },
+    ButtonSet: { OK: 'OK', OK_CANCEL: 'OK_CANCEL' },
+    alert: (...args) => {
+      alerts.push(args);
+      return 'OK';
+    }
+  };
+
+  try {
+    context.SpreadsheetApp = {
+      getUi: () => ui,
+      getActiveSpreadsheet: () => ({
+        getSheetByName: name => name === 'OP' ? opSheet : null
+      })
+    };
+    context.getConfiguredCalendarId_ = () => 'calendar_1';
+    context.isCalendarAdvancedServiceAvailable_ = () => true;
+    context.withCalendarSyncLock_ = callback => {
+      callback();
+      return true;
+    };
+    context.deleteCalendarEventByPossibleId_ = (_calendarId, eventId) => {
+      deleteCalls.push(eventId);
+      if (eventId === 'evt_failed') {
+        return { ok: false, message: 'boom' };
+      }
+      return { ok: true, status: eventId === 'evt_missing' ? 'already_missing' : 'deleted' };
+    };
+
+    context.clearCalendarEventsFromSpecifiedColumn();
+
+    assert.deepStrictEqual(deleteCalls, ['evt_deleted', 'evt_missing', 'evt_failed']);
+    assert.deepStrictEqual(opSheet.rows, [
+      headers,
+      ['001', '王小明', '', '0911'],
+      ['002', '陳小美', '', '0922'],
+      ['003', '林大明', '', '0933'],
+      ['004', '黃小美', 'evt_failed', '0944']
+    ]);
+    assert.ok(alerts[0][1].includes('OP'));
+    assert.ok(alerts[0][1].includes('C 欄'));
+    assert.strictEqual(alerts[1][0], '清除完成');
+  } finally {
+    context.SpreadsheetApp = originalSpreadsheetApp;
+    context.getConfiguredCalendarId_ = originalGetConfiguredCalendarId;
+    context.isCalendarAdvancedServiceAvailable_ = originalIsCalendarAdvancedServiceAvailable;
+    context.withCalendarSyncLock_ = originalWithCalendarSyncLock;
+    context.deleteCalendarEventByPossibleId_ = originalDeleteCalendarEventByPossibleId;
+  }
+}
+
+function testClearOldEventsMissingEventIdHeaderAborts() {
+  const originalSpreadsheetApp = context.SpreadsheetApp;
+  const originalGetConfiguredCalendarId = context.getConfiguredCalendarId_;
+  const originalIsCalendarAdvancedServiceAvailable = context.isCalendarAdvancedServiceAvailable_;
+  const originalWithCalendarSyncLock = context.withCalendarSyncLock_;
+  const alerts = [];
+  let lockCalled = false;
+  const ui = {
+    Button: { OK: 'OK' },
+    ButtonSet: { OK: 'OK', OK_CANCEL: 'OK_CANCEL' },
+    alert: (...args) => {
+      alerts.push(args);
+      return 'OK';
+    }
+  };
+
+  try {
+    context.SpreadsheetApp = {
+      getUi: () => ui,
+      getActiveSpreadsheet: () => ({
+        getSheetByName: name => name === 'OP'
+          ? makeHeaderSheet(['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得'])
+          : null
+      })
+    };
+    context.getConfiguredCalendarId_ = () => 'calendar_1';
+    context.isCalendarAdvancedServiceAvailable_ = () => true;
+    context.withCalendarSyncLock_ = () => {
+      lockCalled = true;
+      return true;
+    };
+
+    context.clearCalendarEventsFromSpecifiedColumn();
+
+    assert.strictEqual(lockCalled, false);
+    assert.strictEqual(alerts.length, 1);
+    assert.ok(alerts[0][0].includes('日曆eventID'));
+  } finally {
+    context.SpreadsheetApp = originalSpreadsheetApp;
+    context.getConfiguredCalendarId_ = originalGetConfiguredCalendarId;
+    context.isCalendarAdvancedServiceAvailable_ = originalIsCalendarAdvancedServiceAvailable;
+    context.withCalendarSyncLock_ = originalWithCalendarSyncLock;
+  }
+}
+
 function testSurgeryExportDataForDate() {
   const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', '日曆eventID'];
   const cols = context.buildFieldColumnInfo_(makeHeaderSheet(headers)).columns;
@@ -286,11 +444,15 @@ function testUpcomingExportDatesIncludeSevenDays() {
 }
 
 testHeaderMappingWithCustomColumn();
+testEventIdColumnLookupWithMovedHeader();
+testEventIdColumnLookupMissingHeader();
 testTimeNoteRoundTrip();
 testMergeBlocksTrackedAbsorbedRows();
 testMergeCombinesSafeTextFields();
 testConditionalFormulaBuilding();
 testConditionalFormattingKeepsTagIndependent();
+testClearOldEventsUsesFixedOpEventIdColumn();
+testClearOldEventsMissingEventIdHeaderAborts();
 testSurgeryExportDataForDate();
 testUpcomingExportDatesIncludeSevenDays();
 

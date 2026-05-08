@@ -805,6 +805,11 @@ function getRequiredSheetColumns_(sheet) {
   return getRequiredSheetColumnInfo_(sheet).columns;
 }
 
+function getEventIdColumnForSheet_(sheet) {
+  const info = buildFieldColumnInfo_(sheet);
+  return info.columns.EVENT_ID || 0;
+}
+
 function getTableLastColumn_(sheet, columns) {
   const columnValues = columns ? Object.values(columns) : [];
   const requiredLastColumn = columnValues.length > 0
@@ -2741,24 +2746,54 @@ function deleteCalendarEventByPossibleId_(calendarId, rawEventId) {
   }
 }
 
-function extractSpreadsheetId_(input) {
-  const text = String(input || '').trim();
-  const match = text.match(/\/spreadsheets\/d\/([A-Za-z0-9_-]+)/);
-  return match ? match[1] : text;
-}
-
-function promptText_(ui, title, message) {
-  const response = ui.prompt(title, message, ui.ButtonSet.OK_CANCEL);
-  if (response.getSelectedButton() !== ui.Button.OK) return null;
-
-  return response.getResponseText().trim();
-}
-
 function clearSystemCalendarSyncNote_(range) {
   const note = range.getNote();
   if (note && String(note).startsWith(CALENDAR_SYNC_NOTE_PREFIX)) {
     range.clearNote();
   }
+}
+
+function countNonEmptyEventIds_(values) {
+  return values.reduce((count, rowValues) => count + (toCellText_(rowValues[0]) ? 1 : 0), 0);
+}
+
+function clearCalendarEventsInEventIdRange_(idRange, calendarId, deleteEventFn) {
+  const values = idRange.getValues();
+  const result = {
+    scannedCount: 0,
+    clearedCount: 0,
+    deletedCount: 0,
+    alreadyMissingCount: 0,
+    failedCount: 0
+  };
+  const deleteFn = deleteEventFn || deleteCalendarEventByPossibleId_;
+
+  values.forEach((rowValues, index) => {
+    const eventId = toCellText_(rowValues[0]);
+    if (!eventId) return;
+
+    result.scannedCount++;
+    const cell = idRange.getCell(index + 1, 1);
+    const deleteResult = deleteFn(calendarId, eventId);
+
+    if (deleteResult.ok) {
+      cell.clearContent();
+      clearSystemCalendarSyncNote_(cell);
+      result.clearedCount++;
+
+      if (deleteResult.status === 'deleted') {
+        result.deletedCount++;
+      } else if (deleteResult.status === 'already_missing') {
+        result.alreadyMissingCount++;
+      }
+      return;
+    }
+
+    result.failedCount++;
+    cell.setNote(`${CALENDAR_SYNC_NOTE_PREFIX}刪除日曆事件失敗：${deleteResult.message}`);
+  });
+
+  return result;
 }
 
 function clearCalendarEventsFromSpecifiedColumn() {
@@ -2775,79 +2810,42 @@ function clearCalendarEventsFromSpecifiedColumn() {
     return;
   }
 
-  const spreadsheetInput = promptText_(ui, '清除舊日曆事件', '請輸入 Spreadsheet URL 或 ID：');
-  if (spreadsheetInput === null) return;
-
-  const sheetName = promptText_(ui, '清除舊日曆事件', '請輸入工作表名稱：');
-  if (sheetName === null) return;
-
-  const columnInput = promptText_(ui, '清除舊日曆事件', '請輸入日曆 ID 欄位字母，例如 J：');
-  if (columnInput === null) return;
-
-  const spreadsheetId = extractSpreadsheetId_(spreadsheetInput);
-  const column = columnLetterToNumber_(columnInput);
-
-  if (!spreadsheetId || !column) {
-    ui.alert('Spreadsheet ID 或欄位字母格式不正確，未清除日曆事件。');
-    return;
-  }
-
-  let targetSpreadsheet;
-  try {
-    targetSpreadsheet = SpreadsheetApp.openById(spreadsheetId);
-  } catch (err) {
-    ui.alert(`無法開啟指定 Spreadsheet：${err.message || err}`);
-    return;
-  }
-
-  const targetSheet = targetSpreadsheet.getSheetByName(sheetName);
+  const targetSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_OP);
   if (!targetSheet) {
-    ui.alert(`找不到工作表「${sheetName}」，未清除日曆事件。`);
+    ui.alert(`找不到「${CONFIG.SHEET_OP}」工作表，未清除日曆事件。`);
+    return;
+  }
+
+  const column = getEventIdColumnForSheet_(targetSheet);
+  if (!column) {
+    ui.alert(`「${CONFIG.SHEET_OP}」工作表第 1 列找不到「${CONFIG.FIELD_HEADERS.EVENT_ID}」欄位，未清除日曆事件。`);
     return;
   }
 
   const lastRow = targetSheet.getLastRow();
   if (lastRow < 2) {
-    ui.alert('指定工作表沒有可處理的資料列。');
+    ui.alert(`「${CONFIG.SHEET_OP}」工作表沒有可處理的資料列。`);
     return;
   }
 
-  const result = {
-    scannedCount: 0,
-    clearedCount: 0,
-    deletedCount: 0,
-    alreadyMissingCount: 0,
-    failedCount: 0
-  };
+  const idRange = targetSheet.getRange(2, column, lastRow - 1, 1);
+  const nonEmptyCount = countNonEmptyEventIds_(idRange.getValues());
+  if (nonEmptyCount === 0) {
+    ui.alert(`「${CONFIG.SHEET_OP}」工作表的「${CONFIG.FIELD_HEADERS.EVENT_ID}」欄沒有可清除的事件 ID。`);
+    return;
+  }
 
+  const confirmResponse = ui.alert(
+    '清除舊事件',
+    `即將針對「${CONFIG.SHEET_OP}」工作表 ${columnToLetter_(column)} 欄（${CONFIG.FIELD_HEADERS.EVENT_ID}）清除 ${nonEmptyCount} 筆日曆事件。\n` +
+      '此動作會刪除 Calendar 事件並清空對應 eventID 儲存格。',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (confirmResponse !== ui.Button.OK) return;
+
+  let result;
   const executed = withCalendarSyncLock_(() => {
-    const idRange = targetSheet.getRange(2, column, lastRow - 1, 1);
-    const values = idRange.getValues();
-
-    values.forEach((rowValues, index) => {
-      const eventId = toCellText_(rowValues[0]);
-      if (!eventId) return;
-
-      result.scannedCount++;
-      const cell = idRange.getCell(index + 1, 1);
-      const deleteResult = deleteCalendarEventByPossibleId_(calendarId, eventId);
-
-      if (deleteResult.ok) {
-        cell.clearContent();
-        clearSystemCalendarSyncNote_(cell);
-        result.clearedCount++;
-
-        if (deleteResult.status === 'deleted') {
-          result.deletedCount++;
-        } else if (deleteResult.status === 'already_missing') {
-          result.alreadyMissingCount++;
-        }
-        return;
-      }
-
-      result.failedCount++;
-      cell.setNote(`${CALENDAR_SYNC_NOTE_PREFIX}刪除日曆事件失敗：${deleteResult.message}`);
-    });
+    result = clearCalendarEventsInEventIdRange_(idRange, calendarId);
   });
 
   if (!executed) {
@@ -2857,7 +2855,8 @@ function clearCalendarEventsFromSpecifiedColumn() {
 
   ui.alert(
     '清除完成',
-    `掃描 ${result.scannedCount} 格；` +
+    `工作表「${CONFIG.SHEET_OP}」${columnToLetter_(column)} 欄；` +
+      `掃描 ${result.scannedCount} 格；` +
       `刪除 ${result.deletedCount} 筆；` +
       `已不存在 ${result.alreadyMissingCount} 筆；` +
       `清空 ID ${result.clearedCount} 格；` +
@@ -2934,7 +2933,7 @@ function syncToCalendar(sheet, row, columns) {
   clearCalendarSyncNote_(chartNoCell);
 
   if (eventId && isLegacyCalendarEventId_(eventId)) {
-    setCalendarSyncNote_(eventIdCell, '這是舊 iCalUID，請先用「清除指定欄位舊日曆事件」刪除並清空後再重建。');
+    setCalendarSyncNote_(eventIdCell, '這是舊 iCalUID，請先用「清除舊事件」刪除並清空後再重建。');
     return 'skipped_legacy_event_id';
   }
 
