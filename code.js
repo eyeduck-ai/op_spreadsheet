@@ -16,7 +16,20 @@ const CONFIG = {
   CALENDAR_ID: 'YOUR_CALENDAR_ID_HERE', // fallback：優先使用 ScriptProperties 內的 Calendar ID
   SHEET_OP: 'OP',
   SHEET_OUT: '輸出表單',
-  FIELD_KEYS: ['CHART_NO', 'NAME', 'TEL', 'TAG', 'COND', 'DATE', 'TIME', 'PLAN', 'MEMO', 'EVENT_ID'],
+  FIELD_KEYS: [
+    'CHART_NO',
+    'NAME',
+    'TEL',
+    'TAG',
+    'COND',
+    'DATE',
+    'TIME',
+    'PLAN',
+    'MEMO',
+    'EVENT_ID',
+    'SHEET_WRITE_UPDATED'
+  ],
+  SYSTEM_FIELD_KEYS: ['EVENT_ID', 'SHEET_WRITE_UPDATED'],
   FIELD_HEADERS: {
     CHART_NO: '病歷號',
     NAME: '姓名',
@@ -27,10 +40,23 @@ const CONFIG = {
     TIME: '時間',
     PLAN: 'Plan',
     MEMO: '心得',
-    EVENT_ID: '日曆eventID'
+    EVENT_ID: 'CalendarEventId',
+    SHEET_WRITE_UPDATED: 'CalendarSheetWriteUpdated'
   },
 
-  HEADERS: ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', '日曆eventID'],
+  HEADERS: [
+    '病歷號',
+    '姓名',
+    'TEL',
+    'Tag',
+    'Condition',
+    '日期',
+    '時間',
+    'Plan',
+    '心得',
+    'CalendarEventId',
+    'CalendarSheetWriteUpdated'
+  ],
   TAG_OPTIONS: ['CATA', 'Eyelid', 'Retina', 'OP', 'FU', 'Suture IOL', 'Complication'],
 
   // 條件格式化關鍵字：
@@ -59,7 +85,9 @@ const CALENDAR_SYNC_TOKEN_PROPERTY_PREFIX = 'CALENDAR_SYNC_TOKEN_';
 const CALENDAR_REVERSE_SYNC_HANDLER = 'processCalendarChange';
 const CALENDAR_TITLE_SEPARATOR = '|';
 const CALENDAR_ID_SCRIPT_PROPERTY_KEY = 'CALENDAR_ID';
-const LEGACY_API_EVENT_ID_HEADER = '日曆apiEventID';
+const LEGACY_EVENT_ID_HEADERS = ['日曆eventID', '日曆apiEventID'];
+const SYSTEM_COLUMN_PROTECTION_PREFIX = 'OP_SPREADSHEET_SYSTEM_COLUMN:';
+const SYSTEM_COLUMN_PROTECTION_EDITORS_PROPERTY_KEY = 'SYSTEM_COLUMN_PROTECTION_EDITORS';
 
 // 條件格式沒有 metadata 可標記來源，因此在 custom formula 中放入 N("...") marker。
 // initializeSheet() 重新執行時會用這些 marker 辨識並替換系統規則，同時保留使用者自訂規則。
@@ -139,6 +167,134 @@ function getCalendarSyncToken_(calendarId) {
 function setCalendarSyncToken_(calendarId, syncToken) {
   PropertiesService.getScriptProperties()
     .setProperty(getCalendarSyncTokenPropertyKey_(calendarId), syncToken);
+}
+
+function parseCalendarUpdatedMillis_(updated) {
+  const text = toCellText_(updated);
+  if (!text) return NaN;
+
+  const millis = new Date(text).getTime();
+  return isNaN(millis) ? NaN : millis;
+}
+
+function compareCalendarUpdated_(eventUpdated, rememberedUpdated) {
+  const eventUpdatedText = toCellText_(eventUpdated);
+  const rememberedUpdatedText = toCellText_(rememberedUpdated);
+  if (!eventUpdatedText || !rememberedUpdatedText) return null;
+
+  const eventMillis = parseCalendarUpdatedMillis_(eventUpdatedText);
+  const rememberedMillis = parseCalendarUpdatedMillis_(rememberedUpdatedText);
+
+  if (!isNaN(eventMillis) && !isNaN(rememberedMillis)) {
+    if (eventMillis < rememberedMillis) return -1;
+    if (eventMillis > rememberedMillis) return 1;
+    return 0;
+  }
+
+  return eventUpdatedText === rememberedUpdatedText ? 0 : null;
+}
+
+function buildCalendarApiEventResourceFromSheetRow_(sheet, row, columns) {
+  const rowData = sheet.getRange(row, 1, 1, getTableLastColumn_(sheet, columns)).getValues()[0];
+  const chartNoText = toCellText_(getRowFieldValue_(rowData, columns, 'CHART_NO'));
+  const patientNameText = toSingleLineText_(getRowFieldValue_(rowData, columns, 'NAME'));
+  const telText = toCellText_(getRowFieldValue_(rowData, columns, 'TEL'));
+  const tagText = toCellText_(getRowFieldValue_(rowData, columns, 'TAG'));
+  const conditionText = toSingleLineText_(getRowFieldValue_(rowData, columns, 'COND'));
+  const dateVal = getRowFieldValue_(rowData, columns, 'DATE');
+  const timeVal = getRowFieldValue_(rowData, columns, 'TIME');
+  const planText = toCellText_(getRowFieldValue_(rowData, columns, 'PLAN'));
+
+  if (!chartNoText || !dateVal) return null;
+
+  const dateObj = new Date(dateVal);
+  if (isNaN(dateObj.getTime())) return null;
+
+  const timeInfo = resolveCalendarTime_(timeVal);
+  if (timeInfo.errorMessage) return null;
+
+  return buildCalendarApiEventResource_(
+    buildCalendarTitle_(chartNoText, patientNameText, conditionText),
+    buildCalendarDescription_(telText, planText, timeInfo.timeNote),
+    dateObj,
+    timeInfo,
+    tagText
+  );
+}
+
+function sameCalendarDateTimeValue_(left, right) {
+  const leftText = toCellText_(left);
+  const rightText = toCellText_(right);
+  if (!leftText || !rightText) return leftText === rightText;
+
+  const leftMillis = new Date(leftText).getTime();
+  const rightMillis = new Date(rightText).getTime();
+  if (!isNaN(leftMillis) && !isNaN(rightMillis)) {
+    return leftMillis === rightMillis;
+  }
+
+  return leftText === rightText;
+}
+
+function calendarEventEndpointMatchesResource_(eventEndpoint, resourceEndpoint) {
+  const eventValue = eventEndpoint || {};
+  const resourceValue = resourceEndpoint || {};
+
+  if (resourceValue.date) {
+    return toCellText_(eventValue.date) === toCellText_(resourceValue.date);
+  }
+
+  if (resourceValue.dateTime) {
+    return sameCalendarDateTimeValue_(eventValue.dateTime, resourceValue.dateTime);
+  }
+
+  return !eventValue.date && !eventValue.dateTime;
+}
+
+function calendarEventMatchesResource_(event, resource) {
+  if (!event || !resource) return false;
+
+  return toCellText_(event.summary) === toCellText_(resource.summary) &&
+    toCellText_(event.description) === toCellText_(resource.description) &&
+    toCellText_(event.colorId || CONFIG.COLORS.DEFAULT) === toCellText_(resource.colorId || CONFIG.COLORS.DEFAULT) &&
+    calendarEventEndpointMatchesResource_(event.start, resource.start) &&
+    calendarEventEndpointMatchesResource_(event.end, resource.end);
+}
+
+function calendarEventMatchesCurrentSheetProjection_(sheet, row, columns, event) {
+  const resource = buildCalendarApiEventResourceFromSheetRow_(sheet, row, columns);
+  return calendarEventMatchesResource_(event, resource);
+}
+
+function isSheetOriginatedCalendarEcho_(sheet, row, columns, event) {
+  if (!row || !columns.SHEET_WRITE_UPDATED) return false;
+
+  const comparison = compareCalendarUpdated_(
+    event && event.updated,
+    sheet.getRange(row, columns.SHEET_WRITE_UPDATED).getValue()
+  );
+
+  if (comparison === null) return false;
+  if (comparison < 0) return true;
+  if (comparison > 0) return false;
+
+  return calendarEventMatchesCurrentSheetProjection_(sheet, row, columns, event);
+}
+
+function writeSheetOriginatedCalendarState_(sheet, row, columns, event, fallbackEventId) {
+  const eventId = toCellText_(event && event.id) || toCellText_(fallbackEventId);
+  const updated = toCellText_(event && event.updated);
+
+  if (eventId) {
+    sheet.getRange(row, columns.EVENT_ID).setValue(eventId);
+  }
+
+  sheet.getRange(row, columns.SHEET_WRITE_UPDATED).setValue(updated);
+}
+
+function clearSheetOriginatedCalendarState_(sheet, row, columns) {
+  sheet.getRange(row, columns.EVENT_ID).clearContent();
+  sheet.getRange(row, columns.SHEET_WRITE_UPDATED).clearContent();
 }
 
 function normalizeCalendarId_(calendarId) {
@@ -752,6 +908,7 @@ function buildFieldColumnInfo_(sheet) {
   const headerValues = getSheetHeaderValues_(sheet);
   const headerToKey = getFieldHeaderToKeyMap_();
   const columns = {};
+  const canonicalColumns = {};
   const duplicateColumnsByHeader = {};
   const legacyEventIdColumns = [];
 
@@ -759,7 +916,7 @@ function buildFieldColumnInfo_(sheet) {
     const header = toCellText_(value);
     if (!header) return;
 
-    if (header === LEGACY_API_EVENT_ID_HEADER) {
+    if (LEGACY_EVENT_ID_HEADERS.indexOf(header) !== -1) {
       legacyEventIdColumns.push(index + 1);
     }
 
@@ -775,16 +932,24 @@ function buildFieldColumnInfo_(sheet) {
     }
 
     columns[fieldKey] = index + 1;
+    canonicalColumns[fieldKey] = index + 1;
   });
 
+  if (!columns.EVENT_ID && legacyEventIdColumns.length > 0) {
+    columns.EVENT_ID = legacyEventIdColumns[0];
+  }
+
   const missingKeys = CONFIG.FIELD_KEYS.filter(fieldKey => !columns[fieldKey]);
+  const missingCanonicalKeys = CONFIG.FIELD_KEYS.filter(fieldKey => !canonicalColumns[fieldKey]);
   const duplicateMessages = Object.keys(duplicateColumnsByHeader).map(header => {
     return `「${header}」出現在 ${formatColumnList_(duplicateColumnsByHeader[header])} 欄，系統會使用最左側欄位。`;
   });
 
   return {
     columns,
+    canonicalColumns,
     missingKeys,
+    missingCanonicalKeys,
     duplicateMessages,
     legacyEventIdColumns,
     lastHeaderColumn: getLastHeaderColumnFromValues_(headerValues) || CONFIG.HEADERS.length
@@ -807,7 +972,7 @@ function getRequiredSheetColumns_(sheet) {
 
 function getEventIdColumnForSheet_(sheet) {
   const info = buildFieldColumnInfo_(sheet);
-  return info.columns.EVENT_ID || 0;
+  return info.canonicalColumns.EVENT_ID || info.columns.EVENT_ID || 0;
 }
 
 function getTableLastColumn_(sheet, columns) {
@@ -872,7 +1037,6 @@ function assertActiveOpSheet_(sheet) {
 function buildCalendarTitle_(chartNoText, patientNameText, conditionText) {
   return [chartNoText, patientNameText, conditionText]
     .map(value => toSingleLineText_(value))
-    .filter(Boolean)
     .join(` ${CALENDAR_TITLE_SEPARATOR} `);
 }
 
@@ -902,11 +1066,11 @@ function parseCalendarTitle_(title) {
     .split(CALENDAR_TITLE_SEPARATOR)
     .map(part => part.trim());
 
-  if (pipeParts.length >= 2 && pipeParts[0] && pipeParts[1]) {
+  if (pipeParts.length >= 2 && pipeParts[0]) {
     return {
       ok: true,
       chartNo: pipeParts[0],
-      patientName: pipeParts[1],
+      patientName: pipeParts[1] || '',
       condition: pipeParts.slice(2).join(` ${CALENDAR_TITLE_SEPARATOR} `).trim(),
       format: 'pipe'
     };
@@ -985,10 +1149,11 @@ function parseCalendarDescription_(description) {
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   const maintenanceMenu = ui.createMenu('維護工具')
-    .addItem('安裝', 'setup')
+    .addItem('完整安裝／批次同步', 'setup')
     .addSeparator()
     .addItem('設定日曆', 'promptAndSaveCalendarId')
     .addItem('初始化表格', 'initializeSheet')
+    .addItem('資料遷移（不批次同步）', 'runMigrations')
     .addItem('安裝同步', 'installProcessRowChangeTrigger')
     .addItem('安裝反向同步', 'setupCalendarReverseSync')
     .addItem('安裝自動輸出', 'installAutoExportTriggers')
@@ -1415,6 +1580,7 @@ function duplicateRow() {
   sheet.getRange(activeRow + 1, cols.DATE).clearContent();
   sheet.getRange(activeRow + 1, cols.TIME).clearContent();
   sheet.getRange(activeRow + 1, cols.EVENT_ID).clearContent();
+  sheet.getRange(activeRow + 1, cols.SHEET_WRITE_UPDATED).clearContent();
   });
 }
 
@@ -1549,30 +1715,26 @@ function ensureSheetHasColumn_(sheet, column) {
   }
 }
 
-function migrateLegacyApiEventIdColumn_(sheet) {
+function migrateLegacyEventIdColumns_(sheet) {
   const info = buildFieldColumnInfo_(sheet);
-  let currentEventIdColumn = info.columns.EVENT_ID || 0;
+  let currentEventIdColumn = info.canonicalColumns.EVENT_ID || 0;
   const legacyColumns = info.legacyEventIdColumns.slice();
 
-  if (legacyColumns.length === 0) {
+  if (!currentEventIdColumn || legacyColumns.length === 0) {
     return {
       changed: false,
       message: ''
     };
   }
 
-  let renamedLegacyColumn = false;
   let deletedLegacyCount = 0;
   let copiedValueCount = 0;
-
-  if (!currentEventIdColumn) {
-    currentEventIdColumn = legacyColumns.shift();
-    sheet.getRange(1, currentEventIdColumn).setValue(CONFIG.FIELD_HEADERS.EVENT_ID);
-    renamedLegacyColumn = true;
-  }
+  const conflictMessages = [];
 
   legacyColumns.sort((a, b) => b - a).forEach(legacyColumn => {
     const lastRow = sheet.getLastRow();
+    const legacyHeader = toCellText_(sheet.getRange(1, legacyColumn).getValue());
+    const conflictedRows = [];
 
     if (lastRow >= 2 && currentEventIdColumn && legacyColumn !== currentEventIdColumn) {
       const currentRange = sheet.getRange(2, currentEventIdColumn, lastRow - 1, 1);
@@ -1581,16 +1743,30 @@ function migrateLegacyApiEventIdColumn_(sheet) {
       let hasCopiedValues = false;
 
       legacyValues.forEach((rowValues, index) => {
-        if (!toCellText_(currentValues[index][0]) && toCellText_(rowValues[0])) {
-          currentValues[index][0] = rowValues[0];
+        const legacyValue = toCellText_(rowValues[0]);
+        const currentValue = toCellText_(currentValues[index][0]);
+
+        if (!legacyValue) return;
+
+        if (!currentValue) {
+          currentValues[index][0] = legacyValue;
           copiedValueCount++;
           hasCopiedValues = true;
+        } else if (currentValue !== legacyValue) {
+          conflictedRows.push(index + 2);
         }
       });
 
       if (hasCopiedValues) {
         currentRange.setValues(currentValues);
       }
+    }
+
+    if (conflictedRows.length > 0) {
+      conflictMessages.push(
+        `「${legacyHeader}」${columnToLetter_(legacyColumn)} 欄有 ${conflictedRows.length} 列與「${CONFIG.FIELD_HEADERS.EVENT_ID}」不同，已保留舊欄。`
+      );
+      return;
     }
 
     sheet.deleteColumn(legacyColumn);
@@ -1602,18 +1778,16 @@ function migrateLegacyApiEventIdColumn_(sheet) {
   });
 
   const messageParts = [];
-  if (renamedLegacyColumn) {
-    messageParts.push(`已將舊系統欄位「${LEGACY_API_EVENT_ID_HEADER}」改為「${CONFIG.FIELD_HEADERS.EVENT_ID}」。`);
-  }
   if (deletedLegacyCount > 0) {
-    messageParts.push(`已移除 ${deletedLegacyCount} 個舊系統欄位「${LEGACY_API_EVENT_ID_HEADER}」。`);
+    messageParts.push(`已移除 ${deletedLegacyCount} 個舊系統欄位（${LEGACY_EVENT_ID_HEADERS.map(header => `「${header}」`).join('、')}）。`);
   }
   if (copiedValueCount > 0) {
-    messageParts.push(`已從舊欄位補回 ${copiedValueCount} 格日曆 ID。`);
+    messageParts.push(`已從舊欄位補回 ${copiedValueCount} 格 Calendar event ID。`);
   }
+  conflictMessages.forEach(message => messageParts.push(message));
 
   return {
-    changed: true,
+    changed: messageParts.length > 0,
     message: messageParts.join('\n')
   };
 }
@@ -1638,7 +1812,7 @@ function ensureHeaders_(sheet) {
   let info = buildFieldColumnInfo_(sheet);
   let nextColumn = getLastHeaderColumn_(sheet) + 1;
 
-  info.missingKeys.forEach(fieldKey => {
+  info.missingCanonicalKeys.forEach(fieldKey => {
     ensureSheetHasColumn_(sheet, nextColumn);
     const header = CONFIG.FIELD_HEADERS[fieldKey];
     sheet.getRange(1, nextColumn).setValue(header);
@@ -1663,6 +1837,7 @@ function applyDataFormats_(sheet, columns) {
   sheet.getRange(2, columns.TIME, dataRowCount, 1).setNumberFormat('@');
   sheet.getRange(2, columns.DATE, dataRowCount, 1).setNumberFormat('yyyy/mm/dd');
   sheet.getRange(2, columns.EVENT_ID, dataRowCount, 1).setNumberFormat('@');
+  sheet.getRange(2, columns.SHEET_WRITE_UPDATED, dataRowCount, 1).setNumberFormat('@');
 
   const tagRange = sheet.getRange(2, columns.TAG, dataRowCount, 1);
   const ruleValidation = SpreadsheetApp.newDataValidation()
@@ -1688,6 +1863,7 @@ function applyRowDataFormats_(sheet, row, columns) {
   sheet.getRange(row, cols.TIME).setNumberFormat('@');
   sheet.getRange(row, cols.DATE).setNumberFormat('yyyy/mm/dd');
   sheet.getRange(row, cols.EVENT_ID).setNumberFormat('@');
+  sheet.getRange(row, cols.SHEET_WRITE_UPDATED).setNumberFormat('@');
 
   const ruleValidation = SpreadsheetApp.newDataValidation()
     .requireValueInList(CONFIG.TAG_OPTIONS, true)
@@ -1701,7 +1877,139 @@ function applyRowDataFormats_(sheet, row, columns) {
 }
 
 function hideSystemColumns_(sheet, columns) {
-  sheet.hideColumns(columns.EVENT_ID);
+  CONFIG.SYSTEM_FIELD_KEYS.forEach(fieldKey => {
+    if (columns[fieldKey]) {
+      sheet.hideColumns(columns[fieldKey]);
+    }
+  });
+}
+
+function getSystemColumnProtectionDescription_(fieldKey) {
+  return SYSTEM_COLUMN_PROTECTION_PREFIX + fieldKey;
+}
+
+function removeManagedSystemColumnProtections_(sheet, description) {
+  if (!SpreadsheetApp.ProtectionType) return;
+
+  sheet.getProtections(SpreadsheetApp.ProtectionType.RANGE)
+    .filter(protection => protection.getDescription() === description)
+    .forEach(protection => protection.remove());
+}
+
+function getUserEmail_(user) {
+  if (!user) return '';
+  if (typeof user === 'string') return user.trim();
+
+  try {
+    return toCellText_(user.getEmail && user.getEmail()).trim();
+  } catch (err) {
+    return '';
+  }
+}
+
+function getConfiguredSystemColumnProtectionEditors_() {
+  try {
+    const value = PropertiesService.getScriptProperties()
+      .getProperty(SYSTEM_COLUMN_PROTECTION_EDITORS_PROPERTY_KEY);
+    return String(value || '')
+      .split(/[\n,;]/)
+      .map(email => email.trim())
+      .filter(Boolean);
+  } catch (err) {
+    return [];
+  }
+}
+
+function getSystemColumnProtectionEditors_() {
+  const editors = [];
+
+  try {
+    const effectiveUser = Session.getEffectiveUser();
+    if (effectiveUser) editors.push(effectiveUser);
+  } catch (err) {
+    // Apps Script may hide the effective user in some trigger contexts.
+  }
+
+  getConfiguredSystemColumnProtectionEditors_().forEach(email => editors.push(email));
+
+  const seenEmails = {};
+  return editors.filter(editor => {
+    const email = getUserEmail_(editor).toLowerCase();
+    if (!email) return true;
+    if (seenEmails[email]) return false;
+    seenEmails[email] = true;
+    return true;
+  });
+}
+
+function protectSystemColumn_(sheet, column, description) {
+  removeManagedSystemColumnProtections_(sheet, description);
+
+  const protection = sheet.getRange(1, column, sheet.getMaxRows(), 1)
+    .protect()
+    .setDescription(description)
+    .setWarningOnly(false);
+  const allowedEditors = getSystemColumnProtectionEditors_();
+  const allowedEmails = {};
+
+  allowedEditors.forEach(editor => {
+    const email = getUserEmail_(editor).toLowerCase();
+    if (email) allowedEmails[email] = true;
+
+    try {
+      protection.addEditor(editor);
+    } catch (err) {
+      try {
+        protection.setWarningOnly(true);
+      } catch (warningErr) {
+        // Ignore cleanup errors; the caller will surface the original failure.
+      }
+      try {
+        protection.remove();
+      } catch (removeErr) {
+        // Ignore cleanup errors; the caller will surface the original failure.
+      }
+      throw new Error(`無法保留系統欄保護編輯者「${email || editor}」：${err.message || err}`);
+    }
+  });
+
+  const allowedEmailList = Object.keys(allowedEmails);
+  if (allowedEmailList.length > 0) {
+    const removableEditors = protection.getEditors().filter(editor => {
+      const email = getUserEmail_(editor).toLowerCase();
+      return email && !allowedEmails[email];
+    });
+
+    if (removableEditors.length > 0) {
+      protection.removeEditors(removableEditors);
+    }
+  }
+
+  if (protection.canDomainEdit()) {
+    protection.setDomainEdit(false);
+  }
+}
+
+function protectSystemColumns_(sheet, columns) {
+  const failedMessages = [];
+
+  CONFIG.SYSTEM_FIELD_KEYS.forEach(fieldKey => {
+    const column = columns[fieldKey];
+    if (!column) return;
+
+    try {
+      protectSystemColumn_(sheet, column, getSystemColumnProtectionDescription_(fieldKey));
+    } catch (err) {
+      failedMessages.push(`${CONFIG.FIELD_HEADERS[fieldKey]}：${err.message || err}`);
+    }
+  });
+
+  return {
+    ok: failedMessages.length === 0,
+    message: failedMessages.length > 0
+      ? `系統欄位保護設定失敗：\n${failedMessages.join('\n')}`
+      : ''
+  };
 }
 
 function getConditionalRuleFormula_(rule) {
@@ -1981,14 +2289,15 @@ function initializeSheet_(showAlert) {
   }
 
   ensureMinimumSheetSize_(sheet);
-  const legacyColumnResult = migrateLegacyApiEventIdColumn_(sheet);
   const headerResult = ensureHeaders_(sheet);
-  const columns = headerResult.columns;
+  const legacyColumnResult = migrateLegacyEventIdColumns_(sheet);
+  const columns = getRequiredSheetColumns_(sheet);
   applyDataFormats_(sheet, columns);
   applyTableAlignment_(sheet, columns);
   const timeResult = normalizeExistingTimes_(sheet, columns);
   applyConditionalFormatting_(sheet, columns);
   hideSystemColumns_(sheet, columns);
+  const protectionResult = protectSystemColumns_(sheet, columns);
 
   const addedHeaderMessage = headerResult.addedHeaders.length > 0
     ? `\n已補齊欄位：${headerResult.addedHeaders.map(header => `「${header}」`).join('、')}。`
@@ -1999,6 +2308,9 @@ function initializeSheet_(showAlert) {
   const legacyColumnMessage = legacyColumnResult.message
     ? '\n' + legacyColumnResult.message
     : '';
+  const protectionMessage = protectionResult.message
+    ? '\n' + protectionResult.message
+    : '';
 
   if (showAlert) {
     ui.alert(
@@ -2007,6 +2319,7 @@ function initializeSheet_(showAlert) {
         `時間欄位已轉換 ${timeResult.normalizedCount} 格，格式錯誤 ${timeResult.errorCount} 格。` +
         addedHeaderMessage +
         legacyColumnMessage +
+        protectionMessage +
         duplicateHeaderMessage,
       ui.ButtonSet.OK
     );
@@ -2015,12 +2328,73 @@ function initializeSheet_(showAlert) {
   return {
     ok: true,
     timeResult,
-    mismatchMessage: addedHeaderMessage + legacyColumnMessage + duplicateHeaderMessage
+    mismatchMessage: addedHeaderMessage + legacyColumnMessage + protectionMessage + duplicateHeaderMessage
   };
 }
 
 function initializeSheet() {
   initializeSheet_(true);
+}
+
+function runMigrations_(showAlert) {
+  const ui = SpreadsheetApp.getUi();
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_OP);
+
+  if (!sheet) {
+    return {
+      ok: false,
+      message: `找不到「${CONFIG.SHEET_OP}」工作表，資料遷移未執行。`
+    };
+  }
+
+  ensureMinimumSheetSize_(sheet);
+  const headerResult = ensureHeaders_(sheet);
+  const legacyColumnResult = migrateLegacyEventIdColumns_(sheet);
+  const columns = getRequiredSheetColumns_(sheet);
+  applyDataFormats_(sheet, columns);
+  hideSystemColumns_(sheet, columns);
+  const protectionResult = protectSystemColumns_(sheet, columns);
+  const messageParts = [];
+
+  if (headerResult.addedHeaders.length > 0) {
+    messageParts.push(`已補齊欄位：${headerResult.addedHeaders.map(header => `「${header}」`).join('、')}。`);
+  }
+
+  if (legacyColumnResult.message) {
+    messageParts.push(legacyColumnResult.message);
+  }
+
+  if (protectionResult.message) {
+    messageParts.push(protectionResult.message);
+  }
+
+  if (headerResult.duplicateMessages.length > 0) {
+    messageParts.push(`以下必要欄位名稱重複，系統會使用最左側欄位：\n${headerResult.duplicateMessages.join('\n')}`);
+  }
+
+  const message = messageParts.length > 0
+    ? messageParts.join('\n')
+    : '沒有需要遷移的資料；系統欄位已確認、隱藏並嘗試保護。';
+
+  if (showAlert) {
+    ui.alert('資料遷移完成', message, ui.ButtonSet.OK);
+  }
+
+  return {
+    ok: true,
+    message,
+    headerResult,
+    legacyColumnResult,
+    protectionResult
+  };
+}
+
+function runMigrations() {
+  const result = runMigrations_(true);
+  if (!result.ok) {
+    SpreadsheetApp.getUi().alert(result.message);
+  }
+  return result;
 }
 
 /**
@@ -2152,6 +2526,7 @@ function isCalendarSyncTokenInvalidError_(err) {
 function buildCalendarEventRowIndex_(sheet) {
   const index = {
     byEventId: {},
+    duplicateEventIds: {},
     columns: getRequiredSheetColumns_(sheet)
   };
   const lastRow = sheet.getLastRow();
@@ -2164,9 +2539,17 @@ function buildCalendarEventRowIndex_(sheet) {
     const row = indexOffset + 2;
     const eventId = toCellText_(rowValues[0]);
 
-    if (eventId && !index.byEventId[eventId]) {
+    if (!eventId) return;
+
+    if (!index.byEventId[eventId]) {
       index.byEventId[eventId] = row;
+      return;
     }
+
+    if (!index.duplicateEventIds[eventId]) {
+      index.duplicateEventIds[eventId] = [index.byEventId[eventId]];
+    }
+    index.duplicateEventIds[eventId].push(row);
   });
 
   return index;
@@ -2186,6 +2569,23 @@ function findSheetRowForCalendarApiEvent_(rowIndex, event) {
   }
 
   return 0;
+}
+
+function getDuplicateRowsForCalendarApiEvent_(rowIndex, event) {
+  const eventId = toCellText_(event && event.id);
+  if (!eventId || !rowIndex.duplicateEventIds) return [];
+
+  return rowIndex.duplicateEventIds[eventId] || [];
+}
+
+function markDuplicateCalendarEventIdRows_(sheet, rows, columns, eventId) {
+  const rowList = rows.join(', ');
+  const note = `${CALENDAR_SYNC_NOTE_PREFIX}CalendarEventId 重複：${eventId} 同時出現在第 ${rowList} 列。請保留正確列的 ID，清空其他列後再同步。`;
+
+  rows.forEach(row => {
+    const cell = sheet.getRange(row, columns.EVENT_ID);
+    cell.setNote(note);
+  });
 }
 
 function parseCalendarDateOnly_(dateText) {
@@ -2268,7 +2668,7 @@ function markSheetRowCalendarDeleted_(sheet, row, columns) {
   const cols = columns || getRequiredSheetColumns_(sheet);
   sheet.getRange(row, cols.DATE).clearContent();
   sheet.getRange(row, cols.TIME).clearContent();
-  sheet.getRange(row, cols.EVENT_ID).clearContent();
+  clearSheetOriginatedCalendarState_(sheet, row, cols);
   addCalendarDeletedMemoNote_(sheet.getRange(row, cols.MEMO));
 }
 
@@ -2343,10 +2743,20 @@ function appendSheetRowFromCalendarApiEvent_(sheet, event, dateTimeInfo, columns
   return row;
 }
 
-function processCalendarApiEventChange_(sheet, rowIndex, event) {
+function processCalendarApiEventChange_(sheet, rowIndex, event, calendarId) {
   if (!event || !event.id) return 'skipped_missing_event_id';
 
   const row = findSheetRowForCalendarApiEvent_(rowIndex, event);
+  const duplicateRows = getDuplicateRowsForCalendarApiEvent_(rowIndex, event);
+  if (duplicateRows.length > 0) {
+    markDuplicateCalendarEventIdRows_(sheet, duplicateRows, rowIndex.columns, event.id);
+    console.warn(`Calendar event ${event.id} 對應到重複 CalendarEventId 列：${duplicateRows.join(', ')}`);
+    return 'skipped_duplicate_event_id';
+  }
+
+  if (row && isSheetOriginatedCalendarEcho_(sheet, row, rowIndex.columns, event)) {
+    return 'skipped_sheet_echo';
+  }
 
   if (event.status === 'cancelled') {
     if (!row) return 'skipped_deleted_unmatched';
@@ -2433,7 +2843,7 @@ function syncCalendarChangesToSheet_(calendarId) {
       response = Calendar.Events.list(calendarId, options);
 
       (response.items || []).forEach(event => {
-        const status = processCalendarApiEventChange_(sheet, rowIndex, event);
+        const status = processCalendarApiEventChange_(sheet, rowIndex, event, calendarId);
         statusCounts[status] = (statusCounts[status] || 0) + 1;
 
         if (['updated', 'created', 'deleted_marked'].indexOf(status) !== -1) {
@@ -2757,7 +3167,7 @@ function countNonEmptyEventIds_(values) {
   return values.reduce((count, rowValues) => count + (toCellText_(rowValues[0]) ? 1 : 0), 0);
 }
 
-function clearCalendarEventsInEventIdRange_(idRange, calendarId, deleteEventFn) {
+function clearCalendarEventsInEventIdRange_(idRange, calendarId, deleteEventFn, sheetWriteUpdatedRange) {
   const values = idRange.getValues();
   const result = {
     scannedCount: 0,
@@ -2779,6 +3189,13 @@ function clearCalendarEventsInEventIdRange_(idRange, calendarId, deleteEventFn) 
     if (deleteResult.ok) {
       cell.clearContent();
       clearSystemCalendarSyncNote_(cell);
+
+      if (sheetWriteUpdatedRange) {
+        const sheetWriteUpdatedCell = sheetWriteUpdatedRange.getCell(index + 1, 1);
+        sheetWriteUpdatedCell.clearContent();
+        clearSystemCalendarSyncNote_(sheetWriteUpdatedCell);
+      }
+
       result.clearedCount++;
 
       if (deleteResult.status === 'deleted') {
@@ -2829,23 +3246,31 @@ function clearCalendarEventsFromSpecifiedColumn() {
   }
 
   const idRange = targetSheet.getRange(2, column, lastRow - 1, 1);
+  const columnInfo = buildFieldColumnInfo_(targetSheet);
+  const sheetWriteUpdatedColumn = columnInfo.canonicalColumns.SHEET_WRITE_UPDATED || 0;
+  const sheetWriteUpdatedRange = sheetWriteUpdatedColumn
+    ? targetSheet.getRange(2, sheetWriteUpdatedColumn, lastRow - 1, 1)
+    : null;
   const nonEmptyCount = countNonEmptyEventIds_(idRange.getValues());
   if (nonEmptyCount === 0) {
     ui.alert(`「${CONFIG.SHEET_OP}」工作表的「${CONFIG.FIELD_HEADERS.EVENT_ID}」欄沒有可清除的事件 ID。`);
     return;
   }
 
+  const clearStateMessage = sheetWriteUpdatedRange
+    ? `此動作會刪除 Calendar 事件，並清空對應 ${CONFIG.FIELD_HEADERS.EVENT_ID} 與 ${CONFIG.FIELD_HEADERS.SHEET_WRITE_UPDATED} 儲存格。`
+    : `此動作會刪除 Calendar 事件並清空對應 ${CONFIG.FIELD_HEADERS.EVENT_ID} 儲存格。`;
   const confirmResponse = ui.alert(
     '清除舊事件',
     `即將針對「${CONFIG.SHEET_OP}」工作表 ${columnToLetter_(column)} 欄（${CONFIG.FIELD_HEADERS.EVENT_ID}）清除 ${nonEmptyCount} 筆日曆事件。\n` +
-      '此動作會刪除 Calendar 事件並清空對應 eventID 儲存格。',
+      clearStateMessage,
     ui.ButtonSet.OK_CANCEL
   );
   if (confirmResponse !== ui.Button.OK) return;
 
   let result;
   const executed = withCalendarSyncLock_(() => {
-    result = clearCalendarEventsInEventIdRange_(idRange, calendarId);
+    result = clearCalendarEventsInEventIdRange_(idRange, calendarId, null, sheetWriteUpdatedRange);
   });
 
   if (!executed) {
@@ -2917,7 +3342,7 @@ function syncToCalendar(sheet, row, columns) {
         return 'skipped_delete_failed';
       }
 
-      eventIdCell.clearContent();
+      clearSheetOriginatedCalendarState_(sheet, row, cols);
       clearSystemCalendarSyncNote_(eventIdCell);
       return 'deleted';
     }
@@ -2958,7 +3383,7 @@ function syncToCalendar(sheet, row, columns) {
   if (eventId) {
     try {
       const updatedEvent = updateCalendarApiEvent_(calendarId, eventId, eventResource);
-      eventIdCell.setValue(updatedEvent.id || eventId);
+      writeSheetOriginatedCalendarState_(sheet, row, cols, updatedEvent, eventId);
       clearSystemCalendarSyncNote_(eventIdCell);
       return 'updated';
     } catch (err) {
@@ -2971,7 +3396,7 @@ function syncToCalendar(sheet, row, columns) {
 
   try {
     const createdEvent = Calendar.Events.insert(eventResource, calendarId);
-    eventIdCell.setValue(createdEvent.id);
+    writeSheetOriginatedCalendarState_(sheet, row, cols, createdEvent, '');
     clearSystemCalendarSyncNote_(eventIdCell);
     return 'created';
   } catch (err) {
