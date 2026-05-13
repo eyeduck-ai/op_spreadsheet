@@ -1201,6 +1201,12 @@ function formatExportDate_(date) {
   return Utilities.formatDate(date, Session.getScriptTimeZone(), 'yyyy/MM/dd');
 }
 
+function formatExportDateWithWeekday_(date) {
+  const dateText = formatExportDate_(date);
+  const weekdayText = Utilities.formatDate(date, Session.getScriptTimeZone(), 'E');
+  return `${dateText}(${weekdayText})`;
+}
+
 function parseExportDate_(value) {
   const date = new Date(value);
   return isNaN(date.getTime()) ? null : date;
@@ -1240,8 +1246,8 @@ function buildSurgeryExportItemsFromRow_(row, cols) {
     iolRow = [
       getRowFieldValue_(row, cols, 'NAME'),
       iolDetails[0] || '',
-      iolDetails[1] || '',
-      iolDetails[2] || ''
+      iolDetails[2] || '',
+      iolDetails[1] || ''
     ];
   }
 
@@ -1283,6 +1289,7 @@ function buildSurgeryExportDataForDate_(data, cols, targetDateObj) {
   return {
     date: new Date(targetDateObj.getTime()),
     dateText: targetDateText,
+    dateLabel: formatExportDateWithWeekday_(targetDateObj),
     iolList,
     patientList
   };
@@ -1325,12 +1332,12 @@ function writeSurgeryExportSection_(sheetOut, startRow, exportData) {
   const patientStartCol = 6;
 
   sheetOut.getRange(startRow, iolStartCol)
-    .setValue(`[ ${exportData.dateText} 水晶體清單 ]`)
+    .setValue(`[ ${exportData.dateLabel} 水晶體清單 ]`)
     .setFontWeight('bold');
 
   if (exportData.iolList.length > 0) {
     sheetOut.getRange(startRow + 1, iolStartCol, 1, 4)
-      .setValues([['姓名', '品牌', '目標度數', '水晶體度數']])
+      .setValues([['姓名', '品牌', '水晶體度數', '目標度數']])
       .setBackground('#efefef');
     sheetOut.getRange(startRow + 2, iolStartCol, exportData.iolList.length, 4)
       .setValues(exportData.iolList);
@@ -1339,7 +1346,7 @@ function writeSurgeryExportSection_(sheetOut, startRow, exportData) {
   }
 
   sheetOut.getRange(startRow, patientStartCol)
-    .setValue(`[ ${exportData.dateText} 病人清單 ]`)
+    .setValue(`[ ${exportData.dateLabel} 病人清單 ]`)
     .setFontWeight('bold');
 
   if (exportData.patientList.length > 0) {
@@ -1389,6 +1396,8 @@ function writeUpcomingWeekExport_(startDateObj) {
 
   targetDates.forEach(date => {
     const exportData = buildSurgeryExportDataForDate_(source.data, source.columns, date);
+    if (exportData.patientList.length === 0) return;
+
     exports.push(exportData);
     nextRow = writeSurgeryExportSection_(sheetOut, nextRow, exportData);
   });

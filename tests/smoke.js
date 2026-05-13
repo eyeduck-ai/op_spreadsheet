@@ -942,8 +942,8 @@ function testSurgeryExportDataForDate() {
 
   assert.strictEqual(result.dateText, '2026/05/09');
   assert.deepStrictEqual(toPlain(result.iolList), [
-    ['陳小美', 'A', '-1.0', '21.5'],
-    ['王小明', 'B', '-0.5', '20.0']
+    ['陳小美', 'A', '21.5', '-1.0'],
+    ['王小明', 'B', '20.0', '-0.5']
   ]);
   assert.deepStrictEqual(toPlain(result.patientList), [
     ['001', '王小明', '0911', '08:30', 'Cataract', 'PE/IOL(B -0.5 20.0)', '術後注意\n帶藥'],
