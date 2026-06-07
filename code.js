@@ -7,19 +7,24 @@
  * 3. 若 setup 尚未提示設定，回到試算表後可用「維護工具」的「設定 Calendar ID」儲存手術日曆 ID。
  *
  * 重要假設：
- * - 主要資料表名稱為 CONFIG.SHEET_OP，預設是「OP」。
+ * - 主要資料表名稱為 CONFIG.SHEET_OP，預設是「All」。
  * - 系統欄位由第 1 列欄位名稱辨識，欄位順序可以調整或插入自訂欄位。
  * - 病歷號是同步 Calendar 的必要欄位；有日期但沒有病歷號時不會新增或更新事件。
  */
 const CONFIG = {
-  VERSION: '2026.05.09',
+  VERSION: '2026.06.07.2',
   CALENDAR_ID: 'YOUR_CALENDAR_ID_HERE', // fallback：優先使用 ScriptProperties 內的 Calendar ID
-  SHEET_OP: 'OP',
-  SHEET_OUT: '輸出表單',
+  SHEET_OP: 'All',
+  LEGACY_SHEET_OP: 'OP',
+  SHEET_MIRROR_KAOH: 'OP-高榮',
+  SHEET_MIRROR_UNION: 'OP-聯醫',
+  SHEET_SURGERY_OUT: '手術清單',
+  SHEET_IOL_OUT: '水晶體清單',
   FIELD_KEYS: [
     'CHART_NO',
     'NAME',
     'TEL',
+    'HOSPITAL',
     'TAG',
     'COND',
     'DATE',
@@ -34,6 +39,7 @@ const CONFIG = {
     CHART_NO: '病歷號',
     NAME: '姓名',
     TEL: 'TEL',
+    HOSPITAL: '醫院',
     TAG: 'Tag',
     COND: 'Condition',
     DATE: '日期',
@@ -48,6 +54,7 @@ const CONFIG = {
     '病歷號',
     '姓名',
     'TEL',
+    '醫院',
     'Tag',
     'Condition',
     '日期',
@@ -57,6 +64,7 @@ const CONFIG = {
     'CalendarEventId',
     'CalendarSheetWriteUpdated'
   ],
+  HOSPITAL_OPTIONS: ['高榮', '聯醫'],
   TAG_OPTIONS: ['CATA', 'Eyelid', 'Retina', 'OP', 'FU', 'Suture IOL', 'Complication'],
 
   // 條件格式化關鍵字：
@@ -78,6 +86,9 @@ const AUTO_EXPORT_DAILY_MINUTE = 0;
 const AUTO_EXPORT_EDIT_DELAY_MS = 5 * 60 * 1000;
 const AUTO_EXPORT_DAILY_HANDLER = 'exportUpcomingWeekData';
 const AUTO_EXPORT_PENDING_HANDLER = 'runPendingUpcomingWeekExport';
+const HOSPITAL_KAOH = '高榮';
+const HOSPITAL_UNION = '聯醫';
+const HOSPITAL_EXPORT_ORDER = [HOSPITAL_KAOH, HOSPITAL_UNION];
 
 const TIME_ERROR_NOTE_PREFIX = '系統時間檢查：';
 const CALENDAR_SYNC_NOTE_PREFIX = '系統日曆同步：';
@@ -368,23 +379,17 @@ function promptAndSaveCalendarId() {
   }
 
   installProcessRowChangeTrigger_(false);
-  const reverseSyncResult = setupCalendarReverseSync_(false);
-  const reverseSyncMessage = reverseSyncResult.ok
-    ? reverseSyncResult.message
-    : `Calendar 反向同步未啟用：${reverseSyncResult.message}`;
   const result = {
     ok: true,
-    bindingOk: reverseSyncResult.ok,
     calendarId: saveResult.calendarId,
-    saveResult,
-    reverseSyncResult
+    saveResult
   };
 
   ui.alert(
     'Calendar ID 設定完成',
     `${saveResult.message}\n` +
       '已安裝 Sheet 自動同步觸發器。\n' +
-      `${reverseSyncMessage}\n` +
+      'Calendar 反向同步維持停用；Calendar 編輯不會回寫 All。\n' +
       '未自動批次同步既有列；若需同步既有資料，請執行「一鍵安裝」。',
     ui.ButtonSet.OK
   );
@@ -455,50 +460,13 @@ function initializeCalendarSyncToken() {
 }
 
 function installCalendarChangeTrigger_(showAlert) {
-  const calendarId = getConfiguredCalendarId_();
-
-  if (!isCalendarIdConfigured_(calendarId)) {
-    const result = {
-      ok: false,
-      message: 'Calendar ID 尚未設定，未安裝 Calendar 反向同步觸發器。'
-    };
-    if (showAlert) SpreadsheetApp.getUi().alert(result.message);
-    return result;
-  }
-
-  if (!isCalendarAdvancedServiceAvailable_()) {
-    const result = {
-      ok: false,
-      message: '尚未啟用 Calendar Advanced Service，未安裝 Calendar 反向同步觸發器。'
-    };
-    if (showAlert) SpreadsheetApp.getUi().alert(result.message);
-    return result;
-  }
-
-  try {
-    ScriptApp.getProjectTriggers()
-      .filter(trigger => trigger.getHandlerFunction() === CALENDAR_REVERSE_SYNC_HANDLER)
-      .forEach(trigger => ScriptApp.deleteTrigger(trigger));
-
-    ScriptApp.newTrigger(CALENDAR_REVERSE_SYNC_HANDLER)
-      .forUserCalendar(calendarId)
-      .onEventUpdated()
-      .create();
-
-    const result = {
-      ok: true,
-      message: '已安裝 Calendar 反向同步觸發器。'
-    };
-    if (showAlert) SpreadsheetApp.getUi().alert(result.message);
-    return result;
-  } catch (err) {
-    const result = {
-      ok: false,
-      message: `Calendar 反向同步觸發器安裝失敗：${err.message || err}`
-    };
-    if (showAlert) SpreadsheetApp.getUi().alert(result.message);
-    return result;
-  }
+  const result = {
+    ok: false,
+    status: 'disabled',
+    message: 'Calendar 反向同步已停用；不會安裝 Calendar → Sheet 觸發器。若需清除舊觸發器，請執行「停用反向同步」。'
+  };
+  if (showAlert) SpreadsheetApp.getUi().alert(result.message);
+  return result;
 }
 
 function installCalendarChangeTrigger() {
@@ -506,21 +474,11 @@ function installCalendarChangeTrigger() {
 }
 
 function setupCalendarReverseSync_(showAlert) {
-  const calendarId = getConfiguredCalendarId_();
-  const tokenResult = initializeCalendarSyncToken_(calendarId);
-  if (!tokenResult.ok) {
-    if (showAlert) SpreadsheetApp.getUi().alert(tokenResult.message);
-    return tokenResult;
-  }
-
-  const triggerResult = installCalendarChangeTrigger_(false);
-  const result = triggerResult.ok
-    ? {
-        ok: true,
-        message: `${tokenResult.message}\n${triggerResult.message}`
-      }
-    : triggerResult;
-
+  const result = {
+    ok: false,
+    status: 'disabled',
+    message: 'Calendar 反向同步已停用；Calendar 編輯不會回寫 All。若需清除舊觸發器，請執行「停用反向同步」。'
+  };
   if (showAlert) {
     SpreadsheetApp.getUi().alert(result.message);
   }
@@ -532,11 +490,54 @@ function setupCalendarReverseSync() {
   setupCalendarReverseSync_(true);
 }
 
+function getCalendarReverseSyncTokenKeys_() {
+  const properties = PropertiesService.getScriptProperties();
+  let keys = [];
+
+  if (typeof properties.getKeys === 'function') {
+    keys = properties.getKeys();
+  } else if (typeof properties.getProperties === 'function') {
+    keys = Object.keys(properties.getProperties());
+  }
+
+  return keys.filter(key => String(key).indexOf(CALENDAR_SYNC_TOKEN_PROPERTY_PREFIX) === 0);
+}
+
+function deleteCalendarReverseSyncTokens_() {
+  const properties = PropertiesService.getScriptProperties();
+  const keys = getCalendarReverseSyncTokenKeys_();
+
+  keys.forEach(key => properties.deleteProperty(key));
+
+  return keys.length;
+}
+
+function disableCalendarReverseSync_(showAlert) {
+  const deletedTriggerCount = deleteTriggersByHandler_(CALENDAR_REVERSE_SYNC_HANDLER);
+  const deletedTokenCount = deleteCalendarReverseSyncTokens_();
+  const result = {
+    ok: true,
+    deletedTriggerCount,
+    deletedTokenCount,
+    message: `已停用 Calendar 反向同步；刪除 ${deletedTriggerCount} 個觸發器，清除 ${deletedTokenCount} 個 syncToken。Sheet → Calendar 同步仍維持啟用。`
+  };
+
+  if (showAlert) {
+    SpreadsheetApp.getUi().alert(result.message);
+  }
+
+  return result;
+}
+
+function disableCalendarReverseSync() {
+  return disableCalendarReverseSync_(true);
+}
+
 /**
  * 一鍵安裝入口。
  *
  * 第一次安裝建議只手動執行這個函式：
- * - 初始化 OP sheet 標題、格式、資料驗證與條件格式
+ * - 初始化 All sheet 標題、格式、資料驗證與條件格式
  * - 安裝 Calendar 同步用 installable onEdit trigger
  * - 安裝未來一周清單自動輸出 time-driven trigger
  * - 立即刷新自訂選單
@@ -574,19 +575,15 @@ function setup() {
     ? '\n' + buildBatchSyncSummaryMessage_(syncResult)
     : `\n批次同步未執行：${syncResult.message}`;
   installProcessRowChangeTrigger_(false);
-  const reverseSyncResult = hasCalendarId
-    ? setupCalendarReverseSync_(false)
-    : {
-        ok: false,
-        message: 'Calendar ID 尚未設定。'
-      };
-  const reverseSyncMessage = reverseSyncResult.ok
-    ? `\n${reverseSyncResult.message}`
-    : `\nCalendar 反向同步未啟用：${reverseSyncResult.message}`;
+  const reverseSyncMessage = '\nCalendar 反向同步已停用；Calendar 編輯不會回寫 All。若尚未清除舊觸發器，請執行「停用反向同步」。';
   const autoExportResult = installAutoExportTriggers_(false);
   const autoExportMessage = autoExportResult.ok
     ? `\n${autoExportResult.message}`
     : `\n自動輸出觸發器未啟用：${autoExportResult.message}`;
+  const mirrorResult = refreshHospitalMirrorSheetsSafely_();
+  const mirrorMessage = mirrorResult.ok
+    ? `\n已更新分院工作表。`
+    : `\n分院工作表更新失敗：${mirrorResult.message}`;
   onOpen();
 
   ui.alert(
@@ -597,6 +594,7 @@ function setup() {
       syncMessage +
       reverseSyncMessage +
       autoExportMessage +
+      mirrorMessage +
       initResult.mismatchMessage,
     ui.ButtonSet.OK
   );
@@ -998,11 +996,47 @@ function setRowFieldValue_(rowValues, columns, fieldKey, value) {
   rowValues[index] = value;
 }
 
+function classifyHospital_(hospitalValue) {
+  return toCellText_(hospitalValue) === HOSPITAL_UNION ? HOSPITAL_UNION : HOSPITAL_KAOH;
+}
+
+function isSurgeryRow_(row, columns) {
+  return toCellText_(getRowFieldValue_(row, columns, 'TAG')) === 'OP';
+}
+
+function getHospitalExportGroups_() {
+  return HOSPITAL_EXPORT_ORDER.map(hospital => ({
+    hospital,
+    iolList: [],
+    patientList: []
+  }));
+}
+
+function getHospitalGroupByName_(groups, hospital) {
+  for (let i = 0; i < groups.length; i++) {
+    if (groups[i].hospital === hospital) return groups[i];
+  }
+
+  return null;
+}
+
+function buildMissingMainSheetMessage_(spreadsheet, actionName) {
+  const legacySheet = spreadsheet && spreadsheet.getSheetByName(CONFIG.LEGACY_SHEET_OP);
+  const actionText = actionName || '操作';
+
+  if (legacySheet) {
+    return `找不到「${CONFIG.SHEET_OP}」工作表，${actionText}未執行。請先手動將既有「${CONFIG.LEGACY_SHEET_OP}」工作表改名為「${CONFIG.SHEET_OP}」，再重新執行。`;
+  }
+
+  return `找不到「${CONFIG.SHEET_OP}」工作表，${actionText}未執行。`;
+}
+
 function getOpSheetOrThrow_() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_OP);
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = spreadsheet.getSheetByName(CONFIG.SHEET_OP);
 
   if (!sheet) {
-    throw new Error(`找不到「${CONFIG.SHEET_OP}」工作表。`);
+    throw new Error(buildMissingMainSheetMessage_(spreadsheet, '操作'));
   }
 
   return sheet;
@@ -1154,8 +1188,10 @@ function onOpen() {
     .addItem('設定日曆', 'promptAndSaveCalendarId')
     .addItem('初始化表格', 'initializeSheet')
     .addItem('資料遷移（不批次同步）', 'runMigrations')
+    .addItem('檢查 All 工作表', 'checkMainSheetRename')
+    .addItem('更新分院工作表', 'refreshHospitalMirrorSheetsFromMenu')
     .addItem('安裝同步', 'installProcessRowChangeTrigger')
-    .addItem('安裝反向同步', 'setupCalendarReverseSync')
+    .addItem('停用反向同步', 'disableCalendarReverseSync')
     .addItem('安裝自動輸出', 'installAutoExportTriggers')
     .addItem('清除舊事件', 'clearCalendarEventsFromSpecifiedColumn')
     .addSeparator()
@@ -1174,6 +1210,39 @@ function onOpen() {
 
 function showVersionInfo() {
   SpreadsheetApp.getUi().alert(`手術排程系統版本：${CONFIG.VERSION}`);
+}
+
+function checkMainSheetRename() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const mainSheet = spreadsheet.getSheetByName(CONFIG.SHEET_OP);
+  const legacySheet = spreadsheet.getSheetByName(CONFIG.LEGACY_SHEET_OP);
+
+  if (mainSheet) {
+    ui.alert(`已找到主要工作表「${CONFIG.SHEET_OP}」。`);
+    return {
+      ok: true,
+      status: 'main_found'
+    };
+  }
+
+  if (legacySheet) {
+    const message = `目前找不到「${CONFIG.SHEET_OP}」，但找到舊工作表「${CONFIG.LEGACY_SHEET_OP}」。請手動將「${CONFIG.LEGACY_SHEET_OP}」改名為「${CONFIG.SHEET_OP}」後再執行安裝或資料遷移。`;
+    ui.alert('需要手動改名', message, ui.ButtonSet.OK);
+    return {
+      ok: false,
+      status: 'legacy_found',
+      message
+    };
+  }
+
+  const message = `找不到主要工作表「${CONFIG.SHEET_OP}」。`;
+  ui.alert(message);
+  return {
+    ok: false,
+    status: 'missing',
+    message
+  };
 }
 
 function splitFirstLineAndRest_(value) {
@@ -1261,37 +1330,49 @@ function buildSurgeryExportDataForDate_(data, cols, targetDateObj) {
   const targetDateText = formatExportDate_(targetDateObj);
   const iolList = [];
   const patientList = [];
+  const hospitalGroups = getHospitalExportGroups_();
 
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
-    const tagVal = String(getRowFieldValue_(row, cols, 'TAG')).trim();
     const dateVal = getRowFieldValue_(row, cols, 'DATE');
 
-    if (!dateVal || tagVal !== 'OP') continue;
+    if (!dateVal || !isSurgeryRow_(row, cols)) continue;
 
     const rowDateObj = new Date(dateVal);
     if (isNaN(rowDateObj.getTime())) continue;
 
     if (formatExportDate_(rowDateObj) !== targetDateText) continue;
 
+    const hospital = classifyHospital_(getRowFieldValue_(row, cols, 'HOSPITAL'));
+    const hospitalGroup = getHospitalGroupByName_(hospitalGroups, hospital);
     const items = buildSurgeryExportItemsFromRow_(row, cols);
+
     if (items.iolRow) iolList.push(items.iolRow);
     patientList.push(items.patientRow);
+
+    if (hospitalGroup) {
+      if (items.iolRow) hospitalGroup.iolList.push(items.iolRow);
+      hospitalGroup.patientList.push(items.patientRow);
+    }
   }
 
-  iolList.sort((a, b) => {
+  const sortIolRows = rows => rows.sort((a, b) => {
     const brandCompare = String(a[1] || '').localeCompare(String(b[1] || ''), 'zh-Hant');
     if (brandCompare !== 0) return brandCompare;
 
     return String(a[0] || '').localeCompare(String(b[0] || ''), 'zh-Hant');
   });
 
+  sortIolRows(iolList);
+  hospitalGroups.forEach(group => sortIolRows(group.iolList));
+
   return {
     date: new Date(targetDateObj.getTime()),
     dateText: targetDateText,
     dateLabel: formatExportDateWithWeekday_(targetDateObj),
     iolList,
-    patientList
+    patientList,
+    hospitalGroups
   };
 }
 
@@ -1323,57 +1404,79 @@ function getSurgeryExportSourceData_() {
   };
 }
 
-function getOrCreateOutputSheet_(spreadsheet) {
-  return spreadsheet.getSheetByName(CONFIG.SHEET_OUT) || spreadsheet.insertSheet(CONFIG.SHEET_OUT);
+function getOrCreateNamedSheet_(spreadsheet, sheetName) {
+  return spreadsheet.getSheetByName(sheetName) || spreadsheet.insertSheet(sheetName);
 }
 
-function writeSurgeryExportSection_(sheetOut, startRow, exportData) {
-  const iolStartCol = 1;
-  const patientStartCol = 6;
+function getSplitOutputSheets_(spreadsheet) {
+  return {
+    surgerySheet: getOrCreateNamedSheet_(spreadsheet, CONFIG.SHEET_SURGERY_OUT),
+    iolSheet: getOrCreateNamedSheet_(spreadsheet, CONFIG.SHEET_IOL_OUT)
+  };
+}
 
-  sheetOut.getRange(startRow, iolStartCol)
-    .setValue(`[ ${exportData.dateLabel} 水晶體清單 ]`)
+function writeSurgeryListSection_(sheetOut, startRow, exportData, hospitalGroup) {
+  sheetOut.getRange(startRow, 1)
+    .setValue(`[ ${exportData.dateLabel} ${hospitalGroup.hospital} 手術清單 ]`)
     .setFontWeight('bold');
 
-  if (exportData.iolList.length > 0) {
-    sheetOut.getRange(startRow + 1, iolStartCol, 1, 4)
+  sheetOut.getRange(startRow + 1, 1, 1, 7)
+    .setValues([['病歷號', '姓名', 'TEL', '時間', '疾病', '術式', '補充說明']])
+    .setBackground('#efefef');
+  sheetOut.getRange(startRow + 2, 1, hospitalGroup.patientList.length, 7)
+    .setValues(hospitalGroup.patientList);
+
+  return startRow + hospitalGroup.patientList.length + 3;
+}
+
+function writeIolListSection_(sheetOut, startRow, exportData, hospitalGroup) {
+  sheetOut.getRange(startRow, 1)
+    .setValue(`[ ${exportData.dateLabel} ${hospitalGroup.hospital} 水晶體清單 ]`)
+    .setFontWeight('bold');
+
+  if (hospitalGroup.iolList.length > 0) {
+    sheetOut.getRange(startRow + 1, 1, 1, 4)
       .setValues([['姓名', '品牌', '水晶體度數', '目標度數']])
       .setBackground('#efefef');
-    sheetOut.getRange(startRow + 2, iolStartCol, exportData.iolList.length, 4)
-      .setValues(exportData.iolList);
-  } else {
-    sheetOut.getRange(startRow + 1, iolStartCol).setValue('本日無水晶體資料');
+    sheetOut.getRange(startRow + 2, 1, hospitalGroup.iolList.length, 4)
+      .setValues(hospitalGroup.iolList);
+    return startRow + hospitalGroup.iolList.length + 3;
   }
 
-  sheetOut.getRange(startRow, patientStartCol)
-    .setValue(`[ ${exportData.dateLabel} 病人清單 ]`)
-    .setFontWeight('bold');
+  sheetOut.getRange(startRow + 1, 1).setValue('本日無水晶體資料');
+  return startRow + 3;
+}
 
-  if (exportData.patientList.length > 0) {
-    sheetOut.getRange(startRow + 1, patientStartCol, 1, 7)
-      .setValues([['病歷號', '姓名', 'TEL', '時間', '疾病', '術式', '補充說明']])
-      .setBackground('#efefef');
-    sheetOut.getRange(startRow + 2, patientStartCol, exportData.patientList.length, 7)
-      .setValues(exportData.patientList);
-  } else {
-    sheetOut.getRange(startRow + 1, patientStartCol).setValue('本日無病人資料');
-  }
+function writeSplitExportData_(surgerySheet, iolSheet, exportData, startRows) {
+  const nextRows = {
+    surgery: startRows.surgery,
+    iol: startRows.iol
+  };
 
-  const iolBlockHeight = exportData.iolList.length > 0 ? exportData.iolList.length + 2 : 2;
-  const patientBlockHeight = exportData.patientList.length > 0 ? exportData.patientList.length + 2 : 2;
+  exportData.hospitalGroups.forEach(group => {
+    if (group.patientList.length === 0) return;
 
-  return startRow + Math.max(iolBlockHeight, patientBlockHeight) + 2;
+    nextRows.surgery = writeSurgeryListSection_(surgerySheet, nextRows.surgery, exportData, group);
+    nextRows.iol = writeIolListSection_(iolSheet, nextRows.iol, exportData, group);
+  });
+
+  return nextRows;
 }
 
 function writeSingleDateExport_(targetDateObj) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const source = getSurgeryExportSourceData_();
-  const sheetOut = getOrCreateOutputSheet_(ss);
+  const outputSheets = getSplitOutputSheets_(ss);
   const exportData = buildSurgeryExportDataForDate_(source.data, source.columns, targetDateObj);
 
-  sheetOut.clear();
-  writeSurgeryExportSection_(sheetOut, 1, exportData);
-  sheetOut.autoResizeColumns(1, 12);
+  outputSheets.surgerySheet.clear();
+  outputSheets.iolSheet.clear();
+  writeSplitExportData_(outputSheets.surgerySheet, outputSheets.iolSheet, exportData, {
+    surgery: 1,
+    iol: 1
+  });
+  outputSheets.surgerySheet.autoResizeColumns(1, 7);
+  outputSheets.iolSheet.autoResizeColumns(1, 4);
 
   return {
     ok: true,
@@ -1387,22 +1490,27 @@ function writeSingleDateExport_(targetDateObj) {
 function writeUpcomingWeekExport_(startDateObj) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const source = getSurgeryExportSourceData_();
-  const sheetOut = getOrCreateOutputSheet_(ss);
+  const outputSheets = getSplitOutputSheets_(ss);
   const targetDates = buildUpcomingExportDates_(startDateObj, AUTO_EXPORT_UPCOMING_DAYS);
   const exports = [];
-  let nextRow = 1;
+  let nextRows = {
+    surgery: 1,
+    iol: 1
+  };
 
-  sheetOut.clear();
+  outputSheets.surgerySheet.clear();
+  outputSheets.iolSheet.clear();
 
   targetDates.forEach(date => {
     const exportData = buildSurgeryExportDataForDate_(source.data, source.columns, date);
     if (exportData.patientList.length === 0) return;
 
     exports.push(exportData);
-    nextRow = writeSurgeryExportSection_(sheetOut, nextRow, exportData);
+    nextRows = writeSplitExportData_(outputSheets.surgerySheet, outputSheets.iolSheet, exportData, nextRows);
   });
 
-  sheetOut.autoResizeColumns(1, 12);
+  outputSheets.surgerySheet.autoResizeColumns(1, 7);
+  outputSheets.iolSheet.autoResizeColumns(1, 4);
 
   return {
     ok: true,
@@ -1411,6 +1519,187 @@ function writeUpcomingWeekExport_(startDateObj) {
     dayCount: exports.length,
     exports
   };
+}
+
+function getHospitalMirrorSheetConfigs_() {
+  return [
+    {
+      sheetName: CONFIG.SHEET_MIRROR_KAOH,
+      hospital: HOSPITAL_KAOH
+    },
+    {
+      sheetName: CONFIG.SHEET_MIRROR_UNION,
+      hospital: HOSPITAL_UNION
+    }
+  ];
+}
+
+function getRowsForHospitalMirror_(dataRows, columns, hospital) {
+  return dataRows.filter(row => {
+    if (!isSurgeryRow_(row, columns)) return false;
+
+    return classifyHospital_(getRowFieldValue_(row, columns, 'HOSPITAL')) === hospital;
+  });
+}
+
+function removeManagedMirrorSheetProtections_(sheet, description) {
+  if (!SpreadsheetApp.ProtectionType || typeof sheet.getProtections !== 'function') return;
+
+  const protectionType = SpreadsheetApp.ProtectionType.SHEET || SpreadsheetApp.ProtectionType.RANGE;
+  sheet.getProtections(protectionType)
+    .filter(protection => protection.getDescription() === description)
+    .forEach(protection => protection.remove());
+}
+
+function protectGeneratedMirrorSheet_(sheet) {
+  if (!SpreadsheetApp.ProtectionType || typeof sheet.protect !== 'function') {
+    return {
+      ok: true,
+      message: ''
+    };
+  }
+
+  const description = `OP_SPREADSHEET_MIRROR_SHEET:${sheet.getName()}`;
+  const failedMessages = [];
+
+  try {
+    removeManagedMirrorSheetProtections_(sheet, description);
+    const protection = sheet.protect()
+      .setDescription(description)
+      .setWarningOnly(false);
+    const allowedEditors = getSystemColumnProtectionEditors_();
+    const allowedEmails = {};
+
+    allowedEditors.forEach(editor => {
+      const email = getUserEmail_(editor).toLowerCase();
+      if (email) allowedEmails[email] = true;
+      protection.addEditor(editor);
+    });
+
+    const allowedEmailList = Object.keys(allowedEmails);
+    if (allowedEmailList.length > 0) {
+      const removableEditors = protection.getEditors().filter(editor => {
+        const email = getUserEmail_(editor).toLowerCase();
+        return email && !allowedEmails[email];
+      });
+
+      if (removableEditors.length > 0) {
+        protection.removeEditors(removableEditors);
+      }
+    }
+
+    if (protection.canDomainEdit()) {
+      protection.setDomainEdit(false);
+    }
+  } catch (err) {
+    failedMessages.push(`${sheet.getName()}：${err.message || err}`);
+  }
+
+  return {
+    ok: failedMessages.length === 0,
+    message: failedMessages.join('\n')
+  };
+}
+
+function writeHospitalMirrorSheet_(spreadsheet, sheetName, headers, rows, sourceColumnCount) {
+  const sheet = getOrCreateNamedSheet_(spreadsheet, sheetName);
+  const outputRows = [headers].concat(rows);
+
+  ensureSheetDimensions_(sheet, Math.max(outputRows.length, 2), sourceColumnCount);
+  sheet.clear();
+  sheet.getRange(1, 1, outputRows.length, sourceColumnCount).setValues(outputRows);
+
+  const columns = getRequiredSheetColumns_(sheet);
+  applyDataFormats_(sheet, columns);
+  applyTableAlignment_(sheet, columns);
+  applyConditionalFormatting_(sheet, columns);
+  hideSystemColumns_(sheet, columns);
+  const systemProtectionResult = protectSystemColumns_(sheet, columns);
+  const mirrorProtectionResult = protectGeneratedMirrorSheet_(sheet);
+
+  return {
+    ok: systemProtectionResult.ok && mirrorProtectionResult.ok,
+    rowCount: rows.length,
+    message: [systemProtectionResult.message, mirrorProtectionResult.message]
+      .filter(Boolean)
+      .join('\n')
+  };
+}
+
+function refreshHospitalMirrorSheets_() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sourceSheet = spreadsheet.getSheetByName(CONFIG.SHEET_OP);
+
+  if (!sourceSheet) {
+    return {
+      ok: false,
+      message: buildMissingMainSheetMessage_(spreadsheet, '分院工作表更新'),
+      results: []
+    };
+  }
+
+  const columns = getRequiredSheetColumns_(sourceSheet);
+  const lastRow = Math.max(sourceSheet.getLastRow(), 1);
+  const lastColumn = getTableLastColumn_(sourceSheet, columns);
+  const data = sourceSheet.getRange(1, 1, lastRow, lastColumn).getValues();
+  const headers = data[0] || [];
+  const dataRows = data.slice(1);
+  const failedMessages = [];
+  const results = getHospitalMirrorSheetConfigs_().map(config => {
+    const rows = getRowsForHospitalMirror_(dataRows, columns, config.hospital);
+    const result = writeHospitalMirrorSheet_(spreadsheet, config.sheetName, headers, rows, lastColumn);
+
+    if (!result.ok && result.message) {
+      failedMessages.push(result.message);
+    }
+
+    return {
+      sheetName: config.sheetName,
+      hospital: config.hospital,
+      rowCount: result.rowCount,
+      ok: result.ok
+    };
+  });
+
+  return {
+    ok: failedMessages.length === 0,
+    message: failedMessages.join('\n'),
+    results
+  };
+}
+
+function refreshHospitalMirrorSheetsSafely_() {
+  try {
+    const result = refreshHospitalMirrorSheets_();
+    if (!result.ok && result.message) {
+      console.warn(result.message);
+    }
+    return result;
+  } catch (err) {
+    const result = {
+      ok: false,
+      message: `更新分院工作表失敗：${err.message || err}`,
+      results: []
+    };
+    console.warn(result.message);
+    return result;
+  }
+}
+
+function refreshHospitalMirrorSheetsFromMenu() {
+  return runMenuAction_('更新分院工作表', ui => {
+    const result = refreshHospitalMirrorSheets_();
+
+    if (!result.ok) {
+      throw new Error(result.message);
+    }
+
+    const summary = result.results
+      .map(item => `${item.sheetName}：${item.rowCount} 列`)
+      .join('\n');
+    ui.alert('更新完成', summary, ui.ButtonSet.OK);
+    return result;
+  });
 }
 
 function exportSingleDateData_(targetDateObj) {
@@ -1456,7 +1745,7 @@ function exportDateData() {
     }
 
     const result = exportSingleDateData_(targetDateObj);
-    ui.alert('完成', `已成功將 ${result.startDateText} 的資料分析匯出至「輸出表單」。`, ui.ButtonSet.OK);
+    ui.alert('完成', `已成功將 ${result.startDateText} 的資料匯出至「${CONFIG.SHEET_SURGERY_OUT}」與「${CONFIG.SHEET_IOL_OUT}」。`, ui.ButtonSet.OK);
     return result;
   });
 }
@@ -1475,7 +1764,7 @@ function exportUpcomingWeekDataFromMenu() {
 
     ui.alert(
       '完成',
-      `已成功將 ${result.startDateText} 至 ${result.endDateText} 的資料匯出至「輸出表單」。`,
+      `已成功將 ${result.startDateText} 至 ${result.endDateText} 的資料匯出至「${CONFIG.SHEET_SURGERY_OUT}」與「${CONFIG.SHEET_IOL_OUT}」。`,
       ui.ButtonSet.OK
     );
 
@@ -1497,7 +1786,7 @@ function scheduleUpcomingWeekExport_() {
 
     return {
       ok: true,
-      message: '已排程 5 分鐘後更新未來一周輸出表單。'
+      message: '已排程 5 分鐘後更新未來一周手術清單與水晶體清單。'
     };
   } catch (err) {
     const message = `排程未來一周自動輸出失敗：${err.message || err}`;
@@ -1590,6 +1879,7 @@ function duplicateRow() {
   sheet.getRange(activeRow + 1, cols.TIME).clearContent();
   sheet.getRange(activeRow + 1, cols.EVENT_ID).clearContent();
   sheet.getRange(activeRow + 1, cols.SHEET_WRITE_UPDATED).clearContent();
+  refreshHospitalMirrorSheetsSafely_();
   });
 }
 
@@ -1630,6 +1920,8 @@ function mergePatientRecords() {
     sheet.getRange(2, 1, finalRows.length, data[0].length).setValues(finalRows);
   }
 
+  refreshHospitalMirrorSheetsSafely_();
+  scheduleUpcomingWeekExport_();
   ui.alert('歸人整合完成', '所有非 OP 的同病人紀錄已合併。', ui.ButtonSet.OK);
   });
 }
@@ -1702,6 +1994,7 @@ function sortSheetByDateTime() {
     { column: cols.DATE, ascending: true },
     { column: cols.TIME, ascending: true }
   ]);
+  refreshHospitalMirrorSheetsSafely_();
   });
 }
 
@@ -1722,6 +2015,105 @@ function ensureSheetHasColumn_(sheet, column) {
   if (sheet.getMaxColumns() < column) {
     sheet.insertColumnsAfter(sheet.getMaxColumns(), column - sheet.getMaxColumns());
   }
+}
+
+function ensureSheetDimensions_(sheet, rowCount, columnCount) {
+  if (sheet.getMaxRows() < rowCount) {
+    sheet.insertRowsAfter(sheet.getMaxRows(), rowCount - sheet.getMaxRows());
+  }
+
+  if (sheet.getMaxColumns() < columnCount) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), columnCount - sheet.getMaxColumns());
+  }
+}
+
+function insertColumnBefore_(sheet, column) {
+  if (typeof sheet.insertColumnBefore === 'function') {
+    sheet.insertColumnBefore(column);
+    return;
+  }
+
+  sheet.insertColumnsBefore(column, 1);
+}
+
+function findHeaderColumnsByText_(sheet, headerText) {
+  const targetHeader = toCellText_(headerText);
+  const headerValues = getSheetHeaderValues_(sheet);
+  const columns = [];
+
+  headerValues.forEach((value, index) => {
+    if (toCellText_(value) === targetHeader) {
+      columns.push(index + 1);
+    }
+  });
+
+  return columns;
+}
+
+function moveSingleColumnBefore_(sheet, sourceColumn, targetColumn) {
+  if (sourceColumn === targetColumn - 1) {
+    return false;
+  }
+
+  const lastRow = Math.max(sheet.getLastRow(), 1);
+  const values = sheet.getRange(1, sourceColumn, lastRow, 1).getValues();
+  let adjustedTargetColumn = targetColumn;
+
+  sheet.deleteColumn(sourceColumn);
+  if (sourceColumn < targetColumn) {
+    adjustedTargetColumn--;
+  }
+
+  insertColumnBefore_(sheet, adjustedTargetColumn);
+  sheet.getRange(1, adjustedTargetColumn, lastRow, 1).setValues(values);
+
+  return true;
+}
+
+function ensureHospitalColumnBeforeTag_(sheet) {
+  const hospitalHeader = CONFIG.FIELD_HEADERS.HOSPITAL;
+  const tagHeader = CONFIG.FIELD_HEADERS.TAG;
+  const hospitalColumns = findHeaderColumnsByText_(sheet, hospitalHeader);
+  const tagColumns = findHeaderColumnsByText_(sheet, tagHeader);
+
+  if (hospitalColumns.length > 1) {
+    return {
+      changed: false,
+      addedHeaders: [],
+      message: `「${hospitalHeader}」欄位重複出現在 ${formatColumnList_(hospitalColumns)} 欄，已保留資料不移動；請手動確認後再執行資料遷移。`
+    };
+  }
+
+  if (tagColumns.length === 0) {
+    return {
+      changed: false,
+      addedHeaders: [],
+      message: ''
+    };
+  }
+
+  const tagColumn = tagColumns[0];
+
+  if (hospitalColumns.length === 0) {
+    insertColumnBefore_(sheet, tagColumn);
+    sheet.getRange(1, tagColumn).setValue(hospitalHeader);
+    return {
+      changed: true,
+      addedHeaders: [hospitalHeader],
+      message: `已在「${tagHeader}」左側新增「${hospitalHeader}」欄。`
+    };
+  }
+
+  const hospitalColumn = hospitalColumns[0];
+  const moved = moveSingleColumnBefore_(sheet, hospitalColumn, tagColumn);
+
+  return {
+    changed: moved,
+    addedHeaders: [],
+    message: moved
+      ? `已將「${hospitalHeader}」欄移到「${tagHeader}」左側，原有資料已保留。`
+      : ''
+  };
 }
 
 function migrateLegacyEventIdColumns_(sheet) {
@@ -1805,6 +2197,7 @@ function ensureHeaders_(sheet) {
   const headerValues = getSheetHeaderValues_(sheet);
   const hasAnyHeader = headerValues.some(value => Boolean(toCellText_(value)));
   const addedHeaders = [];
+  const migrationMessages = [];
 
   if (!hasAnyHeader) {
     ensureSheetHasColumn_(sheet, CONFIG.HEADERS.length);
@@ -1814,8 +2207,15 @@ function ensureHeaders_(sheet) {
     return {
       columns: emptySheetInfo.columns,
       duplicateMessages: emptySheetInfo.duplicateMessages,
-      addedHeaders: CONFIG.HEADERS.slice()
+      addedHeaders: CONFIG.HEADERS.slice(),
+      migrationMessages: []
     };
+  }
+
+  const initialHospitalResult = ensureHospitalColumnBeforeTag_(sheet);
+  initialHospitalResult.addedHeaders.forEach(header => addedHeaders.push(header));
+  if (initialHospitalResult.message) {
+    migrationMessages.push(initialHospitalResult.message);
   }
 
   let info = buildFieldColumnInfo_(sheet);
@@ -1829,12 +2229,21 @@ function ensureHeaders_(sheet) {
     nextColumn++;
   });
 
+  const finalHospitalResult = ensureHospitalColumnBeforeTag_(sheet);
+  finalHospitalResult.addedHeaders.forEach(header => {
+    if (addedHeaders.indexOf(header) === -1) addedHeaders.push(header);
+  });
+  if (finalHospitalResult.message && migrationMessages.indexOf(finalHospitalResult.message) === -1) {
+    migrationMessages.push(finalHospitalResult.message);
+  }
+
   info = buildFieldColumnInfo_(sheet);
 
   return {
     columns: info.columns,
     duplicateMessages: info.duplicateMessages,
-    addedHeaders
+    addedHeaders,
+    migrationMessages
   };
 }
 
@@ -1847,6 +2256,13 @@ function applyDataFormats_(sheet, columns) {
   sheet.getRange(2, columns.DATE, dataRowCount, 1).setNumberFormat('yyyy/mm/dd');
   sheet.getRange(2, columns.EVENT_ID, dataRowCount, 1).setNumberFormat('@');
   sheet.getRange(2, columns.SHEET_WRITE_UPDATED, dataRowCount, 1).setNumberFormat('@');
+
+  const hospitalRange = sheet.getRange(2, columns.HOSPITAL, dataRowCount, 1);
+  const hospitalValidation = SpreadsheetApp.newDataValidation()
+    .requireValueInList(CONFIG.HOSPITAL_OPTIONS, true)
+    .setAllowInvalid(true)
+    .build();
+  hospitalRange.setDataValidation(hospitalValidation);
 
   const tagRange = sheet.getRange(2, columns.TAG, dataRowCount, 1);
   const ruleValidation = SpreadsheetApp.newDataValidation()
@@ -1873,6 +2289,12 @@ function applyRowDataFormats_(sheet, row, columns) {
   sheet.getRange(row, cols.DATE).setNumberFormat('yyyy/mm/dd');
   sheet.getRange(row, cols.EVENT_ID).setNumberFormat('@');
   sheet.getRange(row, cols.SHEET_WRITE_UPDATED).setNumberFormat('@');
+
+  const hospitalValidation = SpreadsheetApp.newDataValidation()
+    .requireValueInList(CONFIG.HOSPITAL_OPTIONS, true)
+    .setAllowInvalid(true)
+    .build();
+  sheet.getRange(row, cols.HOSPITAL).setDataValidation(hospitalValidation);
 
   const ruleValidation = SpreadsheetApp.newDataValidation()
     .requireValueInList(CONFIG.TAG_OPTIONS, true)
@@ -2281,19 +2703,20 @@ function normalizeExistingTimes_(sheet, columns) {
 }
 
 /**
- * 初始化 OP sheet 的表格結構與格式。
+ * 初始化 All sheet 的表格結構與格式。
  *
  * showAlert=false 是給 setup() 使用，避免一鍵安裝過程跳出多個 alert。
  * 此函式不會安裝 trigger，也不會批次同步既有 Calendar event。
  */
 function initializeSheet_(showAlert) {
   const ui = SpreadsheetApp.getUi();
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_OP);
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = spreadsheet.getSheetByName(CONFIG.SHEET_OP);
 
   if (!sheet) {
     return {
       ok: false,
-      message: `找不到「${CONFIG.SHEET_OP}」工作表，初始化未執行。`
+      message: buildMissingMainSheetMessage_(spreadsheet, '初始化')
     };
   }
 
@@ -2307,6 +2730,7 @@ function initializeSheet_(showAlert) {
   applyConditionalFormatting_(sheet, columns);
   hideSystemColumns_(sheet, columns);
   const protectionResult = protectSystemColumns_(sheet, columns);
+  const mirrorResult = refreshHospitalMirrorSheetsSafely_();
 
   const addedHeaderMessage = headerResult.addedHeaders.length > 0
     ? `\n已補齊欄位：${headerResult.addedHeaders.map(header => `「${header}」`).join('、')}。`
@@ -2317,18 +2741,26 @@ function initializeSheet_(showAlert) {
   const legacyColumnMessage = legacyColumnResult.message
     ? '\n' + legacyColumnResult.message
     : '';
+  const hospitalMigrationMessage = headerResult.migrationMessages.length > 0
+    ? '\n' + headerResult.migrationMessages.join('\n')
+    : '';
   const protectionMessage = protectionResult.message
     ? '\n' + protectionResult.message
     : '';
+  const mirrorMessage = mirrorResult.ok
+    ? ''
+    : `\n分院工作表更新失敗：${mirrorResult.message}`;
 
   if (showAlert) {
     ui.alert(
       '初始化完成',
-      `已完成欄位確認、欄位格式、靠左靠上對齊、Tag 下拉選單、條件格式與既有時間正規化。\n` +
+      `已完成欄位確認、欄位格式、靠左靠上對齊、醫院與 Tag 下拉選單、條件格式與既有時間正規化。\n` +
         `時間欄位已轉換 ${timeResult.normalizedCount} 格，格式錯誤 ${timeResult.errorCount} 格。` +
         addedHeaderMessage +
+        hospitalMigrationMessage +
         legacyColumnMessage +
         protectionMessage +
+        mirrorMessage +
         duplicateHeaderMessage,
       ui.ButtonSet.OK
     );
@@ -2337,7 +2769,7 @@ function initializeSheet_(showAlert) {
   return {
     ok: true,
     timeResult,
-    mismatchMessage: addedHeaderMessage + legacyColumnMessage + protectionMessage + duplicateHeaderMessage
+    mismatchMessage: addedHeaderMessage + hospitalMigrationMessage + legacyColumnMessage + protectionMessage + mirrorMessage + duplicateHeaderMessage
   };
 }
 
@@ -2347,12 +2779,13 @@ function initializeSheet() {
 
 function runMigrations_(showAlert) {
   const ui = SpreadsheetApp.getUi();
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_OP);
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = spreadsheet.getSheetByName(CONFIG.SHEET_OP);
 
   if (!sheet) {
     return {
       ok: false,
-      message: `找不到「${CONFIG.SHEET_OP}」工作表，資料遷移未執行。`
+      message: buildMissingMainSheetMessage_(spreadsheet, '資料遷移')
     };
   }
 
@@ -2363,11 +2796,14 @@ function runMigrations_(showAlert) {
   applyDataFormats_(sheet, columns);
   hideSystemColumns_(sheet, columns);
   const protectionResult = protectSystemColumns_(sheet, columns);
+  const mirrorResult = refreshHospitalMirrorSheetsSafely_();
   const messageParts = [];
 
   if (headerResult.addedHeaders.length > 0) {
     messageParts.push(`已補齊欄位：${headerResult.addedHeaders.map(header => `「${header}」`).join('、')}。`);
   }
+
+  headerResult.migrationMessages.forEach(message => messageParts.push(message));
 
   if (legacyColumnResult.message) {
     messageParts.push(legacyColumnResult.message);
@@ -2375,6 +2811,10 @@ function runMigrations_(showAlert) {
 
   if (protectionResult.message) {
     messageParts.push(protectionResult.message);
+  }
+
+  if (!mirrorResult.ok && mirrorResult.message) {
+    messageParts.push(`分院工作表更新失敗：${mirrorResult.message}`);
   }
 
   if (headerResult.duplicateMessages.length > 0) {
@@ -2513,6 +2953,10 @@ function batchSyncAllEvents_(showAlert) {
     processedCount,
     statusCounts
   };
+
+  if (processedCount > 0) {
+    refreshHospitalMirrorSheetsSafely_();
+  }
 
   if (showAlert) {
     SpreadsheetApp.getUi().alert('批次處理完成。' + buildBatchSyncSummaryMessage_(result));
@@ -2797,101 +3241,12 @@ function processCalendarApiEventChange_(sheet, rowIndex, event, calendarId) {
 }
 
 function syncCalendarChangesToSheet_(calendarId) {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_OP);
-  if (!sheet) {
-    return {
-      ok: false,
-      message: `找不到「${CONFIG.SHEET_OP}」工作表，Calendar 反向同步未執行。`
-    };
-  }
-
-  if (!isCalendarIdConfigured_(calendarId)) {
-    return {
-      ok: false,
-      message: 'Calendar ID 尚未設定，Calendar 反向同步未執行。'
-    };
-  }
-
-  if (!isCalendarAdvancedServiceAvailable_()) {
-    return {
-      ok: false,
-      message: '尚未啟用 Calendar Advanced Service，Calendar 反向同步未執行。'
-    };
-  }
-
-  const syncToken = getCalendarSyncToken_(calendarId);
-  if (!syncToken) {
-    const baselineResult = initializeCalendarSyncToken_(calendarId);
-    return {
-      ok: baselineResult.ok,
-      message: baselineResult.ok
-        ? 'Calendar syncToken 不存在，已建立 baseline；本次不回寫事件。'
-        : baselineResult.message,
-      processedCount: 0,
-      statusCounts: {}
-    };
-  }
-
-  const rowIndex = buildCalendarEventRowIndex_(sheet);
-  const statusCounts = {};
-  let processedCount = 0;
-  let pageToken = '';
-  let response = null;
-
-  try {
-    do {
-      const options = {
-        maxResults: 2500,
-        syncToken
-      };
-
-      if (pageToken) {
-        options.pageToken = pageToken;
-      }
-
-      response = Calendar.Events.list(calendarId, options);
-
-      (response.items || []).forEach(event => {
-        const status = processCalendarApiEventChange_(sheet, rowIndex, event, calendarId);
-        statusCounts[status] = (statusCounts[status] || 0) + 1;
-
-        if (['updated', 'created', 'deleted_marked'].indexOf(status) !== -1) {
-          processedCount++;
-        }
-      });
-
-      pageToken = response.nextPageToken || '';
-    } while (pageToken);
-  } catch (err) {
-    if (isCalendarSyncTokenInvalidError_(err)) {
-      const baselineResult = initializeCalendarSyncToken_(calendarId);
-      return {
-        ok: false,
-        message: baselineResult.ok
-          ? 'Calendar syncToken 已失效，已重新建立 baseline；本次不回寫事件。'
-          : `Calendar syncToken 已失效，但 baseline 重建失敗：${baselineResult.message}`,
-        processedCount,
-        statusCounts
-      };
-    }
-
-    return {
-      ok: false,
-      message: `Calendar 反向同步失敗：${err.message || err}`,
-      processedCount,
-      statusCounts
-    };
-  }
-
-  if (response && response.nextSyncToken) {
-    setCalendarSyncToken_(calendarId, response.nextSyncToken);
-  }
-
   return {
     ok: true,
-    message: `Calendar 反向同步完成，回寫 ${processedCount} 筆變更。`,
-    processedCount,
-    statusCounts
+    status: 'disabled',
+    message: 'Calendar 反向同步已停用；Calendar 編輯不會回寫 All。',
+    processedCount: 0,
+    statusCounts: {}
   };
 }
 
@@ -2901,19 +3256,11 @@ function syncCalendarChangesToSheet() {
 }
 
 function processCalendarChange(e) {
-  const calendarId = e && e.calendarId ? e.calendarId : getConfiguredCalendarId_();
-  let syncResult = null;
-
-  const executed = withCalendarSyncLock_(() => {
-    syncResult = syncCalendarChangesToSheet_(calendarId);
-    if (!syncResult.ok) {
-      console.warn(syncResult.message);
-    }
-  });
-
-  if (executed && syncResult && syncResult.ok && syncResult.processedCount > 0) {
-    scheduleUpcomingWeekExport_();
-  }
+  return {
+    ok: true,
+    status: 'disabled',
+    message: 'Calendar 反向同步已停用；忽略 Calendar → Sheet 觸發。'
+  };
 }
 
 /**
@@ -2948,6 +3295,10 @@ function processRowChange(e) {
     // 檢查編輯範圍是否涵蓋我們關注的欄位
     const watchCols = Object.values(cols);
     const isWatchColEdited = watchCols.some(col => col >= startCol && col <= endCol);
+    const calendarWatchCols = Object.keys(cols)
+      .filter(fieldKey => fieldKey !== 'HOSPITAL')
+      .map(fieldKey => cols[fieldKey]);
+    const isCalendarWatchColEdited = calendarWatchCols.some(col => col >= startCol && col <= endCol);
 
     if (!isWatchColEdited) return;
 
@@ -2976,11 +3327,14 @@ function processRowChange(e) {
         }
       }
 
-      syncToCalendar(sheet, currentRow, cols);
+      if (isCalendarWatchColEdited) {
+        syncToCalendar(sheet, currentRow, cols);
+      }
     }
   });
 
   if (shouldScheduleExport) {
+    refreshHospitalMirrorSheetsSafely_();
     scheduleUpcomingWeekExport_();
   }
 }
@@ -3236,9 +3590,10 @@ function clearCalendarEventsFromSpecifiedColumn() {
     return;
   }
 
-  const targetSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SHEET_OP);
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const targetSheet = spreadsheet.getSheetByName(CONFIG.SHEET_OP);
   if (!targetSheet) {
-    ui.alert(`找不到「${CONFIG.SHEET_OP}」工作表，未清除日曆事件。`);
+    ui.alert(buildMissingMainSheetMessage_(spreadsheet, '清除日曆事件'));
     return;
   }
 
@@ -3286,6 +3641,8 @@ function clearCalendarEventsFromSpecifiedColumn() {
     ui.alert('目前有另一個日曆同步作業正在執行，本次清除未執行。');
     return;
   }
+
+  refreshHospitalMirrorSheetsSafely_();
 
   ui.alert(
     '清除完成',

@@ -58,17 +58,19 @@ function makeHeaderSheet(headers) {
   };
 }
 
-function makeDataSheet(headers, rows) {
+function makeDataSheet(headers, rows, sheetName) {
   const data = [headers].concat(rows.map(row => row.slice()));
   const notes = {};
   const hiddenColumns = [];
   const protections = [];
+  let conditionalRules = [];
 
   return {
     rows: data,
     notes,
     hiddenColumns,
     protections,
+    getName: () => sheetName || '',
     getMaxRows: () => data.length,
     getMaxColumns: () => data[0].length,
     getLastColumn: () => data[0].length,
@@ -79,6 +81,9 @@ function makeDataSheet(headers, rows) {
           row.splice(column, 0, '');
         }
       });
+    },
+    insertColumnBefore: column => {
+      data.forEach(row => row.splice(column - 1, 0, ''));
     },
     insertRowsAfter: (row, count) => {
       for (let i = 0; i < count; i++) {
@@ -95,6 +100,18 @@ function makeDataSheet(headers, rows) {
       hiddenColumns.push(column);
     },
     getProtections: () => protections,
+    getConditionalFormatRules: () => conditionalRules,
+    setConditionalFormatRules: nextRules => {
+      conditionalRules = nextRules;
+    },
+    clear: () => {
+      data.forEach(row => {
+        for (let i = 0; i < row.length; i++) {
+          row[i] = '';
+        }
+      });
+    },
+    autoResizeColumns: () => {},
     getRange: (row, column, numRows, numColumns) => {
       const height = numRows || 1;
       const width = numColumns || 1;
@@ -104,20 +121,38 @@ function makeDataSheet(headers, rows) {
           .map(dataRow => dataRow.slice(column - 1, column - 1 + width)),
         setValues: values => {
           values.forEach((valueRow, rowOffset) => {
+            while (data.length <= row - 1 + rowOffset) {
+              data.push(new Array(data[0].length).fill(''));
+            }
             valueRow.forEach((value, columnOffset) => {
+              while (data[row - 1 + rowOffset].length <= column - 1 + columnOffset) {
+                data[row - 1 + rowOffset].push('');
+              }
               data[row - 1 + rowOffset][column - 1 + columnOffset] = value;
             });
           });
           return range;
         },
-        getValue: () => data[row - 1][column - 1],
+        getValue: () => data[row - 1] && data[row - 1][column - 1],
         setValue: value => {
+          while (data.length <= row - 1) {
+            data.push(new Array(data[0].length).fill(''));
+          }
+          while (data[row - 1].length <= column - 1) {
+            data[row - 1].push('');
+          }
           data[row - 1][column - 1] = value;
           return range;
         },
         clearContent: () => {
           for (let rowOffset = 0; rowOffset < height; rowOffset++) {
+            while (data.length <= row - 1 + rowOffset) {
+              data.push(new Array(data[0].length).fill(''));
+            }
             for (let columnOffset = 0; columnOffset < width; columnOffset++) {
+              while (data[row - 1 + rowOffset].length <= column - 1 + columnOffset) {
+                data[row - 1 + rowOffset].push('');
+              }
               data[row - 1 + rowOffset][column - 1 + columnOffset] = '';
             }
           }
@@ -131,6 +166,8 @@ function makeDataSheet(headers, rows) {
         setDataValidation: () => range,
         setHorizontalAlignment: () => range,
         setVerticalAlignment: () => range,
+        setFontWeight: () => range,
+        setBackground: () => range,
         getNote: () => notes[`${row - 1}:${column - 1}`] || '',
         clearNote: () => {
           notes[`${row - 1}:${column - 1}`] = '';
@@ -216,26 +253,27 @@ function toPlain(value) {
 }
 
 function testHeaderMappingWithCustomColumn() {
-  const headers = ['病歷號', '姓名', '自訂欄', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
+  const headers = ['病歷號', '姓名', '自訂欄', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
   const info = context.buildFieldColumnInfo_(makeHeaderSheet(headers));
 
   assert.deepStrictEqual(Object.assign({}, info.columns), {
     CHART_NO: 1,
     NAME: 2,
     TEL: 4,
-    TAG: 5,
-    COND: 6,
-    DATE: 7,
-    TIME: 8,
-    PLAN: 9,
-    MEMO: 10,
-    EVENT_ID: 11,
-    SHEET_WRITE_UPDATED: 12
+    HOSPITAL: 5,
+    TAG: 6,
+    COND: 7,
+    DATE: 8,
+    TIME: 9,
+    PLAN: 10,
+    MEMO: 11,
+    EVENT_ID: 12,
+    SHEET_WRITE_UPDATED: 13
   });
 }
 
 function testEventIdColumnLookupWithMovedHeader() {
-  const headers = ['病歷號', 'CalendarEventId', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarSheetWriteUpdated'];
+  const headers = ['病歷號', 'CalendarEventId', '姓名', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarSheetWriteUpdated'];
   assert.strictEqual(context.getEventIdColumnForSheet_(makeHeaderSheet(headers)), 2);
 }
 
@@ -245,12 +283,12 @@ function testLegacyEventIdColumnLookupFallback() {
 }
 
 function testEventIdColumnLookupMissingHeader() {
-  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得'];
+  const headers = ['病歷號', '姓名', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得'];
   assert.strictEqual(context.getEventIdColumnForSheet_(makeHeaderSheet(headers)), 0);
 }
 
 function testLegacyEventIdMigrationToEnglishHeader() {
-  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', '日曆eventID'];
+  const headers = ['病歷號', '姓名', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', '日曆eventID'];
   const sheet = makeDataSheet(headers, [
     rowFromObject(headers, { '病歷號': '001', '姓名': '王小明', '日曆eventID': 'evt_1' }),
     rowFromObject(headers, { '病歷號': '002', '姓名': '陳小美' })
@@ -266,6 +304,68 @@ function testLegacyEventIdMigrationToEnglishHeader() {
   assert.strictEqual(sheet.rows[0].includes('日曆eventID'), false);
   assert.strictEqual(context.getRowFieldValue_(sheet.rows[1], info.columns, 'EVENT_ID'), 'evt_1');
   assert.ok(info.columns.SHEET_WRITE_UPDATED);
+}
+
+function testHospitalColumnInsertedBeforeTagPreservesData() {
+  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition'];
+  const sheet = makeDataSheet(headers, [
+    rowFromObject(headers, { '病歷號': '001', '姓名': '王小明', TEL: '0911', Tag: 'OP', Condition: 'Cataract' })
+  ]);
+
+  const result = context.ensureHeaders_(sheet);
+  const hospitalIndex = sheet.rows[0].indexOf('醫院');
+  const tagIndex = sheet.rows[0].indexOf('Tag');
+
+  assert.ok(result.addedHeaders.includes('醫院'));
+  assert.strictEqual(hospitalIndex + 1, tagIndex);
+  assert.strictEqual(sheet.rows[1][hospitalIndex], '');
+  assert.strictEqual(sheet.rows[1][tagIndex], 'OP');
+}
+
+function testHospitalColumnMovedBeforeTagPreservesData() {
+  const headers = ['病歷號', '姓名', 'TEL', 'Tag', '醫院', 'Condition'];
+  const sheet = makeDataSheet(headers, [
+    rowFromObject(headers, { '病歷號': '001', '姓名': '王小明', TEL: '0911', '醫院': '聯醫', Tag: 'OP', Condition: 'Cataract' })
+  ]);
+
+  const result = context.ensureHeaders_(sheet);
+  const hospitalIndex = sheet.rows[0].indexOf('醫院');
+  const tagIndex = sheet.rows[0].indexOf('Tag');
+
+  assert.ok(result.migrationMessages.some(message => message.includes('移到')));
+  assert.strictEqual(hospitalIndex + 1, tagIndex);
+  assert.strictEqual(sheet.rows[1][hospitalIndex], '聯醫');
+  assert.strictEqual(sheet.rows[1][tagIndex], 'OP');
+}
+
+function testDuplicateHospitalHeadersAreReportedForManualReview() {
+  const headers = ['病歷號', '姓名', 'TEL', '醫院', 'Tag', '醫院', 'Condition'];
+  const sheet = makeDataSheet(headers, [
+    rowFromObject(headers, { '病歷號': '001', '姓名': '王小明', TEL: '0911', '醫院': '高榮', Tag: 'OP', Condition: 'Cataract' })
+  ]);
+
+  const result = context.ensureHeaders_(sheet);
+
+  assert.ok(result.migrationMessages.some(message => message.includes('請手動確認')));
+  assert.strictEqual(sheet.rows[0].filter(header => header === '醫院').length, 2);
+}
+
+function testHospitalClassificationDefaultsToKaohsiungVeterans() {
+  assert.strictEqual(context.classifyHospital_(''), '高榮');
+  assert.strictEqual(context.classifyHospital_('高榮'), '高榮');
+  assert.strictEqual(context.classifyHospital_('其他'), '高榮');
+  assert.strictEqual(context.classifyHospital_('聯醫'), '聯醫');
+}
+
+function testMissingAllWithLegacyOpPromptsManualRename() {
+  const spreadsheet = {
+    getSheetByName: name => name === 'OP' ? {} : null
+  };
+  const message = context.buildMissingMainSheetMessage_(spreadsheet, '初始化');
+
+  assert.ok(message.includes('OP'));
+  assert.ok(message.includes('All'));
+  assert.ok(message.includes('手動'));
 }
 
 function testTimeNoteRoundTrip() {
@@ -293,7 +393,7 @@ function testCalendarTitleKeepsBlankPatientNameSlot() {
 
 function testSheetOriginatedCalendarEchoIsSkipped() {
   const originalApplyRowDataFormats = context.applyRowDataFormats_;
-  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
+  const headers = ['病歷號', '姓名', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
   const sheet = makeDataSheet(headers, [
     rowFromObject(headers, {
       '病歷號': '001',
@@ -335,7 +435,7 @@ function testSheetOriginatedCalendarEchoIsSkipped() {
 
 function testSameTimestampDifferentCalendarContentIsNotSkipped() {
   const originalApplyRowDataFormats = context.applyRowDataFormats_;
-  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
+  const headers = ['病歷號', '姓名', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
   const sheet = makeDataSheet(headers, [
     rowFromObject(headers, {
       '病歷號': '001',
@@ -378,7 +478,7 @@ function testSameTimestampDifferentCalendarContentIsNotSkipped() {
 
 function testOlderAllDayEchoAfterTimedSheetUpdateIsSkipped() {
   const originalApplyRowDataFormats = context.applyRowDataFormats_;
-  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
+  const headers = ['病歷號', '姓名', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
   const sheet = makeDataSheet(headers, [
     rowFromObject(headers, {
       '病歷號': '001',
@@ -416,7 +516,7 @@ function testOlderAllDayEchoAfterTimedSheetUpdateIsSkipped() {
 
 function testNewerCalendarAllDayUpdateClearsTime() {
   const originalApplyRowDataFormats = context.applyRowDataFormats_;
-  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
+  const headers = ['病歷號', '姓名', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
   const sheet = makeDataSheet(headers, [
     rowFromObject(headers, {
       '病歷號': '001',
@@ -454,7 +554,7 @@ function testNewerCalendarAllDayUpdateClearsTime() {
 }
 
 function testMergeBlocksTrackedAbsorbedRows() {
-  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
+  const headers = ['病歷號', '姓名', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
   const cols = context.buildFieldColumnInfo_(makeHeaderSheet(headers)).columns;
   const data = [
     headers,
@@ -468,7 +568,7 @@ function testMergeBlocksTrackedAbsorbedRows() {
 }
 
 function testMergeCombinesSafeTextFields() {
-  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
+  const headers = ['病歷號', '姓名', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
   const cols = context.buildFieldColumnInfo_(makeHeaderSheet(headers)).columns;
   const data = [
     headers,
@@ -531,6 +631,17 @@ function installConditionalFormatMock() {
       CUSTOM_FORMULA: 'CUSTOM_FORMULA',
       TEXT_EQUAL_TO: 'TEXT_EQUAL_TO'
     },
+    newDataValidation: () => ({
+      requireValueInList() {
+        return this;
+      },
+      setAllowInvalid() {
+        return this;
+      },
+      build() {
+        return {};
+      }
+    }),
     newConditionalFormatRule: () => {
       const rule = {
         formula: '',
@@ -563,9 +674,21 @@ function installConditionalFormatMock() {
   };
 }
 
+function makeSpreadsheet(sheets) {
+  return {
+    sheets,
+    getSheetByName: name => sheets[name] || null,
+    insertSheet: name => {
+      const sheet = makeDataSheet([''], [], name);
+      sheets[name] = sheet;
+      return sheet;
+    }
+  };
+}
+
 function testConditionalFormattingKeepsTagIndependent() {
   installConditionalFormatMock();
-  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
+  const headers = ['病歷號', '姓名', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
   const sheet = makeConditionalFormatSheet(headers);
   const columns = context.buildFieldColumnInfo_(makeHeaderSheet(headers)).columns;
 
@@ -594,7 +717,7 @@ function testConditionalFormattingKeepsTagIndependent() {
 function testSystemColumnsAreHiddenAndProtected() {
   const originalSpreadsheetApp = context.SpreadsheetApp;
   const originalPropertiesService = context.PropertiesService;
-  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
+  const headers = ['病歷號', '姓名', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
   const sheet = makeDataSheet(headers, []);
   const columns = context.buildFieldColumnInfo_(makeHeaderSheet(headers)).columns;
 
@@ -634,9 +757,127 @@ function testSystemColumnsAreHiddenAndProtected() {
   }
 }
 
+function testHospitalMirrorSheetsFilterRowsFromAll() {
+  const originalSpreadsheetApp = context.SpreadsheetApp;
+  const headers = ['病歷號', '姓名', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
+  const allSheet = makeDataSheet(headers, [
+    rowFromObject(headers, { '病歷號': '001', '姓名': '高榮空白', Tag: 'OP' }),
+    rowFromObject(headers, { '病歷號': '002', '姓名': '聯醫病人', '醫院': '聯醫', Tag: 'OP' }),
+    rowFromObject(headers, { '病歷號': '003', '姓名': '其他醫院', '醫院': '其他', Tag: 'OP' }),
+    rowFromObject(headers, { '病歷號': '004', '姓名': '非手術', '醫院': '聯醫', Tag: 'FU' })
+  ], 'All');
+  const spreadsheet = makeSpreadsheet({ All: allSheet });
+
+  try {
+    installConditionalFormatMock();
+    context.SpreadsheetApp.getActiveSpreadsheet = () => spreadsheet;
+
+    const result = context.refreshHospitalMirrorSheets_();
+
+    assert.strictEqual(result.ok, true);
+    assert.deepStrictEqual(
+      spreadsheet.sheets['OP-高榮'].rows.slice(1).map(row => row[0]),
+      ['001', '003']
+    );
+    assert.deepStrictEqual(
+      spreadsheet.sheets['OP-聯醫'].rows.slice(1).map(row => row[0]),
+      ['002']
+    );
+  } finally {
+    context.SpreadsheetApp = originalSpreadsheetApp;
+  }
+}
+
+function testProcessCalendarChangeIsNoOpWhenReverseSyncDisabled() {
+  const originalWithCalendarSyncLock = context.withCalendarSyncLock_;
+  const originalSyncCalendarChangesToSheet = context.syncCalendarChangesToSheet_;
+  const originalScheduleUpcomingWeekExport = context.scheduleUpcomingWeekExport_;
+  let lockCalled = false;
+  let syncCalled = false;
+  let exportCalled = false;
+
+  try {
+    context.withCalendarSyncLock_ = () => {
+      lockCalled = true;
+      return true;
+    };
+    context.syncCalendarChangesToSheet_ = () => {
+      syncCalled = true;
+      return { ok: true, processedCount: 1 };
+    };
+    context.scheduleUpcomingWeekExport_ = () => {
+      exportCalled = true;
+    };
+
+    const result = context.processCalendarChange({ calendarId: 'calendar_1' });
+
+    assert.strictEqual(result.status, 'disabled');
+    assert.strictEqual(lockCalled, false);
+    assert.strictEqual(syncCalled, false);
+    assert.strictEqual(exportCalled, false);
+  } finally {
+    context.withCalendarSyncLock_ = originalWithCalendarSyncLock;
+    context.syncCalendarChangesToSheet_ = originalSyncCalendarChangesToSheet;
+    context.scheduleUpcomingWeekExport_ = originalScheduleUpcomingWeekExport;
+  }
+}
+
+function testSyncCalendarChangesToSheetIsDisabled() {
+  const result = context.syncCalendarChangesToSheet_('calendar_1');
+
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.status, 'disabled');
+  assert.strictEqual(result.processedCount, 0);
+}
+
+function testDisableCalendarReverseSyncDeletesOnlyReverseTriggersAndTokens() {
+  const originalScriptApp = context.ScriptApp;
+  const originalPropertiesService = context.PropertiesService;
+  const deletedHandlers = [];
+  const properties = {
+    CALENDAR_SYNC_TOKEN_calendar_1: 'token_1',
+    CALENDAR_SYNC_TOKEN_calendar_2: 'token_2',
+    CALENDAR_ID: 'calendar_1'
+  };
+  const triggers = [
+    { getHandlerFunction: () => 'processCalendarChange' },
+    { getHandlerFunction: () => 'processRowChange' },
+    { getHandlerFunction: () => 'runPendingUpcomingWeekExport' }
+  ];
+
+  try {
+    context.ScriptApp = {
+      getProjectTriggers: () => triggers,
+      deleteTrigger: trigger => {
+        deletedHandlers.push(trigger.getHandlerFunction());
+      }
+    };
+    context.PropertiesService = {
+      getScriptProperties: () => ({
+        getKeys: () => Object.keys(properties),
+        deleteProperty: key => {
+          delete properties[key];
+        }
+      })
+    };
+
+    const result = context.disableCalendarReverseSync_(false);
+
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.deletedTriggerCount, 1);
+    assert.strictEqual(result.deletedTokenCount, 2);
+    assert.deepStrictEqual(deletedHandlers, ['processCalendarChange']);
+    assert.deepStrictEqual(Object.assign({}, properties), { CALENDAR_ID: 'calendar_1' });
+  } finally {
+    context.ScriptApp = originalScriptApp;
+    context.PropertiesService = originalPropertiesService;
+  }
+}
+
 function testDuplicateRowClearsSystemTrackingFields() {
   const originalSpreadsheetApp = context.SpreadsheetApp;
-  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
+  const originalRefreshHospitalMirrorSheetsSafely = context.refreshHospitalMirrorSheetsSafely_;
+  const headers = ['病歷號', '姓名', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
   const sheet = makeDataSheet(headers, [
     rowFromObject(headers, {
       '病歷號': '001',
@@ -648,7 +889,7 @@ function testDuplicateRowClearsSystemTrackingFields() {
     })
   ]);
 
-  sheet.getName = () => 'OP';
+  sheet.getName = () => 'All';
   sheet.getActiveCell = () => ({ getRow: () => 2 });
 
   try {
@@ -661,6 +902,7 @@ function testDuplicateRowClearsSystemTrackingFields() {
         getActiveSheet: () => sheet
       })
     };
+    context.refreshHospitalMirrorSheetsSafely_ = () => ({ ok: true });
 
     context.duplicateRow();
 
@@ -671,13 +913,14 @@ function testDuplicateRowClearsSystemTrackingFields() {
     assert.strictEqual(context.getRowFieldValue_(sheet.rows[2], columns, 'SHEET_WRITE_UPDATED'), '');
   } finally {
     context.SpreadsheetApp = originalSpreadsheetApp;
+    context.refreshHospitalMirrorSheetsSafely_ = originalRefreshHospitalMirrorSheetsSafely;
   }
 }
 
 function testDuplicateCalendarEventIdIsDiagnosedAndSkipped() {
   const originalApplyRowDataFormats = context.applyRowDataFormats_;
   const originalConsoleWarn = context.console.warn;
-  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
+  const headers = ['病歷號', '姓名', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
   const sheet = makeDataSheet(headers, [
     rowFromObject(headers, {
       '病歷號': '001',
@@ -733,6 +976,7 @@ function testDuplicateCalendarEventIdIsDiagnosedAndSkipped() {
 
 function testClearOldEventsUsesFixedOpEventIdColumn() {
   const originalSpreadsheetApp = context.SpreadsheetApp;
+  const originalRefreshHospitalMirrorSheetsSafely = context.refreshHospitalMirrorSheetsSafely_;
   const originalGetConfiguredCalendarId = context.getConfiguredCalendarId_;
   const originalIsCalendarAdvancedServiceAvailable = context.isCalendarAdvancedServiceAvailable_;
   const originalWithCalendarSyncLock = context.withCalendarSyncLock_;
@@ -759,7 +1003,7 @@ function testClearOldEventsUsesFixedOpEventIdColumn() {
     context.SpreadsheetApp = {
       getUi: () => ui,
       getActiveSpreadsheet: () => ({
-        getSheetByName: name => name === 'OP' ? opSheet : null
+        getSheetByName: name => name === 'All' ? opSheet : null
       })
     };
     context.getConfiguredCalendarId_ = () => 'calendar_1';
@@ -775,6 +1019,7 @@ function testClearOldEventsUsesFixedOpEventIdColumn() {
       }
       return { ok: true, status: eventId === 'evt_missing' ? 'already_missing' : 'deleted' };
     };
+    context.refreshHospitalMirrorSheetsSafely_ = () => ({ ok: true });
 
     context.clearCalendarEventsFromSpecifiedColumn();
 
@@ -786,7 +1031,7 @@ function testClearOldEventsUsesFixedOpEventIdColumn() {
       ['003', '林大明', '', '', '0933'],
       ['004', '黃小美', 'evt_failed', '2026-05-09T00:00:04.000Z', '0944']
     ]);
-    assert.ok(alerts[0][1].includes('OP'));
+    assert.ok(alerts[0][1].includes('All'));
     assert.ok(alerts[0][1].includes('C 欄'));
     assert.strictEqual(alerts[1][0], '清除完成');
   } finally {
@@ -795,11 +1040,13 @@ function testClearOldEventsUsesFixedOpEventIdColumn() {
     context.isCalendarAdvancedServiceAvailable_ = originalIsCalendarAdvancedServiceAvailable;
     context.withCalendarSyncLock_ = originalWithCalendarSyncLock;
     context.deleteCalendarEventByPossibleId_ = originalDeleteCalendarEventByPossibleId;
+    context.refreshHospitalMirrorSheetsSafely_ = originalRefreshHospitalMirrorSheetsSafely;
   }
 }
 
 function testClearOldEventsSupportsLegacyEventIdColumn() {
   const originalSpreadsheetApp = context.SpreadsheetApp;
+  const originalRefreshHospitalMirrorSheetsSafely = context.refreshHospitalMirrorSheetsSafely_;
   const originalGetConfiguredCalendarId = context.getConfiguredCalendarId_;
   const originalIsCalendarAdvancedServiceAvailable = context.isCalendarAdvancedServiceAvailable_;
   const originalWithCalendarSyncLock = context.withCalendarSyncLock_;
@@ -823,7 +1070,7 @@ function testClearOldEventsSupportsLegacyEventIdColumn() {
     context.SpreadsheetApp = {
       getUi: () => ui,
       getActiveSpreadsheet: () => ({
-        getSheetByName: name => name === 'OP' ? opSheet : null
+        getSheetByName: name => name === 'All' ? opSheet : null
       })
     };
     context.getConfiguredCalendarId_ = () => 'calendar_1';
@@ -836,6 +1083,7 @@ function testClearOldEventsSupportsLegacyEventIdColumn() {
       deleteCalls.push(eventId);
       return { ok: true, status: 'deleted' };
     };
+    context.refreshHospitalMirrorSheetsSafely_ = () => ({ ok: true });
 
     context.clearCalendarEventsFromSpecifiedColumn();
 
@@ -848,6 +1096,7 @@ function testClearOldEventsSupportsLegacyEventIdColumn() {
     context.isCalendarAdvancedServiceAvailable_ = originalIsCalendarAdvancedServiceAvailable;
     context.withCalendarSyncLock_ = originalWithCalendarSyncLock;
     context.deleteCalendarEventByPossibleId_ = originalDeleteCalendarEventByPossibleId;
+    context.refreshHospitalMirrorSheetsSafely_ = originalRefreshHospitalMirrorSheetsSafely;
   }
 }
 
@@ -871,8 +1120,8 @@ function testClearOldEventsMissingEventIdHeaderAborts() {
     context.SpreadsheetApp = {
       getUi: () => ui,
       getActiveSpreadsheet: () => ({
-        getSheetByName: name => name === 'OP'
-          ? makeHeaderSheet(['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得'])
+        getSheetByName: name => name === 'All'
+          ? makeHeaderSheet(['病歷號', '姓名', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得'])
           : null
       })
     };
@@ -897,7 +1146,7 @@ function testClearOldEventsMissingEventIdHeaderAborts() {
 }
 
 function testSurgeryExportDataForDate() {
-  const headers = ['病歷號', '姓名', 'TEL', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
+  const headers = ['病歷號', '姓名', 'TEL', '醫院', 'Tag', 'Condition', '日期', '時間', 'Plan', '心得', 'CalendarEventId', 'CalendarSheetWriteUpdated'];
   const cols = context.buildFieldColumnInfo_(makeHeaderSheet(headers)).columns;
   const targetDate = new Date(2026, 4, 9);
   const data = [
@@ -916,6 +1165,7 @@ function testSurgeryExportDataForDate() {
       '病歷號': '002',
       '姓名': '陳小美',
       TEL: '0922',
+      '醫院': '聯醫',
       Tag: 'OP',
       Condition: 'Cataract s/p MSICS(A -1.0 21.5)',
       '日期': new Date(2026, 4, 9),
@@ -949,6 +1199,64 @@ function testSurgeryExportDataForDate() {
     ['001', '王小明', '0911', '08:30', 'Cataract', 'PE/IOL(B -0.5 20.0)', '術後注意\n帶藥'],
     ['002', '陳小美', '0922', '09:30', 'Cataract', 'MSICS(A -1.0 21.5)', 'APPLY']
   ]);
+  assert.deepStrictEqual(toPlain(result.hospitalGroups.map(group => ({
+    hospital: group.hospital,
+    patientList: group.patientList,
+    iolList: group.iolList
+  }))), [
+    {
+      hospital: '高榮',
+      patientList: [
+        ['001', '王小明', '0911', '08:30', 'Cataract', 'PE/IOL(B -0.5 20.0)', '術後注意\n帶藥']
+      ],
+      iolList: [
+        ['王小明', 'B', '20.0', '-0.5']
+      ]
+    },
+    {
+      hospital: '聯醫',
+      patientList: [
+        ['002', '陳小美', '0922', '09:30', 'Cataract', 'MSICS(A -1.0 21.5)', 'APPLY']
+      ],
+      iolList: [
+        ['陳小美', 'A', '21.5', '-1.0']
+      ]
+    }
+  ]);
+}
+
+function testSplitExportWritesSurgeryAndIolSheetsByHospital() {
+  const surgerySheet = makeDataSheet([''], [], '手術清單');
+  const iolSheet = makeDataSheet([''], [], '水晶體清單');
+  const exportData = {
+    dateLabel: '2026/05/09(Fri)',
+    hospitalGroups: [
+      {
+        hospital: '高榮',
+        patientList: [['001', '王小明', '0911', '08:30', 'Cataract', 'PE/IOL', '']],
+        iolList: []
+      },
+      {
+        hospital: '聯醫',
+        patientList: [['002', '陳小美', '0922', '09:30', 'Cataract', 'MSICS', 'APPLY']],
+        iolList: [['陳小美', 'A', '21.5', '-1.0']]
+      }
+    ]
+  };
+
+  context.writeSplitExportData_(surgerySheet, iolSheet, exportData, {
+    surgery: 1,
+    iol: 1
+  });
+
+  assert.strictEqual(surgerySheet.rows[0][0], '[ 2026/05/09(Fri) 高榮 手術清單 ]');
+  assert.deepStrictEqual(surgerySheet.rows[1].slice(0, 7), ['病歷號', '姓名', 'TEL', '時間', '疾病', '術式', '補充說明']);
+  assert.strictEqual(surgerySheet.rows[2][1], '王小明');
+  assert.strictEqual(surgerySheet.rows[4][0], '[ 2026/05/09(Fri) 聯醫 手術清單 ]');
+  assert.strictEqual(iolSheet.rows[0][0], '[ 2026/05/09(Fri) 高榮 水晶體清單 ]');
+  assert.strictEqual(iolSheet.rows[1][0], '本日無水晶體資料');
+  assert.strictEqual(iolSheet.rows[3][0], '[ 2026/05/09(Fri) 聯醫 水晶體清單 ]');
+  assert.deepStrictEqual(iolSheet.rows[5].slice(0, 4), ['陳小美', 'A', '21.5', '-1.0']);
 }
 
 function testUpcomingExportDatesIncludeSevenDays() {
@@ -971,6 +1279,11 @@ testEventIdColumnLookupWithMovedHeader();
 testLegacyEventIdColumnLookupFallback();
 testEventIdColumnLookupMissingHeader();
 testLegacyEventIdMigrationToEnglishHeader();
+testHospitalColumnInsertedBeforeTagPreservesData();
+testHospitalColumnMovedBeforeTagPreservesData();
+testDuplicateHospitalHeadersAreReportedForManualReview();
+testHospitalClassificationDefaultsToKaohsiungVeterans();
+testMissingAllWithLegacyOpPromptsManualRename();
 testTimeNoteRoundTrip();
 testCalendarTitleKeepsBlankPatientNameSlot();
 testSheetOriginatedCalendarEchoIsSkipped();
@@ -982,12 +1295,17 @@ testMergeCombinesSafeTextFields();
 testConditionalFormulaBuilding();
 testConditionalFormattingKeepsTagIndependent();
 testSystemColumnsAreHiddenAndProtected();
+testHospitalMirrorSheetsFilterRowsFromAll();
+testProcessCalendarChangeIsNoOpWhenReverseSyncDisabled();
+testSyncCalendarChangesToSheetIsDisabled();
+testDisableCalendarReverseSyncDeletesOnlyReverseTriggersAndTokens();
 testDuplicateRowClearsSystemTrackingFields();
 testDuplicateCalendarEventIdIsDiagnosedAndSkipped();
 testClearOldEventsUsesFixedOpEventIdColumn();
 testClearOldEventsSupportsLegacyEventIdColumn();
 testClearOldEventsMissingEventIdHeaderAborts();
 testSurgeryExportDataForDate();
+testSplitExportWritesSurgeryAndIolSheetsByHospital();
 testUpcomingExportDatesIncludeSevenDays();
 
 console.log('Smoke tests passed');
