@@ -12,8 +12,7 @@ const files = [
   'sheet_model.js',
   'calendar_sync.js',
   'workflows.js',
-  'annual_archive.js',
-  'maintenance_cleanup.js'
+  'annual_archive.js'
 ];
 const sourceByFile = Object.fromEntries(
   files.map(file => [
@@ -548,7 +547,7 @@ class FakeSheet {
 }
 
 function testVersionAndModuleSplit() {
-  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.07.28.2');
+  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.07.28.3');
   assert.strictEqual(evaluate('typeof processRowChange'), 'function');
   assert.strictEqual(evaluate('typeof processCalendarStructureChange'), 'function');
   assert.strictEqual(evaluate('typeof createMonthlySurgerySheet'), 'function');
@@ -556,10 +555,6 @@ function testVersionAndModuleSplit() {
   assert.ok(sourceByFile['code.js'].includes('sheet_model.js'));
   assert.ok(sourceByFile['code.js'].includes('calendar_sync.js'));
   assert.ok(sourceByFile['code.js'].includes('workflows.js'));
-  assert.strictEqual(
-    evaluate('typeof previewLegacyBackupAndGridCleanup'),
-    'function'
-  );
 }
 
 function testOnlyCalendarEventIdIsCanonicalSystemField() {
@@ -617,9 +612,7 @@ function testCurrentMenuHasNoCompletedMigrationOrLegacyOutput() {
     '整理月刀表',
     '整理FU日期',
     '修復選取列同步',
-    '彙整舊月刀表',
-    '預覽舊備份分頁與空白列清理',
-    '執行舊備份分頁與空白列清理'
+    '彙整舊月刀表'
   ].forEach(text => assert.ok(source.includes(text)));
   [
     '重建同步索引',
@@ -636,8 +629,18 @@ function testCurrentMenuHasNoCompletedMigrationOrLegacyOutput() {
     '預覽 FU 移除時間欄',
     '執行 FU 移除時間欄',
     '預覽月份日期標題升級',
-    '執行月份日期標題升級'
+    '執行月份日期標題升級',
+    '預覽舊備份分頁與空白列清理',
+    '執行舊備份分頁與空白列清理'
   ].forEach(text => assert.strictEqual(source.includes(text), false));
+  assert.strictEqual(
+    evaluate('typeof previewLegacyBackupAndGridCleanup'),
+    'undefined'
+  );
+  assert.strictEqual(
+    evaluate('typeof executeLegacyBackupAndGridCleanup'),
+    'undefined'
+  );
 }
 
 function testMonthlySheetNameRecognition() {
@@ -1995,32 +1998,6 @@ function testArchiveEventIdsArePersistedInRegistry() {
   assert.strictEqual(archived.sourceMonth, '202604');
   assert.strictEqual(loaded.index.eventCount, 2);
   clearScriptProperties();
-}
-
-function testLegacyBackupCleanupPlanBlocksTrailingNotes() {
-  const fuHeaders = plain(evaluate('CONFIG.HEADERS'));
-  const fu = new FakeSheet('FU', 3301, [
-    fuHeaders,
-    ['TEST', '虛構姓名']
-  ]);
-  fu.getMaxRows = () => 1000;
-  fu.setNoteAt(900, 1, '人工備註');
-
-  const monthHeaders = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
-  const month = new FakeSheet('202608', 3302, [monthHeaders]);
-  month.getMaxRows = () => 1000;
-  const spreadsheet = {
-    getSheets: () => [fu, month],
-    getSheetByName: name => name === 'FU' ? fu : null
-  };
-  const plans = call('buildManagedGridTrimPlan_', spreadsheet);
-  const fuPlan = plans.find(plan => plan.sheetName === 'FU');
-  const monthPlan = plans.find(plan => plan.sheetName === '202608');
-  assert.strictEqual(fuPlan.keepRows, 200);
-  assert.strictEqual(fuPlan.deleteCount, 800);
-  assert.deepStrictEqual(plain(fuPlan.noteRows), [900]);
-  assert.strictEqual(monthPlan.keepRows, 150);
-  assert.strictEqual(monthPlan.deleteCount, 850);
 }
 
 function testReorderPreflightIsLocalAndDetectsUnsyncedRowHash() {
@@ -3734,7 +3711,6 @@ const tests = [
   testLightweightEventIndexAndSingleSheetRegistryRefresh,
   testSingleSheetSyncUsesVerifiedRegistryBeforeGlobalScan,
   testArchiveEventIdsArePersistedInRegistry,
-  testLegacyBackupCleanupPlanBlocksTrailingNotes,
   testReorderPreflightIsLocalAndDetectsUnsyncedRowHash,
   testFastFingerprintMetadataFallsBackSafely,
   testDefaultMonthlyDates,

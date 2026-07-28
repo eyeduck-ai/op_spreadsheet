@@ -28,7 +28,6 @@ jobs:
           node --check calendar_sync.js
           node --check workflows.js
           node --check annual_archive.js
-          node --check maintenance_cleanup.js
           node --check tests/smoke.js
           node tests/smoke.js
 

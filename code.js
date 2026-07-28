@@ -9,7 +9,7 @@
  * - annual_archive.js：私人備份與永久年度封存
  */
 const CONFIG = {
-  VERSION: '2026.07.28.2',
+  VERSION: '2026.07.28.3',
   CALENDAR_ID: 'YOUR_CALENDAR_ID_HERE',
   SHEET_ALL: 'All',
   SHEET_FU: 'FU',
@@ -223,19 +223,6 @@ const ANNUAL_ARCHIVE_TRANSACTION_PROPERTY =
   'ANNUAL_SURGERY_ARCHIVE_TRANSACTION_V1';
 const LEGACY_ARCHIVED_MONTHS_PROPERTY = 'ARCHIVED_MONTHLY_SHEETS_V1';
 const HEALTH_REPORT_SHEET = '同步健康報告';
-const LEGACY_BACKUP_CLEANUP_PREVIEW_PROPERTY =
-  'LEGACY_BACKUP_CLEANUP_PREVIEW_V1';
-const LEGACY_BACKUP_CLEANUP_BACKUP_PROPERTY =
-  'LEGACY_BACKUP_CLEANUP_BACKUP_V1';
-const LEGACY_BACKUP_SHEET_NAMES = [
-  'FU_MigrationBackup_20260725',
-  'FU_TagStateBackup_20260725',
-  'SystemId_RetirementBackup_20260725',
-  'FU_RemoveTimeBackup_20260726'
-];
-const FU_GRID_RETAIN_ROWS = 200;
-const MONTHLY_GRID_RETAIN_ROWS = 150;
-const MANAGED_GRID_ROW_BUFFER = 50;
 
 function toCellText_(value) {
   return value === null || value === undefined ? '' : String(value).trim();
@@ -603,15 +590,6 @@ function onOpen() {
     .addSeparator()
     .addItem('檢查同步健康', 'checkSyncHealth')
     .addItem('同步待處理變更', 'syncPendingChanges')
-    .addSeparator()
-    .addItem(
-      '預覽舊備份分頁與空白列清理',
-      'previewLegacyBackupAndGridCleanup'
-    )
-    .addItem(
-      '執行舊備份分頁與空白列清理',
-      'executeLegacyBackupAndGridCleanup'
-    )
     .addItem(`版本：${CONFIG.VERSION}`, 'showVersionInfo');
 
   ui.createMenu('手術排程系統')
