@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta charset="utf-8">
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Arial, "Noto Sans TC", sans-serif;
+        color: #202124;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #f8f9fa; }
+      main { padding: 18px; }
+      h1 { margin: 0 0 8px; font-size: 20px; }
+      p { margin: 0 0 14px; color: #5f6368; line-height: 1.5; }
+      .panel {
+        background: #fff;
+        border: 1px solid #dadce0;
+        border-radius: 8px;
+        padding: 12px;
+        margin-bottom: 12px;
+      }
+      .months {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        max-height: 280px;
+        overflow: auto;
+      }
+      .month {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px;
+        border: 1px solid #e0e0e0;
+        border-radius: 6px;
+      }
+      .month input { margin: 0; }
+      .month span { flex: 1; }
+      .count { color: #5f6368; font-size: 12px; }
+      .warning {
+        border-left: 4px solid #f9ab00;
+        background: #fef7e0;
+        padding: 10px 12px;
+        color: #5f4100;
+        line-height: 1.5;
+      }
+      .confirm {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+        margin-top: 10px;
+        font-weight: 600;
+      }
+      .confirm input { margin-top: 3px; }
+      .actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      button {
+        border: 0;
+        border-radius: 4px;
+        padding: 9px 16px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      #submit { background: #1a73e8; color: #fff; }
+      #cancel { background: #e8eaed; color: #3c4043; }
+      button:disabled { opacity: .55; cursor: default; }
+      #status { flex: 1; font-size: 13px; white-space: pre-wrap; }
+      .error { color: #b3261e; }
+      .success { color: #137333; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>彙整舊月刀表</h1>
+      <p>可選擇一個以上、早於目前月份的刀表；跨年度時會分別加入各年度封存表。</p>
+
+      <section class="panel">
+        <div id="months" class="months"></div>
+      </section>
+
+      <p class="warning">
+        系統會先建立並驗證私人 My Drive 整檔備份及年度封存表，
+        全部成功後才永久刪除原月份分頁。既有 Calendar 事件不會改動；
+        一般選單不提供還原。
+        <label class="confirm">
+          <input id="confirmDeletion" type="checkbox">
+          <span>我了解成功後會永久刪除所選月份分頁。</span>
+        </label>
+      </p>
+
+      <div class="actions">
+        <button id="submit" type="button">建立私人備份並永久封存</button>
+        <button id="cancel" type="button">取消</button>
+        <div id="status" aria-live="polite"></div>
+      </div>
+    </main>
+
+    <script>
+      const INITIAL_DATA = <?!= initialDataJson ?>;
+      const monthsContainer = document.getElementById("months");
+      const submit = document.getElementById("submit");
+      const status = document.getElementById("status");
+      const confirmDeletion = document.getElementById("confirmDeletion");
+
+      function selectedMonths() {
+        return Array.from(
+          monthsContainer.querySelectorAll('input[type="checkbox"]:checked')
+        ).map(input => input.value).sort();
+      }
+
+      INITIAL_DATA.months.forEach(month => {
+        const label = document.createElement("label");
+        label.className = "month";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.value = month.name;
+        checkbox.checked = INITIAL_DATA.defaultMonths.includes(month.name);
+        const name = document.createElement("span");
+        name.textContent = month.name;
+        const count = document.createElement("span");
+        count.className = "count";
+        count.textContent = `${month.patientCount} 筆`;
+        label.append(checkbox, name, count);
+        monthsContainer.appendChild(label);
+      });
+
+      document.getElementById("cancel").addEventListener(
+        "click",
+        () => google.script.host.close()
+      );
+      submit.addEventListener("click", () => {
+        const months = selectedMonths();
+        if (months.length < 1) {
+          status.textContent = "請至少選擇一個已結束月份。";
+          status.className = "error";
+          return;
+        }
+        if (!confirmDeletion.checked) {
+          status.textContent = "請先確認永久刪除來源月份分頁。";
+          status.className = "error";
+          return;
+        }
+
+        submit.disabled = true;
+        status.textContent = "正在建立私人整檔備份並驗證年度封存；請勿關閉視窗…";
+        status.className = "";
+        google.script.run
+          .withSuccessHandler(result => {
+            submit.disabled = false;
+            status.textContent = result.message || `已建立 ${result.sheetName}`;
+            status.className = result.ok ? "success" : "error";
+          })
+          .withFailureHandler(error => {
+            submit.disabled = false;
+            status.textContent = error && error.message
+              ? error.message
+              : String(error);
+            status.className = "error";
+          })
+          .submitMonthlyRollupRequest({
+            operationId: INITIAL_DATA.operationId,
+            months,
+            confirmedPermanentDeletion: true
+          });
+      });
+    </script>
+  </body>
+</html>

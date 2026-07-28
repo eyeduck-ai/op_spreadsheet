@@ -23,6 +23,7 @@ desktop.ini
 
 # Local dependency/build artifacts
 node_modules/
+.pnpm-store/
 .cache/
 dist/
 build/

@@ -21,6 +21,17 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Validate Apps Script
+        run: |
+          node --check code.js
+          node --check sheet_model.js
+          node --check calendar_sync.js
+          node --check workflows.js
+          node --check annual_archive.js
+          node --check maintenance_cleanup.js
+          node --check tests/smoke.js
+          node tests/smoke.js
+
       - name: Setup clasp credentials
         env:
           CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
@@ -32,4 +43,4 @@ jobs:
           printf '%s' "$CLASP_JSON" > .clasp.json
 
       - name: Push to Apps Script
-        run: npx --yes @google/clasp@latest push --force
+        run: npx --yes @google/clasp@3.3.0 push --force

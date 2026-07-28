@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta charset="utf-8">
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Arial, "Noto Sans TC", sans-serif;
+        color: #202124;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #f8f9fa; }
+      main { padding: 18px; }
+      h1 { margin: 0 0 12px; font-size: 20px; }
+      .source, .panel {
+        background: #fff;
+        border: 1px solid #dadce0;
+        border-radius: 8px;
+        padding: 12px;
+        margin-bottom: 12px;
+      }
+      details.panel { padding: 0; }
+      details.panel > summary {
+        cursor: pointer;
+        padding: 12px;
+        font-weight: 600;
+        color: #3c4043;
+      }
+      details.panel[open] > summary {
+        border-bottom: 1px solid #dadce0;
+      }
+      .advanced-content { padding: 12px; }
+      .source-grid, .grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .span-2 { grid-column: span 2; }
+      .span-4 { grid-column: span 4; }
+      label { display: block; font-size: 12px; color: #5f6368; }
+      input, select, textarea {
+        width: 100%;
+        margin-top: 4px;
+        border: 1px solid #bdc1c6;
+        border-radius: 4px;
+        padding: 7px 8px;
+        font: inherit;
+        color: #202124;
+        background: #fff;
+      }
+      textarea { min-height: 62px; resize: vertical; }
+      input:focus, select:focus, textarea:focus {
+        outline: 2px solid #d2e3fc;
+        border-color: #1a73e8;
+      }
+      .readonly { padding: 5px 0; font-size: 14px; white-space: pre-wrap; }
+      .warnings {
+        margin-top: 10px;
+        padding: 10px;
+        border-radius: 6px;
+        background: #fef7e0;
+        color: #5f4312;
+      }
+      .warnings label { color: inherit; margin-top: 8px; }
+      .warnings input { width: auto; margin-right: 6px; }
+      .duplicate-warning {
+        border-color: #f9ab00;
+        background: #fef7e0;
+      }
+      .duplicate-warning label { color: #5f4312; }
+      .duplicate-warning input { width: auto; margin-right: 6px; }
+      .actions {
+        position: sticky;
+        bottom: 0;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 0 0;
+        background: #f8f9fa;
+      }
+      button {
+        border: 0;
+        border-radius: 4px;
+        padding: 9px 16px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      #submit { background: #1a73e8; color: #fff; }
+      #cancel { background: #e8eaed; color: #3c4043; }
+      button:disabled { opacity: .55; cursor: default; }
+      #status { flex: 1; font-size: 13px; white-space: pre-wrap; }
+      .error { color: #b3261e; }
+      .success { color: #137333; }
+      @media (max-width: 720px) {
+        .source-grid, .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .span-4 { grid-column: span 2; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>FU =&gt; 月刀表</h1>
+      <section class="source">
+        <div class="source-grid">
+          <div><label>病歷號</label><div class="readonly" id="chartNo"></div></div>
+          <div><label>姓名</label><div class="readonly" id="name"></div></div>
+          <div><label>TEL</label><div class="readonly" id="tel"></div></div>
+          <div class="span-4"><label>Condition</label><div class="readonly" id="condition"></div></div>
+        </div>
+        <div id="warnings" class="warnings" hidden>
+          <strong>Condition 解析提醒</strong>
+          <ul id="warningList"></ul>
+          <label><input id="confirmedWarnings" type="checkbox">我已檢查並確認下方結構化資料</label>
+        </div>
+      </section>
+
+      <form id="form">
+        <details class="panel">
+          <summary>進階手術資料（診斷、術式、IOL、Plan、心得）</summary>
+          <div class="advanced-content">
+          <div class="grid">
+            <label>
+              目標月份
+              <input id="targetMonth" name="targetMonth" list="monthOptions"
+                maxlength="6" pattern="\d{6}" required placeholder="YYYYMM">
+              <datalist id="monthOptions"></datalist>
+            </label>
+            <label class="span-2">
+              現有日期區塊
+              <select id="existingBlock">
+                <option value="">新增日期區塊／自行指定</option>
+              </select>
+            </label>
+            <label>
+              報到時間
+              <input id="time" name="time" placeholder="08:30、0830、PM 或空白">
+            </label>
+            <label>
+              手術日期
+              <input id="date" name="date" type="date" required>
+            </label>
+            <label>
+              醫院
+              <select id="hospital" name="hospital" required></select>
+            </label>
+            <label>
+              GA
+              <select id="ga" name="ga"></select>
+            </label>
+            <label>
+              側別
+              <select id="side" name="side"></select>
+            </label>
+          </div>
+          </div>
+        </details>
+
+        <section class="panel">
+          <div class="grid">
+            <label class="span-2">
+              診斷
+              <input id="diagnosis" name="diagnosis" list="diagnosisOptions">
+              <datalist id="diagnosisOptions"></datalist>
+            </label>
+            <label>
+              Grade
+              <input id="grade" name="grade">
+            </label>
+            <label>
+              術式
+              <input id="procedure" name="procedure" list="procedureOptions">
+              <datalist id="procedureOptions"></datalist>
+            </label>
+            <label>IOL<input id="iol" name="iol"></label>
+            <label>IOL Target<input id="iolTarget" name="iolTarget"></label>
+            <label>IOL Final<input id="iolFinal" name="iolFinal"></label>
+            <label>Axis<input id="axis" name="axis" placeholder="不含 @"></label>
+            <label class="span-2">Plan<textarea id="plan" name="plan"></textarea></label>
+            <label class="span-2">心得<textarea id="memo" name="memo"></textarea></label>
+          </div>
+        </section>
+
+        <section id="duplicateWarnings" class="panel duplicate-warning" hidden>
+          <strong>目標月刀表已有疑似相同手術</strong>
+          <ul id="duplicateList"></ul>
+          <label>
+            <input id="confirmedDuplicates" type="checkbox">
+            我已檢查，仍要建立新的獨立手術列
+          </label>
+        </section>
+
+        <div class="actions">
+          <button id="submit" type="submit">建立月刀表排程並同步 Calendar</button>
+          <button id="cancel" type="button">取消</button>
+          <div id="status" aria-live="polite"></div>
+        </div>
+      </form>
+    </main>
+
+    <script>
+      const INITIAL_DATA = <?!= initialDataJson ?>;
+      let confirmedDuplicateFingerprint = "";
+      let selectedBlockRow = 0;
+      const blockOptionsCache = {};
+      const pendingBlockLoads = {};
+      const byId = id => document.getElementById(id);
+      const setText = (id, value) => { byId(id).textContent = value || ""; };
+      const addOptions = (select, values) => {
+        values.forEach(value => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = value || "（空白）";
+          select.appendChild(option);
+        });
+      };
+      const addDatalist = (id, values) => {
+        const list = byId(id);
+        values.forEach(value => {
+          const option = document.createElement("option");
+          option.value = value;
+          list.appendChild(option);
+        });
+      };
+
+      setText("chartNo", INITIAL_DATA.source.chartNo);
+      setText("name", INITIAL_DATA.source.name);
+      setText("tel", INITIAL_DATA.source.tel);
+      setText("condition", INITIAL_DATA.source.condition);
+      addOptions(byId("hospital"), INITIAL_DATA.options.hospitals);
+      addOptions(byId("ga"), INITIAL_DATA.options.ga);
+      addOptions(byId("side"), INITIAL_DATA.options.sides);
+      addDatalist("diagnosisOptions", INITIAL_DATA.options.diagnoses);
+      addDatalist("procedureOptions", INITIAL_DATA.options.procedures);
+      INITIAL_DATA.months.forEach(month => {
+        const option = document.createElement("option");
+        option.value = month;
+        byId("monthOptions").appendChild(option);
+      });
+
+      const suggestion = INITIAL_DATA.suggestion;
+      [
+        "ga", "side", "diagnosis", "grade", "procedure", "iol",
+        "iolTarget", "iolFinal", "axis", "plan", "memo", "hospital"
+      ].forEach(key => {
+        if (byId(key)) byId(key).value = suggestion[key] || "";
+      });
+
+      if (INITIAL_DATA.months.length) {
+        byId("targetMonth").value = INITIAL_DATA.months[0];
+      }
+      if (INITIAL_DATA.warnings.length) {
+        byId("warnings").hidden = false;
+        INITIAL_DATA.warnings.forEach(message => {
+          const item = document.createElement("li");
+          item.textContent = message;
+          byId("warningList").appendChild(item);
+        });
+      }
+
+      function renderBlocks(result) {
+        selectedBlockRow = 0;
+        const select = byId("existingBlock");
+        select.disabled = false;
+        select.replaceChildren();
+        const newOption = document.createElement("option");
+        newOption.value = "";
+        newOption.textContent = result && result.exists
+          ? "新增日期區塊／自行指定"
+          : "新月份（送出時建立）";
+        select.appendChild(newOption);
+        ((result && result.blocks) || []).forEach(block => {
+          const option = document.createElement("option");
+          option.value = JSON.stringify({
+            date: block.date,
+            hospital: block.hospital,
+            headerRow: block.headerRow
+          });
+          option.textContent = block.label;
+          select.appendChild(option);
+        });
+      }
+
+      function refreshBlocks() {
+        selectedBlockRow = 0;
+        const month = byId("targetMonth").value.trim();
+        const select = byId("existingBlock");
+        if (!/^\d{6}$/.test(month)) {
+          select.disabled = true;
+          select.replaceChildren();
+          const option = document.createElement("option");
+          option.textContent = "請先輸入 YYYYMM";
+          select.appendChild(option);
+          return;
+        }
+        if (blockOptionsCache[month]) {
+          renderBlocks(blockOptionsCache[month]);
+          return;
+        }
+        if (pendingBlockLoads[month]) return;
+        pendingBlockLoads[month] = true;
+        select.disabled = true;
+        select.replaceChildren();
+        const loading = document.createElement("option");
+        loading.textContent = "正在載入該月份刀日…";
+        select.appendChild(loading);
+        google.script.run
+          .withSuccessHandler(result => {
+            delete pendingBlockLoads[month];
+            blockOptionsCache[month] = result;
+            if (byId("targetMonth").value.trim() === month) {
+              renderBlocks(result);
+            }
+          })
+          .withFailureHandler(error => {
+            delete pendingBlockLoads[month];
+            if (byId("targetMonth").value.trim() !== month) return;
+            select.disabled = false;
+            select.replaceChildren();
+            const failed = document.createElement("option");
+            failed.value = "";
+            failed.textContent = "刀日載入失敗；可自行指定日期";
+            select.appendChild(failed);
+            byId("status").textContent = error && error.message
+              ? error.message
+              : String(error);
+            byId("status").className = "error";
+          })
+          .getFuToMonthlyBlockOptions(month);
+      }
+
+      byId("targetMonth").addEventListener("change", refreshBlocks);
+      byId("targetMonth").addEventListener("input", refreshBlocks);
+      byId("existingBlock").addEventListener("change", event => {
+        if (!event.target.value) {
+          selectedBlockRow = 0;
+          return;
+        }
+        const block = JSON.parse(event.target.value);
+        byId("date").value = block.date;
+        byId("hospital").value = block.hospital;
+        selectedBlockRow = Number(block.headerRow) || 0;
+      });
+      byId("date").addEventListener("input", () => { selectedBlockRow = 0; });
+      byId("hospital").addEventListener("change", () => { selectedBlockRow = 0; });
+      refreshBlocks();
+
+      byId("cancel").addEventListener("click", () => google.script.host.close());
+      byId("form").addEventListener("submit", event => {
+        event.preventDefault();
+        if (INITIAL_DATA.requiresConfirmation && !byId("confirmedWarnings").checked) {
+          byId("status").textContent = "請先確認 Condition 解析提醒。";
+          byId("status").className = "error";
+          return;
+        }
+        if (
+          confirmedDuplicateFingerprint &&
+          !byId("confirmedDuplicates").checked
+        ) {
+          byId("status").textContent = "請先確認疑似重複資料。";
+          byId("status").className = "error";
+          return;
+        }
+        const payload = {
+          fuRow: INITIAL_DATA.fuRow,
+          sourceFingerprint: INITIAL_DATA.sourceFingerprint,
+          requestToken: INITIAL_DATA.requestToken,
+          confirmedDuplicateFingerprint:
+            byId("confirmedDuplicates").checked
+              ? confirmedDuplicateFingerprint
+              : "",
+          targetMonth: byId("targetMonth").value.trim(),
+          selectedBlockRow,
+          date: byId("date").value,
+          hospital: byId("hospital").value,
+          time: byId("time").value,
+          ga: byId("ga").value,
+          side: byId("side").value,
+          diagnosis: byId("diagnosis").value,
+          grade: byId("grade").value,
+          procedure: byId("procedure").value,
+          iol: byId("iol").value,
+          iolTarget: byId("iolTarget").value,
+          iolFinal: byId("iolFinal").value,
+          axis: byId("axis").value,
+          plan: byId("plan").value,
+          memo: byId("memo").value,
+          confirmedWarnings: byId("confirmedWarnings").checked
+        };
+        byId("submit").disabled = true;
+        byId("status").className = "";
+        byId("status").textContent = "正在建立月刀表列並同步 Calendar…";
+        google.script.run
+          .withSuccessHandler(result => {
+            byId("submit").disabled = false;
+            if (result.status === "needs_duplicate_confirmation") {
+              confirmedDuplicateFingerprint = result.duplicateFingerprint || "";
+              byId("duplicateList").replaceChildren();
+              (result.matches || []).forEach(match => {
+                const item = document.createElement("li");
+                const level = match.level === "exact"
+                  ? "完全相同"
+                  : "可能重複";
+                item.textContent =
+                  `${match.sheetName}!${match.row}［${level}］${match.reason}`;
+                byId("duplicateList").appendChild(item);
+              });
+              byId("confirmedDuplicates").checked = false;
+              byId("duplicateWarnings").hidden = false;
+              byId("status").textContent = result.message ||
+                "請檢查疑似重複資料後再確認。";
+              byId("status").className = "error";
+              byId("submit").textContent = "確認後仍建立";
+              return;
+            }
+            byId("status").textContent = result.message ||
+              `已定位 ${result.sheetName} 第 ${result.row} 列；Calendar：${result.calendarStatus}`;
+            byId("status").className = result.ok ? "success" : "error";
+            if (!result.ok) {
+              byId("submit").textContent = "重試 Calendar 同步";
+            }
+          })
+          .withFailureHandler(error => {
+            byId("submit").disabled = false;
+            byId("status").textContent = error && error.message
+              ? error.message
+              : String(error);
+            byId("status").className = "error";
+          })
+          .submitFuToMonthlySchedule(payload);
+      });
+    </script>
+  </body>
+</html>
