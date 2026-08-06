@@ -1,7 +1,8 @@
 /**
  * Calendar 事件生命週期與 CALENDAR_ROW_REGISTRY_V2。
  *
- * Registry 只保存 Event ID、表單位置、日期區塊與內容雜湊；
+ * Registry 只保存 Event ID、表單位置、日期區塊、內容／綁定雜湊
+ * 與安全的 pending 狀態；
  * 不保存病歷號、姓名、診斷或 Plan 原文。
  */
 const CALENDAR_REGISTRY_VERSION = 2;
@@ -10,7 +11,7 @@ const CALENDAR_REGISTRY_CHUNK_PREFIX = 'CALENDAR_ROW_REGISTRY_V2_';
 const CALENDAR_REGISTRY_CHUNK_SIZE = 7000;
 const CALENDAR_PENDING_QUEUE_LOCK_WAIT_MS = 1000;
 const CALENDAR_REPAIR_MAX_PREVIEW_ROWS = 40;
-const CALENDAR_FAST_FINGERPRINT_VERSION = 1;
+const CALENDAR_FAST_FINGERPRINT_VERSION = 2;
 
 function buildCalendarTitle_(chartNo, patientName, condition) {
   return [
@@ -46,6 +47,24 @@ function getEventCalendarBindingSignature_(event) {
   const slots = toCellText_(event && event.summary).split(/\s*\|\s*/);
   if (slots.length !== 3) return '';
   return buildCalendarBindingSignature_(slots[0], slots[1], slots[2]);
+}
+
+function getCalendarPrivateProperty_(event, key) {
+  return toCellText_(
+    event &&
+    event.extendedProperties &&
+    event.extendedProperties.private &&
+    event.extendedProperties.private[key]
+  );
+}
+
+function isCancelledMonthlyCalendarEvent_(event) {
+  return Boolean(
+    getCalendarPrivateProperty_(event, CALENDAR_PRIVATE_KIND_KEY) ===
+      CALENDAR_PRIVATE_MONTHLY_KIND &&
+    getCalendarPrivateProperty_(event, CALENDAR_PRIVATE_STATE_KEY) ===
+      CALENDAR_PRIVATE_CANCELLED_STATE
+  );
 }
 
 function buildCalendarDescription_(items) {
@@ -115,6 +134,9 @@ function addDays_(date, days) {
 }
 
 function getCalendarColorId_(context) {
+  if (context.kind === 'MONTHLY' && context.cancelled) {
+    return CONFIG.COLORS.MONTHLY_CANCELLED;
+  }
   if (context.kind === 'FU') return CONFIG.COLORS.FU;
   if (toCellText_(context.ga)) return CONFIG.COLORS.MONTHLY_GA;
   return context.timeInfo && context.timeInfo.parsedTime
@@ -156,6 +178,14 @@ function buildCalendarResource_(context) {
     description: buildCalendarDescription_(descriptionItems),
     colorId: getCalendarColorId_(context)
   };
+  if (context.kind === 'MONTHLY' && context.cancelled) {
+    resource.extendedProperties = {
+      private: {
+        [CALENDAR_PRIVATE_KIND_KEY]: CALENDAR_PRIVATE_MONTHLY_KIND,
+        [CALENDAR_PRIVATE_STATE_KEY]: CALENDAR_PRIVATE_CANCELLED_STATE
+      }
+    };
+  }
   if (!forceAllDay && context.timeInfo.parsedTime) {
     const start = new Date(context.date.getTime());
     start.setHours(
@@ -193,11 +223,14 @@ function calendarEndpointMatches_(actual, expected) {
 }
 
 function calendarEventMatchesResource_(event, resource) {
+  const expectedCancelled = isCancelledMonthlyCalendarEvent_(resource);
+  const actualCancelled = isCancelledMonthlyCalendarEvent_(event);
   return Boolean(
     event &&
     toCellText_(event.summary) === toCellText_(resource.summary) &&
     toCellText_(event.description) === toCellText_(resource.description) &&
     toCellText_(event.colorId) === toCellText_(resource.colorId) &&
+    expectedCancelled === actualCancelled &&
     calendarEndpointMatches_(event.start, resource.start) &&
     calendarEndpointMatches_(event.end, resource.end)
   );
@@ -476,11 +509,48 @@ function buildFuRowContext_(sheet, row, columns, rowValues) {
     timeInfo,
     valid: !invalidReason,
     invalidReason,
+    bindingHash: buildCalendarBindingSignature_(
+      chartNo,
+      patientName,
+      hashPayload.condition
+    ),
     rowHash: sha256Hex_(JSON.stringify(hashPayload))
   };
 }
 
-function buildMonthlyRowContext_(sheet, patient, block, columns, archived) {
+function isMonthlyCancelledFontLine_(value) {
+  return toCellText_(value).toLowerCase() === 'line-through';
+}
+
+function readMonthlyCancelledRows_(
+  sheet,
+  columns,
+  startRow,
+  rowCount
+) {
+  const firstRow = Number(startRow) || 2;
+  const count = Math.max(0, Number(rowCount) || 0);
+  const cancelledRows = {};
+  if (!count || !columns || !columns.CHART_NO) return cancelledRows;
+  const fontLines = sheet
+    .getRange(firstRow, columns.CHART_NO, count, 1)
+    .getFontLines();
+  (fontLines || []).forEach((values, index) => {
+    if (isMonthlyCancelledFontLine_((values || [])[0])) {
+      cancelledRows[firstRow + index] = true;
+    }
+  });
+  return cancelledRows;
+}
+
+function buildMonthlyRowContext_(
+  sheet,
+  patient,
+  block,
+  columns,
+  archived,
+  cancelledRows
+) {
   const values = patient.values;
   const chartNo = toCellText_(getRowFieldValue_(values, columns, 'CHART_NO'));
   const patientName = toSingleLineText_(
@@ -500,6 +570,11 @@ function buildMonthlyRowContext_(sheet, patient, block, columns, archived) {
     axis: getRowFieldValue_(values, columns, 'AXIS')
   };
   const date = block ? block.date : null;
+  const cancelled = Boolean(
+    !archived &&
+    cancelledRows &&
+    cancelledRows[patient.row]
+  );
   const hasIdentity = Boolean(chartNo || patientName);
   let invalidReason = '';
   if (!block) invalidReason = 'no_block';
@@ -524,12 +599,14 @@ function buildMonthlyRowContext_(sheet, patient, block, columns, archived) {
     iolFinal: toCellText_(data.iolFinal),
     axis: toCellText_(data.axis)
   };
+  if (cancelled) hashPayload.cancelled = true;
   return {
     sheet,
     sheetId: sheet.getSheetId(),
     sheetName: sheet.getName(),
     kind: 'MONTHLY',
     archived: Boolean(archived),
+    cancelled,
     row: patient.row,
     columns,
     values,
@@ -547,6 +624,11 @@ function buildMonthlyRowContext_(sheet, patient, block, columns, archived) {
     timeInfo,
     valid: !invalidReason,
     invalidReason,
+    bindingHash: buildCalendarBindingSignature_(
+      chartNo,
+      patientName,
+      buildMonthlyCondition_(data, date)
+    ),
     rowHash: sha256Hex_(JSON.stringify(hashPayload))
   };
 }
@@ -586,6 +668,7 @@ function buildMonthlyStructureContext_(sheet, issue, columns, values) {
     valid: false,
     invalidReason: issue.type,
     structural: true,
+    bindingHash: '',
     rowHash: sha256Hex_(JSON.stringify({
       kind: 'MONTHLY_STRUCTURE',
       sheetId: sheet.getSheetId(),
@@ -614,7 +697,8 @@ function buildManagedSheetFastFingerprint_(
   kind,
   columns,
   values,
-  startRow
+  startRow,
+  cancelledRows
 ) {
   const keys = (
     kind === 'FU' ? FU_CALENDAR_KEYS : MONTHLY_CALENDAR_KEYS
@@ -642,7 +726,10 @@ function buildManagedSheetFastFingerprint_(
     CALENDAR_FAST_FINGERPRINT_VERSION,
     kind,
     columnSpec,
-    rows
+    rows,
+    Object.keys(cancelledRows || {}).map(Number).sort((left, right) => {
+      return left - right;
+    })
   ]));
 }
 
@@ -699,11 +786,19 @@ function buildMonthlySheetCalendarScanFromBlockScan_(
   const contexts = [];
   const structuralActions = [];
   const structuralConflicts = [];
+  const firstRow = blockScan.firstRow || 2;
+  const cancelledRows = readMonthlyCancelledRows_(
+    sheet,
+    columns,
+    firstRow,
+    (blockScan.values || []).length
+  );
   const fastFingerprint = buildManagedSheetFastFingerprint_(
     'MONTHLY',
     columns,
     blockScan.values || [],
-    blockScan.firstRow || 2
+    firstRow,
+    cancelledRows
   );
   blockScan.blocks.forEach(block => {
     block.patientRows.forEach(patient => {
@@ -713,7 +808,8 @@ function buildMonthlySheetCalendarScanFromBlockScan_(
           patient,
           block,
           columns,
-          false
+          false,
+          cancelledRows
         )
       );
     });
@@ -725,7 +821,8 @@ function buildMonthlySheetCalendarScanFromBlockScan_(
         patient,
         null,
         columns,
-        false
+        false,
+        cancelledRows
       )
     );
   });
@@ -775,6 +872,7 @@ function buildMonthlySheetCalendarScanFromBlockScan_(
     structuralActions,
     structuralConflicts,
     blockScan,
+    cancelledRows,
     fastFingerprint
   };
 }
@@ -875,7 +973,11 @@ function buildGlobalEventIdLocationsFromRegistry_(
   if (!baseline || !baseline.ok || !baseline.index) return null;
   if (pendingCalendarQueueHasWork_(pendingQueue)) return null;
   if ((baseline.entries || []).some(entry => {
-    return Boolean(entry && (entry.pendingSync || entry.pendingDelete));
+    return Boolean(entry && (
+      entry.pendingSync ||
+      entry.pendingDelete ||
+      entry.pendingResolution
+    ));
   })) {
     return null;
   }
@@ -957,11 +1059,15 @@ function buildManagedSheetFastState_(sheet) {
   const values = lastRow > 1
     ? sheet.getRange(2, 1, lastRow - 1, lastColumn).getValues()
     : [];
+  const cancelledRows = isMonthly
+    ? readMonthlyCancelledRows_(sheet, columns, 2, values.length)
+    : {};
   const fastFingerprint = buildManagedSheetFastFingerprint_(
     kind,
     columns,
     values,
-    2
+    2,
+    cancelledRows
   );
   const eventLocations = {};
   const addEventId = (eventId, row) => {
@@ -1046,6 +1152,7 @@ function buildManagedSheetFastState_(sheet) {
     lastRow,
     values,
     blockScan,
+    cancelledRows,
     fastFingerprint,
     eventLocations,
     eventIds: Object.keys(eventLocations),
@@ -1128,7 +1235,11 @@ function assertManagedSheetRegistrySafeForReorder_(
   });
 
   const pendingEntries = previousEntries.filter(entry => {
-    return Boolean(entry.pendingSync || entry.pendingDelete);
+    return Boolean(
+      entry.pendingSync ||
+      entry.pendingDelete ||
+      entry.pendingResolution
+    );
   });
   const missingFromSheet = previousEntries.filter(entry => {
     return entry.eventId && !currentById[entry.eventId];
@@ -1608,7 +1719,11 @@ function runFullCalendarReconcile_(spreadsheet, options) {
     const retained = readCalendarRegistryStore_();
     const retainedEntries = retained.ok
       ? retained.entries.filter(entry => {
-        return Boolean(entry.pendingSync || entry.pendingDelete);
+        return Boolean(
+          entry.pendingSync ||
+          entry.pendingDelete ||
+          entry.pendingResolution
+        );
       })
       : [];
     liveResults.forEach(item => {
@@ -1654,10 +1769,13 @@ function toRegistryEntry_(context) {
     row: context.row,
     blockKey: context.blockKey,
     rowHash: context.rowHash,
+    bindingHash: toCellText_(context.bindingHash),
     valid: Boolean(context.valid),
     invalidReason: context.invalidReason || '',
     pendingSync: false,
     pendingDelete: false,
+    pendingResolution: false,
+    pendingResolutionReason: '',
     pendingError: ''
   };
 }
@@ -1674,6 +1792,7 @@ function toArchiveRegistryEntry_(location) {
     row: Number(location && location.row),
     sourceMonth,
     blockKey: sourceMonth,
+    bindingHash: '',
     rowHash: sha256Hex_(
       JSON.stringify([
         eventId,
@@ -1686,7 +1805,46 @@ function toArchiveRegistryEntry_(location) {
     invalidReason: '',
     pendingSync: false,
     pendingDelete: false,
+    pendingResolution: false,
+    pendingResolutionReason: '',
     pendingError: ''
+  };
+}
+
+function normalizeCalendarRegistryReasonCode_(value, fallback) {
+  const text = toCellText_(value);
+  if (!text) return toCellText_(fallback);
+  return /^[A-Za-z0-9_.:-]{1,120}$/.test(text)
+    ? text
+    : toCellText_(fallback) || 'legacy_error_redacted';
+}
+
+function normalizeCalendarRegistryEntry_(entry) {
+  const value = entry || {};
+  return {
+    ...value,
+    eventId: toCellText_(value.eventId),
+    sheetId: Number(value.sheetId),
+    sheetName: toCellText_(value.sheetName),
+    kind: toCellText_(value.kind),
+    archived: Boolean(value.archived),
+    row: Number(value.row),
+    blockKey: toCellText_(value.blockKey),
+    rowHash: toCellText_(value.rowHash),
+    bindingHash: toCellText_(value.bindingHash),
+    valid: Boolean(value.valid),
+    invalidReason: toCellText_(value.invalidReason),
+    pendingSync: Boolean(value.pendingSync),
+    pendingDelete: Boolean(value.pendingDelete),
+    pendingResolution: Boolean(value.pendingResolution),
+    pendingResolutionReason: normalizeCalendarRegistryReasonCode_(
+      value.pendingResolutionReason,
+      value.pendingResolution ? 'pending_resolution' : ''
+    ),
+    pendingError: normalizeCalendarRegistryReasonCode_(
+      value.pendingError,
+      value.pendingError ? 'legacy_error_redacted' : ''
+    )
   };
 }
 
@@ -1722,10 +1880,19 @@ function writeCalendarRegistryStore_(
   retainedEntries,
   retainedSheetMetadata
 ) {
+  if ((scan.duplicateIds || []).length) {
+    throw new Error(
+      `CalendarEventId 重複：${scan.duplicateIds.join('、')}；` +
+      'V2 索引未寫入。'
+    );
+  }
   const properties = PropertiesService.getScriptProperties();
   const retainedById = {};
   (retainedEntries || []).forEach(entry => {
-    if (entry && entry.eventId) retainedById[entry.eventId] = entry;
+    const normalized = normalizeCalendarRegistryEntry_(entry);
+    if (normalized.eventId) {
+      retainedById[normalized.eventId] = normalized;
+    }
   });
   const currentEntries = scan.contexts
     .filter(context => context.eventId)
@@ -1811,8 +1978,11 @@ function writeCalendarRegistryStore_(
             entry.row,
              entry.blockKey,
              entry.rowHash,
+             entry.bindingHash,
              Boolean(entry.pendingSync),
-             Boolean(entry.pendingDelete)
+             Boolean(entry.pendingDelete),
+             Boolean(entry.pendingResolution),
+             entry.pendingResolutionReason
            ])
           .sort()
       )
@@ -1857,7 +2027,9 @@ function readCalendarRegistryStore_() {
         if (!Array.isArray(chunk)) {
           throw new Error(`索引分段 ${key} 遺失或損壞。`);
         }
-        chunk.forEach(entry => entries.push(entry));
+        chunk.forEach(entry => {
+          entries.push(normalizeCalendarRegistryEntry_(entry));
+        });
       });
     });
   } catch (err) {
@@ -2152,11 +2324,25 @@ function applyPendingCalendarQueue_(spreadsheet, queue) {
     return { ok: true, empty: true, results: [] };
   }
   if (queue.fullScan) {
-    return reconcileCalendarRegistry_(spreadsheet, {
+    const result = reconcileCalendarRegistry_(spreadsheet, {
       apply: true,
-      changeType: 'QUEUED',
+      changeType: queue.allowMissingDeletes
+        ? 'REMOVE_ROW'
+        : 'QUEUED',
       allowMissingDeletes: Boolean(queue.allowMissingDeletes)
     });
+    const retryableFailures = (result.results || []).filter(item => {
+      return !item.result || !item.result.ok;
+    });
+    if (!retryableFailures.length) {
+      return {
+        ...result,
+        ok: true,
+        pendingResolutionCount:
+          (result.analysis && result.analysis.conflicts || []).length
+      };
+    }
+    return result;
   }
   const results = [];
   Object.keys(queue.sheets).forEach(sheetId => {
@@ -2349,6 +2535,21 @@ function refreshCalendarRegistryForSheet_(spreadsheet, sheet, options) {
       allowConflicts: Boolean(settings.allowStructuralActions)
     });
   }
+  const baselineIdCounts = {};
+  (baseline.entries || []).forEach(entry => {
+    const eventId = toCellText_(entry && entry.eventId);
+    if (!eventId) return;
+    baselineIdCounts[eventId] = (baselineIdCounts[eventId] || 0) + 1;
+  });
+  const duplicateBaselineIds = Object.keys(baselineIdCounts).filter(eventId => {
+    return baselineIdCounts[eventId] > 1;
+  });
+  if (duplicateBaselineIds.length) {
+    throw new Error(
+      `V2 索引有 ${duplicateBaselineIds.length} 組重複 ` +
+      'CalendarEventId；已停止單表索引刷新。'
+    );
+  }
   const sheetScan = settings.sheetScan ||
     buildManagedSheetCalendarScan_(sheet);
   if (
@@ -2391,12 +2592,9 @@ function refreshCalendarRegistryForSheet_(spreadsheet, sheet, options) {
   const missingIds = beforeIds.filter(eventId => {
     return !currentIdMap[eventId] && !allowedRemovedIds[eventId];
   });
-  if (missingIds.length && !settings.allowRemovedEventIds) {
-    throw new Error(
-      `${sheet.getName()} 少了 ${missingIds.length} 個既有 CalendarEventId；` +
-      '索引未刷新。'
-    );
-  }
+  const unresolvedMissingIds = settings.allowRemovedEventIds
+    ? []
+    : missingIds;
 
   const retainIds = {};
   (settings.retainEventIds || []).forEach(eventId => {
@@ -2406,17 +2604,48 @@ function refreshCalendarRegistryForSheet_(spreadsheet, sheet, options) {
   Object.keys(pendingSyncByEventId).forEach(eventId => {
     if (eventId) retainIds[eventId] = true;
   });
+  const pendingResolutionByEventId = {
+    ...(settings.pendingResolutionByEventId || {})
+  };
+  unresolvedMissingIds.forEach(eventId => {
+    if (!eventId) return;
+    retainIds[eventId] = true;
+    if (!pendingResolutionByEventId[eventId]) {
+      pendingResolutionByEventId[eventId] =
+        'missing_event_id_from_sheet';
+    }
+  });
+  Object.keys(pendingResolutionByEventId).forEach(eventId => {
+    if (eventId) retainIds[eventId] = true;
+  });
   const retainedEntries = baseline.entries.filter(entry => {
     return Number(entry.sheetId) !== sheetId || retainIds[entry.eventId];
   }).map(entry => {
-    const pendingError = pendingSyncByEventId[entry.eventId];
-    return pendingError
-      ? {
-        ...entry,
-        pendingSync: true,
-        pendingError
-      }
-      : entry;
+    const pendingError = normalizeCalendarRegistryReasonCode_(
+      pendingSyncByEventId[entry.eventId],
+      pendingSyncByEventId[entry.eventId] ? 'sync_failed' : ''
+    );
+    const pendingResolutionReason =
+      normalizeCalendarRegistryReasonCode_(
+        pendingResolutionByEventId[entry.eventId],
+        pendingResolutionByEventId[entry.eventId]
+          ? 'pending_resolution'
+          : ''
+      );
+    return {
+      ...entry,
+      pendingSync: pendingError
+        ? true
+        : Boolean(entry.pendingSync),
+      pendingError: pendingError || entry.pendingError || '',
+      pendingResolution: pendingResolutionReason
+        ? true
+        : Boolean(entry.pendingResolution),
+      pendingResolutionReason:
+        pendingResolutionReason ||
+        entry.pendingResolutionReason ||
+        ''
+    };
   });
   const retainedIdMap = {};
   retainedEntries.forEach(entry => {
@@ -2429,7 +2658,10 @@ function refreshCalendarRegistryForSheet_(spreadsheet, sheet, options) {
     retainedEntries.push({
       ...toRegistryEntry_(context),
       pendingSync: true,
-      pendingError: pendingSyncByEventId[eventId]
+      pendingError: normalizeCalendarRegistryReasonCode_(
+        pendingSyncByEventId[eventId],
+        'sync_failed'
+      )
     });
   });
   const index = writeCalendarRegistryStore_(
@@ -2445,6 +2677,8 @@ function refreshCalendarRegistryForSheet_(spreadsheet, sheet, options) {
     ok: true,
     eventCount: index.eventCount,
     sheetEventCount: currentIds.length,
+    pendingResolutionCount: unresolvedMissingIds.length,
+    pendingResolutionIds: unresolvedMissingIds.slice(),
     duplicateIds: [],
     fingerprint: index.fingerprint
   };
@@ -2480,10 +2714,14 @@ function assertCalendarRegistrySafeToRebuild_(spreadsheet, actionLabel, options)
       );
     }
   );
+  const ignoredFuStoppedTrackingConflicts = health.analysis.conflicts.filter(
+    conflict => isIgnorableFuStoppedTrackingConflict_(conflict)
+  );
   const pending = health.analysis.actions.length -
     ignoredRepairableActions.length;
   const conflicts = health.analysis.conflicts.length -
-    ignoredRepairableConflicts.length;
+    ignoredRepairableConflicts.length -
+    ignoredFuStoppedTrackingConflicts.length;
   if (pending || conflicts || health.scan.duplicateIds.length) {
     throw new Error(
       `${actionLabel || '此操作'}前仍有 ${pending} 項待處理、` +
@@ -2495,8 +2733,26 @@ function assertCalendarRegistrySafeToRebuild_(spreadsheet, actionLabel, options)
     missing: false,
     health,
     ignoredRepairableActions,
-    ignoredRepairableConflicts
+    ignoredRepairableConflicts,
+    ignoredFuStoppedTrackingConflicts
   };
+}
+
+function isIgnorableFuStoppedTrackingConflict_(conflict) {
+  const context = conflict && conflict.context;
+  const previous = conflict && conflict.previous;
+  return Boolean(
+    conflict &&
+    conflict.type === 'event_id_removed_or_partial_move' &&
+    context &&
+    context.kind === 'FU' &&
+    context.invalidReason === 'no_date' &&
+    !context.eventId &&
+    (context.chartNo || context.patientName) &&
+    previous &&
+    previous.eventId &&
+    registryIdentityMatchesContext_(previous, context)
+  );
 }
 
 function isContextAffected_(context, options) {
@@ -2507,6 +2763,32 @@ function isContextAffected_(context, options) {
   return scope.rows.indexOf(context.row) !== -1;
 }
 
+function registryIdentityMatchesContext_(entry, context) {
+  if (!entry || !context) return false;
+  if (
+    entry.kind &&
+    context.kind &&
+    entry.kind !== context.kind
+  ) {
+    return false;
+  }
+  const rowHash = toCellText_(entry.rowHash);
+  if (rowHash && rowHash === toCellText_(context.rowHash)) {
+    return true;
+  }
+  const bindingHash = toCellText_(entry.bindingHash);
+  return Boolean(
+    bindingHash &&
+    bindingHash === toCellText_(context.bindingHash)
+  );
+}
+
+function findRegistryIdentityMatches_(entries, context) {
+  return (entries || []).filter(entry => {
+    return registryIdentityMatchesContext_(entry, context);
+  });
+}
+
 function analyzeRegistryDifferences_(baselineEntries, scan, options) {
   const settings = options || {};
   const currentById = {};
@@ -2515,9 +2797,19 @@ function analyzeRegistryDifferences_(baselineEntries, scan, options) {
     if (!currentById[context.eventId]) currentById[context.eventId] = [];
     currentById[context.eventId].push(context);
   });
-  const baselineById = {};
+  const baselineGroupsById = {};
   (baselineEntries || []).forEach(entry => {
-    baselineById[entry.eventId] = entry;
+    const eventId = toCellText_(entry && entry.eventId);
+    if (!eventId) return;
+    if (!baselineGroupsById[eventId]) baselineGroupsById[eventId] = [];
+    baselineGroupsById[eventId].push(entry);
+  });
+  const baselineById = {};
+  const duplicateBaselineIds = {};
+  Object.keys(baselineGroupsById).forEach(eventId => {
+    const entries = baselineGroupsById[eventId];
+    if (entries.length === 1) baselineById[eventId] = entries[0];
+    else duplicateBaselineIds[eventId] = true;
   });
   const currentSheetIds = {};
   scan.sheetRecords.forEach(record => {
@@ -2528,6 +2820,18 @@ function analyzeRegistryDifferences_(baselineEntries, scan, options) {
   const conflicts = [];
   const adoptions = [];
   const ignoredRemovedSheets = [];
+
+  Object.keys(duplicateBaselineIds).forEach(eventId => {
+    conflicts.push({
+      type: 'duplicate_registry_event_id',
+      eventId,
+      context: null,
+      previous: baselineGroupsById[eventId][0] || null,
+      message:
+        'V2 索引中同一 CalendarEventId 對應多筆資料；' +
+        '已停止自動判斷。'
+    });
+  });
 
   Object.keys(currentById).forEach(eventId => {
     const locations = currentById[eventId];
@@ -2544,12 +2848,28 @@ function analyzeRegistryDifferences_(baselineEntries, scan, options) {
       return;
     }
     const context = locations[0];
+    if (duplicateBaselineIds[eventId]) return;
     const previous = baselineById[eventId];
     if (!previous) {
       adoptions.push({ type: 'adopt', eventId, context });
       return;
     }
     if (context.archived) return;
+    if (
+      previous.pendingResolution &&
+      !registryIdentityMatchesContext_(previous, context)
+    ) {
+      conflicts.push({
+        type: 'pending_resolution_context_changed',
+        eventId,
+        context,
+        previous,
+        message:
+          '此 Event ID 原已等待人工確認，且目前列與舊綁定指紋不同；' +
+          '未自動更新、刪除或重綁。'
+      });
+      return;
+    }
     const affected = isContextAffected_(context, settings);
     if (context.invalidReason) {
       if (
@@ -2586,6 +2906,7 @@ function analyzeRegistryDifferences_(baselineEntries, scan, options) {
       previous.blockKey !== context.blockKey;
     const contentChanged = previous.rowHash !== context.rowHash;
     const pendingSync = Boolean(previous.pendingSync);
+    const pendingResolution = Boolean(previous.pendingResolution);
     if (
       affected &&
       settings.changeType === 'REMOVE_ROW' &&
@@ -2613,6 +2934,13 @@ function analyzeRegistryDifferences_(baselineEntries, scan, options) {
         contentChanged,
         pendingSync
       });
+    } else if (affected && pendingResolution) {
+      actions.push({
+        type: 'resolve_pending_resolution',
+        eventId,
+        context,
+        previous
+      });
     }
   });
 
@@ -2620,21 +2948,27 @@ function analyzeRegistryDifferences_(baselineEntries, scan, options) {
     if (context.archived || !context.valid || !isContextAffected_(context, settings)) {
       return;
     }
-    const matchingPrevious = (baselineEntries || []).find(entry => {
-      return entry.rowHash === context.rowHash &&
-        (
-          entry.blockKey === context.blockKey ||
-          Number(entry.sheetId) === Number(context.sheetId)
-        );
-    });
-    if (matchingPrevious) {
+    const matchingPrevious = findRegistryIdentityMatches_(
+      baselineEntries,
+      context
+    );
+    if (matchingPrevious.length) {
       conflicts.push({
-        type: 'event_id_removed_or_partial_move',
-        eventId: matchingPrevious.eventId,
+        type: matchingPrevious.length > 1
+          ? 'multiple_binding_match'
+          : 'event_id_removed_or_partial_move',
+        eventId: matchingPrevious.length === 1
+          ? matchingPrevious[0].eventId
+          : '',
         context,
-        previous: matchingPrevious,
-        message:
-          '找到內容相同但 CalendarEventId 遺失的列，疑似只搬動可見儲存格或手動清除 ID；未刪除舊事件，也未建立新事件。'
+        previous: matchingPrevious.length === 1
+          ? matchingPrevious[0]
+          : null,
+        message: matchingPrevious.length > 1
+          ? '多筆舊索引與此列的內容綁定指紋相同；' +
+            '未刪除、未重綁也未建立新事件。'
+          : '找到內容綁定指紋相同但 CalendarEventId 遺失的列；' +
+            '未刪除舊事件，也未建立新事件。'
       });
     } else {
       actions.push({ type: 'create', eventId: '', context });
@@ -2642,29 +2976,45 @@ function analyzeRegistryDifferences_(baselineEntries, scan, options) {
   });
 
   (baselineEntries || []).forEach(entry => {
+    if (duplicateBaselineIds[entry.eventId]) return;
     if (currentById[entry.eventId]) return;
     if (!currentSheetIds[String(entry.sheetId)]) {
       ignoredRemovedSheets.push(entry);
       return;
     }
-    const matchingNoId = noIdContexts.find(context => {
-      return context.rowHash === entry.rowHash ||
-        (
-          Number(context.sheetId) === Number(entry.sheetId) &&
-          context.row === entry.row
-        );
+    const matchingNoIds = noIdContexts.filter(context => {
+      return registryIdentityMatchesContext_(entry, context);
     });
-    if (matchingNoId) {
+    if (matchingNoIds.length) {
       if (!conflicts.some(item => item.eventId === entry.eventId)) {
         conflicts.push({
-          type: 'event_id_removed_or_partial_move',
+          type: matchingNoIds.length > 1
+            ? 'multiple_binding_match'
+            : 'event_id_removed_or_partial_move',
           eventId: entry.eventId,
-          context: matchingNoId,
+          context: matchingNoIds.length === 1
+            ? matchingNoIds[0]
+            : null,
           previous: entry,
-          message:
-            'CalendarEventId 已離開原列但病人內容仍存在；未自動刪除 Calendar 事件。'
+          message: matchingNoIds.length > 1
+            ? '多列同時與舊索引的內容綁定指紋相同；' +
+              '未自動刪除或重綁 Calendar 事件。'
+            : 'CalendarEventId 已離開原列但內容綁定指紋仍存在；' +
+              '未自動刪除 Calendar 事件。'
         });
       }
+      return;
+    }
+    if (entry.pendingResolution && !entry.pendingDelete) {
+      conflicts.push({
+        type: entry.pendingResolutionReason || 'pending_resolution',
+        eventId: entry.eventId,
+        context: null,
+        previous: entry,
+        message:
+          '此舊索引已處於待確認狀態；' +
+          '不因後續其他列的刪除事件而自動刪除 Calendar。'
+      });
       return;
     }
     if (
@@ -2791,7 +3141,13 @@ function syncManagedContext_(context, duplicateLocations, runtime) {
       (context.kind === 'FU' && context.invalidReason === 'no_date')
     )
   ) {
-    return deleteCurrentContextEvent_(context);
+    return deleteCurrentContextEvent_(context, {
+      bestEffort: Boolean(
+        context.kind === 'FU' &&
+        context.invalidReason === 'no_date' &&
+        (context.chartNo || context.patientName)
+      )
+    });
   }
   if (isCalendarNoopDraftContext_(context)) {
     clearContextSystemNotes_(context);
@@ -2886,16 +3242,39 @@ function syncManagedContext_(context, duplicateLocations, runtime) {
   return { ok: true, status, eventId };
 }
 
-function deleteCurrentContextEvent_(context) {
+function deleteCurrentContextEvent_(context, options) {
+  const settings = options || {};
   if (!context.eventId) return { ok: true, status: 'no_event' };
   const result = deleteCalendarEvent_(context.eventId);
   if (!result.ok) {
+    if (settings.bestEffort) {
+      context.sheet
+        .getRange(context.row, context.columns.EVENT_ID)
+        .clearContent();
+      clearContextSystemNotes_(context);
+      return {
+        ok: true,
+        status: 'tracking_stopped',
+        releaseEventId: true,
+        calendarDeleteOk: false,
+        calendarDeleteStatus: result.status,
+        message: result.message || ''
+      };
+    }
+    if (context.recoveredEventId) {
+      context.sheet
+        .getRange(context.row, context.columns.EVENT_ID)
+        .setValue(context.eventId);
+    }
     setContextSyncNote_(context, `刪除 Calendar 事件失敗：${result.message}`, false);
     return result;
   }
   context.sheet.getRange(context.row, context.columns.EVENT_ID).clearContent();
   clearContextSystemNotes_(context);
-  return result;
+  return {
+    ...result,
+    releaseEventId: true
+  };
 }
 
 function annotateAnalysisConflicts_(analysis) {
@@ -2994,9 +3373,12 @@ function reconcileCalendarRegistry_(spreadsheet, options) {
         failedDeleteEntries.push({
           ...action.previous,
           pendingDelete: true,
-          pendingError: result.message || result.status
+          pendingError: result.status || 'delete_failed'
         });
       }
+    } else if (action.type === 'resolve_pending_resolution') {
+      clearContextSystemNotes_(action.context);
+      result = { ok: true, status: 'pending_resolution_cleared' };
     } else {
       result = { ok: true, status: 'ignored' };
     }
@@ -3028,8 +3410,10 @@ function reconcileCalendarRegistry_(spreadsheet, options) {
     }
     if (!pendingEntry.eventId) return;
     pendingEntry.pendingSync = true;
-    pendingEntry.pendingError =
-      item.result.status || item.result.message || 'sync_failed';
+    pendingEntry.pendingError = normalizeCalendarRegistryReasonCode_(
+      item.result.status,
+      'sync_failed'
+    );
     unresolvedEntries.push(pendingEntry);
   });
   analysis.conflicts.forEach(conflict => {
@@ -3037,7 +3421,18 @@ function reconcileCalendarRegistry_(spreadsheet, options) {
       conflict.previous &&
       !resolvedDeleteIds[conflict.previous.eventId]
     ) {
-      unresolvedEntries.push(conflict.previous);
+      unresolvedEntries.push({
+        ...conflict.previous,
+        pendingResolution: true,
+        pendingResolutionReason: normalizeCalendarRegistryReasonCode_(
+          conflict.type,
+          'registry_conflict'
+        ),
+        pendingError: normalizeCalendarRegistryReasonCode_(
+          conflict.previous.pendingError || conflict.type,
+          'registry_conflict'
+        )
+      });
     }
   });
   failedDeleteEntries.forEach(entry => unresolvedEntries.push(entry));
@@ -3113,6 +3508,8 @@ function describePendingHealthAction_(action) {
     update: '工作表內容或所在日期區塊已變更，等待更新事件。',
     delete_current: '資料列已清空必要資料，等待刪除自己的事件。',
     delete_missing: '資料列已消失，等待確認刪除事件。',
+    resolve_pending_resolution:
+      '原待確認的 Event ID 已回到唯一吻合資料列，等待清除異常狀態。',
     calendar_missing: '工作表事件在 Calendar 中遺失，等待重新建立。',
     calendar_drift: 'Calendar 的內容、日期、時間或顏色與工作表不同，等待更新。',
     calendar_orphan: '系統格式事件已無 FU、月表或年度封存來源，等待確認刪除。'
@@ -3423,13 +3820,126 @@ function getManagedContextsForRows_(sheet, rows) {
     .filter(context => wanted[Number(context.row)]);
 }
 
-function filterFuTriggerRowsForCalendar_(sheet, rows, columns) {
+function isFuLifecycleRecoveryContext_(context) {
+  return Boolean(
+    context &&
+    context.kind === 'FU' &&
+    !context.eventId &&
+    context.invalidReason === 'no_date' &&
+    (context.chartNo || context.patientName) &&
+    context.bindingHash
+  );
+}
+
+function buildFuLifecycleRecoveryResolutions_(
+  contexts,
+  baseline,
+  globalIdScan
+) {
+  const entries = baseline && baseline.ok
+    ? baseline.entries || []
+    : [];
+  const eventLocations = globalIdScan && globalIdScan.eventLocations
+    ? globalIdScan.eventLocations
+    : {};
+  const candidatesByRow = {};
+  const ownersByEventId = {};
+  (contexts || []).forEach(context => {
+    if (!isFuLifecycleRecoveryContext_(context)) return;
+    const candidates = entries.filter(entry => {
+      return Boolean(
+        entry &&
+        entry.eventId &&
+        entry.kind === 'FU' &&
+        Number(entry.sheetId) === Number(context.sheetId) &&
+        toCellText_(entry.bindingHash) &&
+        toCellText_(entry.bindingHash) ===
+          toCellText_(context.bindingHash)
+      );
+    });
+    candidatesByRow[context.row] = candidates;
+    candidates.forEach(entry => {
+      if (!ownersByEventId[entry.eventId]) {
+        ownersByEventId[entry.eventId] = [];
+      }
+      ownersByEventId[entry.eventId].push(context.row);
+    });
+  });
+
+  const byRow = {};
+  Object.keys(candidatesByRow).forEach(rowKey => {
+    const row = Number(rowKey);
+    const candidates = candidatesByRow[row] || [];
+    if (!candidates.length) {
+      byRow[row] = { status: 'none', candidates: [], reason: '' };
+      return;
+    }
+    const candidateIds = Array.from(new Set(
+      candidates.map(entry => entry.eventId).filter(Boolean)
+    ));
+    if (candidates.length !== 1 || candidateIds.length !== 1) {
+      byRow[row] = {
+        status: 'pending',
+        candidates,
+        reason: 'multiple_registry_binding_matches'
+      };
+      return;
+    }
+    const eventId = candidateIds[0];
+    if ((ownersByEventId[eventId] || []).length !== 1) {
+      byRow[row] = {
+        status: 'pending',
+        candidates,
+        reason: 'multiple_sheet_rows_match_binding'
+      };
+      return;
+    }
+    if ((eventLocations[eventId] || []).length) {
+      byRow[row] = {
+        status: 'pending',
+        candidates,
+        reason: 'event_id_still_present_elsewhere'
+      };
+      return;
+    }
+    byRow[row] = {
+      status: 'recover',
+      candidates,
+      eventId,
+      reason: 'unique_binding_match'
+    };
+  });
+  return byRow;
+}
+
+function getFuLifecyclePendingResolutionMessage_(reason) {
+  const messages = {
+    multiple_registry_binding_matches:
+      '多筆舊索引與此 FU 列相同，無法安全判斷要停止哪一個事件。',
+    multiple_sheet_rows_match_binding:
+      '多個 FU 列與同一舊事件吻合，未自動刪除或重建事件。',
+    event_id_still_present_elsewhere:
+      '吻合的 CalendarEventId 仍存在其他資料列，未自動刪除事件。'
+  };
+  return messages[reason] ||
+    'FU 追蹤狀態無法唯一確認，已保留索引等待人工處理。';
+}
+
+function filterFuTriggerRowsForCalendar_(sheet, rows, columns, options) {
+  const settings = options || {};
   const targetRows = Array.from(new Set((rows || [])
     .map(Number)
     .filter(row => Number.isInteger(row) && row >= 2)))
     .sort((left, right) => left - right);
   if (!targetRows.length) {
-    return { rows: [], skippedRows: [], skippedContexts: [] };
+    return {
+      rows: [],
+      skippedRows: [],
+      skippedContexts: [],
+      recoveryResolutions: {},
+      requiresRegistryRefresh: false,
+      pendingResolutionByEventId: {}
+    };
   }
   const minRow = targetRows[0];
   const maxRow = targetRows[targetRows.length - 1];
@@ -3449,6 +3959,7 @@ function filterFuTriggerRowsForCalendar_(sheet, rows, columns) {
   });
   const skippedContexts = [];
   const activeRows = [];
+  const contexts = [];
   values.forEach((rowValues, index) => {
     const row = minRow + index;
     if (!targetSet[row]) return;
@@ -3458,17 +3969,74 @@ function filterFuTriggerRowsForCalendar_(sheet, rows, columns) {
       columns,
       rowValues
     );
-    if (isCalendarNoopDraftContext_(context)) {
-      skippedContexts.push(context);
+    contexts.push(context);
+  });
+  let recoveryResolutions = {};
+  let requiresRegistryRefresh = false;
+  const pendingResolutionByEventId = {};
+  if (settings.recoverFromRegistry) {
+    const baseline = settings.baseline || readCalendarRegistryStore_();
+    const hasCandidates = baseline.ok && contexts.some(context => {
+      if (!isFuLifecycleRecoveryContext_(context)) return false;
+      return (baseline.entries || []).some(entry => {
+        return entry &&
+          entry.eventId &&
+          entry.kind === 'FU' &&
+          Number(entry.sheetId) === Number(context.sheetId) &&
+          toCellText_(entry.bindingHash) ===
+            toCellText_(context.bindingHash);
+      });
+    });
+    const needsMissingIdCheck = baseline.ok && contexts.some(context => {
+      return isCalendarNoopDraftContext_(context);
+    });
+    const globalIdScan = hasCandidates || needsMissingIdCheck
+      ? settings.globalIdScan || (
+        settings.spreadsheet
+          ? buildGlobalEventIdLocationsLightweight_(settings.spreadsheet)
+          : { eventLocations: {} }
+      )
+      : { eventLocations: {} };
+    recoveryResolutions = buildFuLifecycleRecoveryResolutions_(
+      contexts,
+      baseline,
+      globalIdScan
+    );
+    if (baseline.ok && needsMissingIdCheck) {
+      const sheetId = Number(sheet.getSheetId());
+      (baseline.entries || []).forEach(entry => {
+        if (
+          Number(entry.sheetId) !== sheetId ||
+          !entry.eventId ||
+          (globalIdScan.eventLocations[entry.eventId] || []).length
+        ) {
+          return;
+        }
+        requiresRegistryRefresh = true;
+        pendingResolutionByEventId[entry.eventId] =
+          'edited_row_content_cleared_or_id_missing';
+      });
+    }
+  }
+  contexts.forEach(context => {
+    const recovery = recoveryResolutions[context.row];
+    if (
+      !isCalendarNoopDraftContext_(context) ||
+      (recovery && recovery.status !== 'none')
+    ) {
+      activeRows.push(context.row);
     } else {
-      activeRows.push(row);
+      skippedContexts.push(context);
     }
   });
   clearContextsSystemNotesBatch_(skippedContexts);
   return {
     rows: activeRows,
     skippedRows: skippedContexts.map(context => context.row),
-    skippedContexts
+    skippedContexts,
+    recoveryResolutions,
+    requiresRegistryRefresh,
+    pendingResolutionByEventId
   };
 }
 
@@ -3617,6 +4185,7 @@ function processRowChange(e) {
     return;
   }
 
+  const spreadsheet = e.source || SpreadsheetApp.getActiveSpreadsheet();
   const preparedSheetScan = kind === 'MONTHLY'
     ? buildManagedSheetCalendarScan_(sheet)
     : null;
@@ -3627,20 +4196,52 @@ function processRowChange(e) {
     columns,
     preparedSheetScan && preparedSheetScan.blockScan
   );
+  let fuFilter = null;
   if (kind === 'FU' && rows.length) {
-    rows = filterFuTriggerRowsForCalendar_(
+    fuFilter = filterFuTriggerRowsForCalendar_(
       sheet,
       rows,
-      columns
-    ).rows;
+      columns,
+      {
+        recoverFromRegistry: true,
+        spreadsheet
+      }
+    );
+    rows = fuFilter.rows;
   }
   if (!rows.length) {
+    if (fuFilter && fuFilter.requiresRegistryRefresh) {
+      const request = {
+        fullScan: true,
+        allowMissingDeletes: false,
+        reason: 'EDIT_UNKNOWN_ROW_CLEAR'
+      };
+      const result = runTriggerCalendarWork_(
+        spreadsheet,
+        request,
+        () => ({
+          ok: refreshCalendarRegistryForSheet_(
+            spreadsheet,
+            sheet,
+            {
+              pendingResolutionByEventId:
+                fuFilter.pendingResolutionByEventId
+            }
+          ).ok,
+          status: 'registry_pending_resolution_recorded'
+        }),
+        null
+      );
+      if (wrapTouched && end >= start) {
+        sheet.autoResizeRows(start, end - start + 1);
+      }
+      return result;
+    }
     if (wrapTouched && end >= start) {
       sheet.autoResizeRows(start, end - start + 1);
     }
     return;
   }
-  const spreadsheet = e.source || SpreadsheetApp.getActiveSpreadsheet();
   const request = {
     sheetId: sheet.getSheetId(),
     rows,
@@ -3679,7 +4280,10 @@ function processCalendarStructureChange(e) {
   return runTriggerCalendarWork_(
     e.source,
     request,
-    () => ({ ok: true, status: 'queued_structure_change' }),
+    () => ({
+      ok: true,
+      status: 'queued_structure_change'
+    }),
     null
   );
 }
@@ -3719,7 +4323,8 @@ function getRegistryRetentionForSync_(context, result) {
     result.ok &&
     (
       result.status === 'deleted' ||
-      result.status === 'already_missing'
+      result.status === 'already_missing' ||
+      result.releaseEventId
     )
   );
   return {
@@ -3751,19 +4356,56 @@ function syncManagedRowsAt_(spreadsheet, sheet, rows, options) {
   sheetScan.contexts.forEach(context => {
     contextsByRow[context.row] = context;
   });
+  const recoveryResolutions = isMainTrackingSheetName_(sheet.getName())
+    ? buildFuLifecycleRecoveryResolutions_(
+      targetRows.map(row => contextsByRow[row]).filter(Boolean),
+      globalIds.baseline,
+      globalIds
+    )
+    : {};
   const runtime = buildCalendarSyncRuntime_();
   const retainEventIds = [];
   const allowedRemovedEventIds = [];
   const pendingSyncByEventId = {};
+  const pendingResolutionByEventId = {};
   const results = targetRows.map(row => {
-    const context = contextsByRow[row];
-    if (!context) {
+    const baseContext = contextsByRow[row];
+    if (!baseContext) {
       return {
         row,
         context: null,
         result: { ok: false, status: 'row_not_managed' }
       };
     }
+    const recovery = recoveryResolutions[row];
+    if (recovery && recovery.status === 'pending') {
+      (recovery.candidates || []).forEach(entry => {
+        if (entry && entry.eventId) {
+          pendingResolutionByEventId[entry.eventId] = recovery.reason;
+        }
+      });
+      setContextSyncNote_(
+        baseContext,
+        getFuLifecyclePendingResolutionMessage_(recovery.reason),
+        true
+      );
+      return {
+        row,
+        context: baseContext,
+        result: {
+          ok: true,
+          status: 'pending_resolution',
+          reason: recovery.reason
+        }
+      };
+    }
+    const context = recovery && recovery.status === 'recover'
+      ? {
+        ...baseContext,
+        eventId: recovery.eventId,
+        recoveredEventId: true
+      }
+      : baseContext;
     const result = syncPreparedManagedContext_(
       context,
       globalIds.eventLocations,
@@ -3800,6 +4442,7 @@ function syncManagedRowsAt_(spreadsheet, sheet, rows, options) {
         retainEventIds,
         allowedRemovedEventIds,
         pendingSyncByEventId,
+        pendingResolutionByEventId,
         globalIdScan: globalIds
       }
     );
@@ -3913,7 +4556,15 @@ function getRepairEventFingerprint_(event) {
     startTimeZone: toCellText_(event.start && event.start.timeZone),
     endDate: toCellText_(event.end && event.end.date),
     endDateTime: toCellText_(event.end && event.end.dateTime),
-    endTimeZone: toCellText_(event.end && event.end.timeZone)
+    endTimeZone: toCellText_(event.end && event.end.timeZone),
+    privateKind: getCalendarPrivateProperty_(
+      event,
+      CALENDAR_PRIVATE_KIND_KEY
+    ),
+    privateState: getCalendarPrivateProperty_(
+      event,
+      CALENDAR_PRIVATE_STATE_KEY
+    )
   }));
 }
 
@@ -4452,6 +5103,1389 @@ function repairSelectedCalendarRows() {
           failed
             ? '\n失敗列已保留詳細 note，可再次執行本工具。'
             : '\nCalendar 已回讀驗證，系統 note 已清除。'
+        ),
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+    return result;
+  });
+}
+
+function isFuLifecycleMigrationManagedEvent_(event, hasRegistrySource) {
+  if (isCancelledMonthlyCalendarEvent_(event)) return false;
+  if (!event || !getEventCalendarBindingSignature_(event)) return false;
+  if (isSystemManagedCalendarEvent_(event)) return true;
+  return Boolean(
+    hasRegistrySource &&
+    toCellText_(event.colorId) === toCellText_(CONFIG.COLORS.FU)
+  );
+}
+
+function getFuDuplicateEventSignature_(event) {
+  const bindingHash = getEventCalendarBindingSignature_(event);
+  if (!bindingHash) return '';
+  const endpoint = value => [
+    toCellText_(value && value.date),
+    toCellText_(value && value.dateTime),
+    toCellText_(value && value.timeZone)
+  ];
+  const start = endpoint(event && event.start);
+  const end = endpoint(event && event.end);
+  if (!start[0] && !start[1]) return '';
+  if (!end[0] && !end[1]) return '';
+  return sha256Hex_(JSON.stringify([bindingHash, start, end]));
+}
+
+function buildFuDuplicateRecoveryCandidates_(
+  listedEvents,
+  listedById,
+  fuContexts,
+  fullScan,
+  baselineAllGroups
+) {
+  const eventGroups = {};
+  (listedEvents || []).forEach(event => {
+    if (isCancelledMonthlyCalendarEvent_(event)) return;
+    const signature = getFuDuplicateEventSignature_(event);
+    if (!signature) return;
+    if (!eventGroups[signature]) eventGroups[signature] = [];
+    eventGroups[signature].push(event);
+  });
+
+  const canonicalContexts = {};
+  (fuContexts || []).forEach(context => {
+    if (!context.valid || !context.eventId) return;
+    const event = listedById[context.eventId];
+    if (!event || isCancelledMonthlyCalendarEvent_(event)) return;
+    if (
+      toCellText_(event.colorId) !== toCellText_(CONFIG.COLORS.FU) ||
+      getEventCalendarBindingSignature_(event) !== context.bindingHash
+    ) {
+      return;
+    }
+    const expected = buildCalendarResource_(context);
+    if (
+      !calendarEndpointMatches_(event.start, expected.start) ||
+      !calendarEndpointMatches_(event.end, expected.end)
+    ) {
+      return;
+    }
+    const locations = fullScan.eventLocations[context.eventId] || [];
+    if (locations.length !== 1) return;
+    const signature = getFuDuplicateEventSignature_(event);
+    if (!signature) return;
+    if (!canonicalContexts[signature]) canonicalContexts[signature] = [];
+    canonicalContexts[signature].push(context);
+  });
+
+  const candidatesById = {};
+  const ambiguousById = {};
+  Object.keys(canonicalContexts).forEach(signature => {
+    const contexts = canonicalContexts[signature] || [];
+    const events = eventGroups[signature] || [];
+    if (events.length < 2) return;
+    if (contexts.length !== 1 || events.length !== 2) {
+      events.forEach(event => {
+        const eventId = toCellText_(event && event.id);
+        if (eventId) ambiguousById[eventId] = signature;
+      });
+      return;
+    }
+    const canonical = contexts[0];
+    const extras = events.filter(event => {
+      return toCellText_(event && event.id) !== canonical.eventId;
+    });
+    if (extras.length !== 1) {
+      events.forEach(event => {
+        const eventId = toCellText_(event && event.id);
+        if (eventId) ambiguousById[eventId] = signature;
+      });
+      return;
+    }
+    const candidate = extras[0];
+    const candidateId = toCellText_(candidate && candidate.id);
+    const locations = fullScan.eventLocations[candidateId] || [];
+    const registryOwners = baselineAllGroups[candidateId] || [];
+    const hasNonFuRegistryOwner = registryOwners.some(entry => {
+      return entry && entry.kind !== 'FU';
+    });
+    const safeBlankDateOwner = locations.length === 1 && Boolean(
+      locations[0] &&
+      locations[0].kind === 'FU' &&
+      locations[0].invalidReason === 'no_date' &&
+      locations[0].eventId === candidateId
+    );
+    if (
+      !candidateId ||
+      toCellText_(candidate.colorId) !== toCellText_(CONFIG.COLORS.FU) ||
+      hasNonFuRegistryOwner ||
+      (locations.length && !safeBlankDateOwner)
+    ) {
+      if (candidateId) ambiguousById[candidateId] = signature;
+      return;
+    }
+    candidatesById[candidateId] = {
+      groupHash: signature,
+      canonicalEventIdHash: sha256Hex_(canonical.eventId),
+      canonicalSheetId: canonical.sheetId,
+      canonicalRow: canonical.row,
+      ownership: safeBlankDateOwner ? 'blank_date_fu' : 'unreferenced'
+    };
+  });
+  return { candidatesById, ambiguousById };
+}
+
+function makeFuLifecycleMigrationItem_(
+  action,
+  context,
+  record,
+  reason,
+  options
+) {
+  const settings = options || {};
+  const eventId = toCellText_(
+    settings.eventId ||
+    (record && record.eventId) ||
+    (context && context.eventId)
+  );
+  return {
+    action,
+    sheetId: Number(
+      context
+        ? context.sheetId
+        : settings.sheetId || 0
+    ),
+    sheetName: context
+      ? context.sheetName
+      : toCellText_(settings.sheetName || 'Calendar'),
+    row: context ? Number(context.row) : Number(settings.row) || 0,
+    rowHash: toCellText_(context && context.rowHash),
+    bindingHash: toCellText_(
+      (context && context.bindingHash) ||
+      (record && record.bindingHash)
+    ),
+    eventId,
+    eventIdHash: sha256Hex_(eventId),
+    eventFingerprint: toCellText_(
+      record && record.eventFingerprint
+    ),
+    duplicateGroupHash: toCellText_(
+      settings.duplicateGroupHash ||
+      (record && record.duplicateGroupHash)
+    ),
+    reason: toCellText_(reason),
+    requiresOrphanConfirmation: Boolean(
+      settings.requiresOrphanConfirmation
+    )
+  };
+}
+
+function getFuLifecycleMigrationCounts_(items) {
+  const counts = {
+    stopTracking: 0,
+    rebind: 0,
+    recreateMissing: 0,
+    removeMissing: 0,
+    orphanDelete: 0,
+    manual: 0,
+    actionable: 0
+  };
+  (items || []).forEach(item => {
+    if (item.action === 'stop_tracking') counts.stopTracking++;
+    else if (item.action === 'rebind') counts.rebind++;
+    else if (item.action === 'recreate_missing') {
+      counts.recreateMissing++;
+    } else if (
+      item.action === 'remove_missing' ||
+      item.action === 'remove_missing_index'
+    ) {
+      counts.removeMissing++;
+    } else if (item.action === 'orphan_delete') {
+      counts.orphanDelete++;
+    } else if (item.action === 'manual') counts.manual++;
+    if (item.action !== 'manual') counts.actionable++;
+  });
+  return counts;
+}
+
+function buildFuLifecycleRecoveryMigrationPlan_(spreadsheet) {
+  const fuSheet = getMainTrackingSheet_(spreadsheet);
+  if (!fuSheet) {
+    return {
+      ok: false,
+      message: '找不到 FU 追蹤分頁。',
+      items: [],
+      counts: getFuLifecycleMigrationCounts_([]),
+      fingerprint: ''
+    };
+  }
+  const baseline = readCalendarRegistryStore_();
+  if (!baseline.ok) {
+    return {
+      ok: false,
+      message: baseline.message || 'V2 同步索引無法讀取。',
+      items: [],
+      counts: getFuLifecycleMigrationCounts_([]),
+      fingerprint: ''
+    };
+  }
+  const fullScan = buildCurrentCalendarScan_(spreadsheet);
+  const fuSheetId = Number(fuSheet.getSheetId());
+  const fuContexts = fullScan.contexts.filter(context => {
+    return context.kind === 'FU' &&
+      Number(context.sheetId) === fuSheetId;
+  });
+  const globalErrors = [];
+  if (fullScan.duplicateIds.length) {
+    globalErrors.push(
+      `工作表有 ${fullScan.duplicateIds.length} 組重複 CalendarEventId。`
+    );
+  }
+
+  const baselineAllGroups = {};
+  baseline.entries.forEach(entry => {
+    if (!baselineAllGroups[entry.eventId]) {
+      baselineAllGroups[entry.eventId] = [];
+    }
+    baselineAllGroups[entry.eventId].push(entry);
+  });
+  const baselineFuEntries = baseline.entries.filter(entry => {
+    return entry.kind === 'FU';
+  });
+  const baselineGroups = {};
+  baselineFuEntries.forEach(entry => {
+    if (!baselineGroups[entry.eventId]) baselineGroups[entry.eventId] = [];
+    baselineGroups[entry.eventId].push(entry);
+  });
+  const duplicateRegistryIds = Object.keys(baselineAllGroups).filter(eventId => {
+    return baselineAllGroups[eventId].length > 1;
+  });
+  if (duplicateRegistryIds.length) {
+    globalErrors.push(
+      `V2 索引有 ${duplicateRegistryIds.length} 組重複 CalendarEventId。`
+    );
+  }
+
+  const listed = listConfiguredCalendarEvents_();
+  if (!listed.ok) {
+    return {
+      ok: false,
+      message: `Calendar 讀取失敗：${listed.message}`,
+      items: [],
+      counts: getFuLifecycleMigrationCounts_([]),
+      fingerprint: sha256Hex_(JSON.stringify({
+        registry: baseline.index && baseline.index.fingerprint,
+        sheet: fullScan.sheetRecords,
+        status: listed.status
+      }))
+    };
+  }
+
+  const listedById = {};
+  listed.events.forEach(event => {
+    const eventId = toCellText_(event && event.id);
+    if (eventId) listedById[eventId] = event;
+  });
+  const duplicateRecovery = buildFuDuplicateRecoveryCandidates_(
+    listed.events,
+    listedById,
+    fuContexts,
+    fullScan,
+    baselineAllGroups
+  );
+  const relevantIds = {};
+  baselineFuEntries.forEach(entry => {
+    if (entry.eventId) relevantIds[entry.eventId] = true;
+  });
+  fuContexts.forEach(context => {
+    if (context.eventId) relevantIds[context.eventId] = true;
+  });
+  Object.keys(duplicateRecovery.candidatesById).forEach(eventId => {
+    relevantIds[eventId] = true;
+  });
+  Object.keys(duplicateRecovery.ambiguousById).forEach(eventId => {
+    relevantIds[eventId] = true;
+  });
+  listed.events.forEach(event => {
+    const eventId = toCellText_(event && event.id);
+    if (
+      eventId &&
+      toCellText_(event.colorId) === toCellText_(CONFIG.COLORS.FU) &&
+      isFuLifecycleMigrationManagedEvent_(event, false)
+    ) {
+      relevantIds[eventId] = true;
+    }
+  });
+
+  const missingFromList = Object.keys(relevantIds).filter(eventId => {
+    return !listedById[eventId];
+  });
+  const read = readCalendarEventsForRepair_(
+    listed.calendarId,
+    missingFromList
+  );
+  const recordsById = {};
+  Object.keys(relevantIds).forEach(eventId => {
+    const event = listedById[eventId] || read.eventsById[eventId] || null;
+    const registryEntries = baselineGroups[eventId] || [];
+    const duplicateCandidate =
+      duplicateRecovery.candidatesById[eventId] || null;
+    const duplicateAmbiguous = toCellText_(
+      duplicateRecovery.ambiguousById[eventId]
+    );
+    let status = 'event';
+    if (read.missingIds[eventId]) status = 'missing';
+    else if (read.errorsById[eventId]) status = 'read_failed';
+    else if (!event) status = 'missing';
+    recordsById[eventId] = {
+      eventId,
+      event,
+      status,
+      error: toCellText_(read.errorsById[eventId]),
+      registryEntries,
+      registryEntry: registryEntries.length === 1
+        ? registryEntries[0]
+        : null,
+      bindingHash: event
+        ? getEventCalendarBindingSignature_(event)
+        : toCellText_(
+          registryEntries.length === 1 &&
+          registryEntries[0].bindingHash
+        ),
+      managed: event
+        ? Boolean(
+          duplicateCandidate ||
+          isFuLifecycleMigrationManagedEvent_(
+            event,
+            registryEntries.length === 1
+          )
+        )
+        : false,
+      eventFingerprint: event
+        ? getRepairEventFingerprint_(event)
+        : '',
+      duplicateCandidate,
+      duplicateAmbiguous,
+      duplicateGroupHash: duplicateCandidate
+        ? duplicateCandidate.groupHash
+        : duplicateAmbiguous
+    };
+  });
+
+  const ownedLiveIds = {};
+  Object.keys(fullScan.eventLocations || {}).forEach(eventId => {
+    if ((fullScan.eventLocations[eventId] || []).length) {
+      ownedLiveIds[eventId] = true;
+    }
+  });
+  const candidateRecords = Object.values(recordsById).filter(record => {
+    return record.status === 'event' &&
+      record.managed &&
+      record.bindingHash &&
+      !record.duplicateGroupHash &&
+      !ownedLiveIds[record.eventId];
+  });
+  const candidatesByRow = {};
+  const candidateOwners = {};
+  fuContexts.forEach(context => {
+    if (
+      context.eventId ||
+      !(context.chartNo || context.patientName) ||
+      !context.bindingHash
+    ) {
+      return;
+    }
+    const candidates = candidateRecords.filter(record => {
+      return record.bindingHash === context.bindingHash;
+    });
+    candidatesByRow[context.row] = candidates;
+    candidates.forEach(record => {
+      if (!candidateOwners[record.eventId]) {
+        candidateOwners[record.eventId] = [];
+      }
+      candidateOwners[record.eventId].push(context.row);
+    });
+  });
+
+  const items = [];
+  const consumedEventIds = {};
+  const ambiguousEventIds = {};
+  fuContexts.forEach(context => {
+    if (context.eventId) {
+      const record = recordsById[context.eventId];
+      const sourceEntries = baselineAllGroups[context.eventId] || [];
+      consumedEventIds[context.eventId] = true;
+      if (
+        sourceEntries.length === 1 &&
+        sourceEntries[0].kind !== 'FU'
+      ) {
+        items.push(makeFuLifecycleMigrationItem_(
+          'manual',
+          context,
+          record,
+          'event_id_owned_outside_fu'
+        ));
+        return;
+      }
+      if (!record || record.status === 'missing') {
+        items.push(makeFuLifecycleMigrationItem_(
+          context.valid ? 'recreate_missing' : 'remove_missing',
+          context,
+          record,
+          context.valid
+            ? 'calendar_event_missing_recreate'
+            : 'calendar_event_missing_remove_index',
+          { eventId: context.eventId }
+        ));
+        return;
+      }
+      if (record.status === 'read_failed') {
+        items.push(makeFuLifecycleMigrationItem_(
+          'manual',
+          context,
+          record,
+          'calendar_read_failed'
+        ));
+        return;
+      }
+      if (record.duplicateAmbiguous) {
+        items.push(makeFuLifecycleMigrationItem_(
+          'manual',
+          context,
+          record,
+          'multiple_calendar_binding_matches'
+        ));
+        return;
+      }
+      if (!record.managed) {
+        items.push(makeFuLifecycleMigrationItem_(
+          'manual',
+          context,
+          record,
+          'non_system_event'
+        ));
+        return;
+      }
+      if (context.invalidReason === 'no_date') {
+        items.push(makeFuLifecycleMigrationItem_(
+          'stop_tracking',
+          context,
+          record,
+          'blank_date_with_event'
+        ));
+        return;
+      }
+      if (!context.valid) {
+        items.push(makeFuLifecycleMigrationItem_(
+          'manual',
+          context,
+          record,
+          context.invalidReason || 'invalid_fu_row'
+        ));
+        return;
+      }
+      if (record.bindingHash !== context.bindingHash) {
+        items.push(makeFuLifecycleMigrationItem_(
+          'manual',
+          context,
+          record,
+          'event_binding_mismatch'
+        ));
+        return;
+      }
+      const sourceEntry = sourceEntries.length === 1
+        ? sourceEntries[0]
+        : null;
+      if (
+        !sourceEntry ||
+        Number(sourceEntry.sheetId) !== Number(context.sheetId) ||
+        sourceEntry.pendingSync ||
+        sourceEntry.pendingDelete ||
+        sourceEntry.pendingResolution
+      ) {
+        items.push(makeFuLifecycleMigrationItem_(
+          'rebind',
+          context,
+          record,
+          'valid_date_unique_binding'
+        ));
+      }
+      return;
+    }
+
+    const candidates = candidatesByRow[context.row] || [];
+    if (!candidates.length) return;
+    if (
+      candidates.length !== 1 ||
+      (candidateOwners[candidates[0].eventId] || []).length !== 1
+    ) {
+      candidates.forEach(record => {
+        ambiguousEventIds[record.eventId] = true;
+      });
+      items.push(makeFuLifecycleMigrationItem_(
+        'manual',
+        context,
+        candidates.length === 1 ? candidates[0] : null,
+        candidates.length > 1
+          ? 'multiple_calendar_binding_matches'
+          : 'multiple_fu_rows_match_event'
+      ));
+      return;
+    }
+    const record = candidates[0];
+    consumedEventIds[record.eventId] = true;
+    if (context.invalidReason === 'no_date') {
+      items.push(makeFuLifecycleMigrationItem_(
+        'stop_tracking',
+        context,
+        record,
+        'blank_date_unique_binding'
+      ));
+    } else if (context.valid) {
+      items.push(makeFuLifecycleMigrationItem_(
+        'rebind',
+        context,
+        record,
+        'valid_date_unique_binding'
+      ));
+    } else {
+      items.push(makeFuLifecycleMigrationItem_(
+        'manual',
+        context,
+        record,
+        context.invalidReason || 'invalid_fu_row'
+      ));
+    }
+  });
+
+  Object.values(recordsById).forEach(record => {
+    if (consumedEventIds[record.eventId]) return;
+    if (ambiguousEventIds[record.eventId]) return;
+    if (record.duplicateAmbiguous) {
+      items.push(makeFuLifecycleMigrationItem_(
+        'manual',
+        null,
+        record,
+        'multiple_calendar_binding_matches',
+        {
+          sheetId: record.registryEntry
+            ? record.registryEntry.sheetId
+            : fuSheetId,
+          sheetName: record.registryEntry
+            ? record.registryEntry.sheetName
+            : fuSheet.getName(),
+          row: record.registryEntry
+            ? record.registryEntry.row
+            : 0
+        }
+      ));
+      return;
+    }
+    if (ownedLiveIds[record.eventId]) {
+      if (record.registryEntries.length) {
+        items.push(makeFuLifecycleMigrationItem_(
+          'manual',
+          null,
+          record,
+          'event_id_owned_outside_fu',
+          {
+            sheetId: record.registryEntry
+              ? record.registryEntry.sheetId
+              : fuSheetId,
+            sheetName: record.registryEntry
+              ? record.registryEntry.sheetName
+              : fuSheet.getName(),
+            row: record.registryEntry
+              ? record.registryEntry.row
+              : 0
+          }
+        ));
+      }
+      return;
+    }
+    if (record.status === 'missing') {
+      if (record.registryEntries.length) {
+        items.push(makeFuLifecycleMigrationItem_(
+          'remove_missing_index',
+          null,
+          record,
+          'calendar_event_already_missing',
+          {
+            sheetId: record.registryEntry
+              ? record.registryEntry.sheetId
+              : fuSheetId,
+            sheetName: record.registryEntry
+              ? record.registryEntry.sheetName
+              : fuSheet.getName(),
+            row: record.registryEntry
+              ? record.registryEntry.row
+              : 0
+          }
+        ));
+      }
+      return;
+    }
+    if (record.status === 'read_failed') {
+      items.push(makeFuLifecycleMigrationItem_(
+        'manual',
+        null,
+        record,
+        'calendar_read_failed',
+        {
+          sheetId: record.registryEntry
+            ? record.registryEntry.sheetId
+            : fuSheetId,
+          sheetName: record.registryEntry
+            ? record.registryEntry.sheetName
+            : fuSheet.getName(),
+          row: record.registryEntry
+            ? record.registryEntry.row
+            : 0
+        }
+      ));
+      return;
+    }
+    if (!record.managed) {
+      if (record.registryEntries.length) {
+        items.push(makeFuLifecycleMigrationItem_(
+          'manual',
+          null,
+          record,
+          'non_system_event',
+          {
+            sheetId: record.registryEntry
+              ? record.registryEntry.sheetId
+              : fuSheetId,
+            sheetName: record.registryEntry
+              ? record.registryEntry.sheetName
+              : fuSheet.getName(),
+            row: record.registryEntry
+              ? record.registryEntry.row
+              : 0
+          }
+        ));
+      }
+      return;
+    }
+    items.push(makeFuLifecycleMigrationItem_(
+      'orphan_delete',
+      null,
+      record,
+      record.duplicateCandidate
+        ? 'fu_duplicate_without_data_source'
+        : 'fu_event_without_data_source',
+      {
+        sheetId: record.registryEntry
+          ? record.registryEntry.sheetId
+          : fuSheetId,
+        sheetName: record.registryEntry
+          ? record.registryEntry.sheetName
+          : 'Calendar',
+        row: record.registryEntry
+          ? record.registryEntry.row
+          : 0,
+        requiresOrphanConfirmation: true
+      }
+    ));
+  });
+
+  items.sort((left, right) => {
+    return Number(left.sheetId) - Number(right.sheetId) ||
+      Number(left.row) - Number(right.row) ||
+      left.action.localeCompare(right.action) ||
+      left.eventIdHash.localeCompare(right.eventIdHash);
+  });
+  const fingerprint = sha256Hex_(JSON.stringify({
+    version: FU_LIFECYCLE_RECOVERY_MIGRATION_VERSION,
+    registryFingerprint: baseline.index && baseline.index.fingerprint,
+    registryUpdatedAt: baseline.index && baseline.index.updatedAt,
+    sheetState: fuContexts.map(context => [
+      context.sheetId,
+      context.row,
+      context.rowHash,
+      context.bindingHash,
+      context.eventId,
+      context.invalidReason
+    ]),
+    calendarState: Object.values(recordsById).map(record => [
+      record.eventId,
+      record.status,
+      record.bindingHash,
+      record.eventFingerprint,
+      record.managed
+    ]).sort(),
+    duplicateIds: fullScan.duplicateIds.slice().sort(),
+    duplicateRegistryIds: duplicateRegistryIds.slice().sort(),
+    items
+  }));
+  const counts = getFuLifecycleMigrationCounts_(items);
+  return {
+    ok: globalErrors.length === 0,
+    message: globalErrors.join(' '),
+    version: FU_LIFECYCLE_RECOVERY_MIGRATION_VERSION,
+    spreadsheetId: spreadsheet.getId
+      ? toCellText_(spreadsheet.getId())
+      : '',
+    fuSheetId,
+    registryFingerprint: baseline.index && baseline.index.fingerprint,
+    items,
+    counts,
+    fingerprint
+  };
+}
+
+function createAndVerifyFuLifecycleRegistryBackup_() {
+  const properties = PropertiesService.getScriptProperties();
+  const propertyValues = properties.getProperties();
+  const sourceKeys = Array.from(new Set(
+    Object.keys(propertyValues).filter(key => {
+      return key === CALENDAR_REGISTRY_INDEX_KEY ||
+        key.indexOf(CALENDAR_REGISTRY_CHUNK_PREFIX) === 0;
+    })
+  )).sort();
+  if (!sourceKeys.length) {
+    throw new Error('V2 同步索引無可備份的分段。');
+  }
+  const token = `${Date.now()}_${Utilities.getUuid()}`
+    .replace(/[^A-Za-z0-9_-]/g, '');
+  const baseKey = `${FU_LIFECYCLE_RECOVERY_BACKUP_PREFIX}_${token}`;
+  const backupValues = {};
+  const parts = sourceKeys.map((sourceKey, index) => {
+    const partKey = `${baseKey}_PART_${index}`;
+    const sourceValue = propertyValues[sourceKey] === undefined
+      ? ''
+      : String(propertyValues[sourceKey]);
+    backupValues[partKey] = sourceValue;
+    return {
+      partKey,
+      sourceKey,
+      sourceHash: sha256Hex_(sourceValue)
+    };
+  });
+  const manifestKey = `${baseKey}_MANIFEST`;
+  const manifest = {
+    version: FU_LIFECYCLE_RECOVERY_MIGRATION_VERSION,
+    createdAt: new Date().toISOString(),
+    registryFingerprint: safeJsonParse_(
+      propertyValues[CALENDAR_REGISTRY_INDEX_KEY],
+      {}
+    ).fingerprint || '',
+    parts
+  };
+  backupValues[manifestKey] = JSON.stringify(manifest);
+  properties.setProperties(backupValues);
+
+  const verifiedValues = properties.getProperties();
+  const verifiedManifest = safeJsonParse_(
+    verifiedValues[manifestKey],
+    null
+  );
+  if (
+    !verifiedManifest ||
+    !Array.isArray(verifiedManifest.parts) ||
+    verifiedManifest.parts.length !== parts.length
+  ) {
+    throw new Error('索引備份 manifest 回讀驗證失敗。');
+  }
+  verifiedManifest.parts.forEach(part => {
+    const sourceValue = verifiedValues[part.partKey];
+    if (
+      sourceValue === undefined ||
+      sha256Hex_(sourceValue) !== part.sourceHash ||
+      sourceValue !== propertyValues[part.sourceKey]
+    ) {
+      throw new Error(`索引備份分段 ${part.partKey} 回讀驗證失敗。`);
+    }
+  });
+  return {
+    ok: true,
+    manifestKey,
+    partCount: parts.length,
+    registryFingerprint: manifest.registryFingerprint
+  };
+}
+
+function describeFuLifecycleMigrationReason_(reason) {
+  const messages = {
+    blank_date_with_event:
+      '日期已清空，將保留 FU 列並停止 Calendar 追蹤。',
+    blank_date_unique_binding:
+      '日期與 Event ID 皆為空白，已找到唯一舊事件。',
+    valid_date_unique_binding:
+      '有效日期列與唯一舊事件吻合，將重新綁定並驗證。',
+    calendar_event_missing_remove_index:
+      'Calendar 事件已不存在，將清除失效 Event ID 與索引。',
+    calendar_event_missing_recreate:
+      'Calendar 事件已不存在，將移除失效索引並依有效 FU 列重建。',
+    calendar_event_already_missing:
+      'Calendar 事件已不存在，將移除失效索引。',
+    fu_event_without_data_source:
+      '既有 FU 系統事件已無任何工作表資料來源，需確認後才刪除。',
+    fu_duplicate_without_data_source:
+      '已找到與唯一有效 FU 事件同綁定、同起訖且無資料來源的副本，需確認後才刪除。',
+    multiple_calendar_binding_matches:
+      '多個 Calendar 事件同時吻合，已安全保留並列入人工處理。',
+    multiple_fu_rows_match_event:
+      '同一 Calendar 事件同時吻合多個 FU 列，已安全保留。',
+    calendar_read_failed:
+      'Calendar API 回讀失敗，資料與事件皆不變更。',
+    non_system_event:
+      '事件無法驗證為系統管理事件，不自動修改或刪除。',
+    event_binding_mismatch:
+      'Event ID 的 Calendar 內容與 FU 列綁定指紋不同，列入人工處理。',
+    event_id_owned_outside_fu:
+      '舊 FU 索引的 Event ID 目前已出現在其他管理資料列，未自動轉移所有權。'
+  };
+  return messages[reason] ||
+    '此項無法唯一驗證，已安全保留等待人工處理。';
+}
+
+function toFuLifecycleHealthAction_(item) {
+  return {
+    type: `fu_lifecycle_${item.action}`,
+    eventId: item.eventId,
+    context: {
+      sheetId: item.sheetId,
+      sheetName: item.sheetName,
+      row: item.row
+    },
+    previous: null,
+    message: describeFuLifecycleMigrationReason_(item.reason)
+  };
+}
+
+function buildFuLifecycleMigrationHealthResult_(plan, appliedResults) {
+  const actionsByKey = {};
+  const actions = [];
+  const conflicts = [];
+  if (!plan.ok) {
+    conflicts.push({
+      type: 'fu_lifecycle_preview_blocked',
+      eventId: '',
+      context: {
+        sheetId: plan.fuSheetId || 0,
+        sheetName: 'FU',
+        row: 0
+      },
+      previous: null,
+      message:
+        'FU 生命週期預覽無法安全完成；' +
+        '工作表、V2 索引或 Calendar 狀態需先人工確認。'
+    });
+  }
+  (plan.items || []).forEach(item => {
+    const action = toFuLifecycleHealthAction_(item);
+    const key = [item.action, item.sheetId, item.row, item.eventId].join('|');
+    actionsByKey[key] = action;
+    if (item.action === 'manual') {
+      conflicts.push({
+        ...action,
+        type: `fu_lifecycle_${item.reason || 'manual'}`
+      });
+    } else {
+      actions.push(action);
+    }
+  });
+  const results = (appliedResults || []).map(item => {
+    const planItem = item.item || {};
+    const key = [
+      planItem.action,
+      planItem.sheetId,
+      planItem.row,
+      planItem.eventId
+    ].join('|');
+    return {
+      action: actionsByKey[key] || toFuLifecycleHealthAction_(planItem),
+      result: item.result
+    };
+  }).filter(item => item.action && item.result);
+  return {
+    ok:
+      conflicts.length === 0 &&
+      results.every(item => item.result.ok),
+    analysis: {
+      actions,
+      conflicts,
+      adoptions: [],
+      ignoredRemovedSheets: [],
+      duplicates: []
+    },
+    results,
+    pendingQueue: readPendingCalendarQueue_()
+  };
+}
+
+function verifyFuLifecycleMigrationCalendarState_(item) {
+  if (!item.eventId) return { ok: true, status: 'no_event_id' };
+  const calendarId = getConfiguredCalendarId_();
+  if (!calendarId || !isCalendarAdvancedServiceAvailable_()) {
+    return { ok: false, status: 'calendar_unavailable' };
+  }
+  const expectsMissing =
+    item.action === 'remove_missing' ||
+    item.action === 'remove_missing_index' ||
+    item.action === 'recreate_missing';
+  const idempotentDelete =
+    item.action === 'stop_tracking' ||
+    item.action === 'orphan_delete';
+  try {
+    const event = Calendar.Events.get(calendarId, item.eventId);
+    if (expectsMissing) {
+      return { ok: false, status: 'calendar_state_changed' };
+    }
+    if (
+      item.eventFingerprint &&
+      getRepairEventFingerprint_(event) !== item.eventFingerprint
+    ) {
+      return { ok: false, status: 'calendar_fingerprint_changed' };
+    }
+    return { ok: true, status: 'verified', event };
+  } catch (err) {
+    if (isCalendarNotFoundError_(err)) {
+      return expectsMissing || idempotentDelete
+        ? { ok: true, status: 'verified_missing' }
+        : { ok: false, status: 'calendar_state_changed' };
+    }
+    return {
+      ok: false,
+      status: 'calendar_read_failed',
+      message: err.message || String(err)
+    };
+  }
+}
+
+function getFuLifecycleMigrationContext_(spreadsheet, item) {
+  if (
+    !item ||
+    !Number(item.row) ||
+    item.sheetId === null ||
+    item.sheetId === undefined ||
+    item.sheetId === ''
+  ) {
+    return null;
+  }
+  const sheet = getSheetById_(spreadsheet, item.sheetId);
+  if (!sheet || !isMainTrackingSheetName_(sheet.getName())) return null;
+  if (item.row > sheet.getLastRow()) return null;
+  const columns = getRequiredFuColumns_(sheet);
+  const context = buildFuRowContext_(sheet, item.row, columns);
+  const bindingMatches = Boolean(
+    item.bindingHash && context.bindingHash === item.bindingHash
+  );
+  const stopTrackingIdentityMatches = Boolean(
+    (
+      context.eventId &&
+      item.eventId &&
+      context.eventId === item.eventId
+    ) || (
+      !context.eventId &&
+      bindingMatches
+    )
+  );
+  const safeStopTrackingMatch = Boolean(
+    item.action === 'stop_tracking' &&
+    stopTrackingIdentityMatches &&
+    context.invalidReason === 'no_date' &&
+    (context.chartNo || context.patientName)
+  );
+  if (
+    !safeStopTrackingMatch && (
+      !bindingMatches ||
+      context.rowHash !== item.rowHash
+    )
+  ) {
+    return null;
+  }
+  return context;
+}
+
+function makeFuLifecyclePendingRegistryEntry_(item, previous, status) {
+  const base = previous
+    ? normalizeCalendarRegistryEntry_(previous)
+    : {
+      eventId: item.eventId,
+      sheetId: item.sheetId,
+      sheetName: item.sheetName || 'FU',
+      kind: 'FU',
+      archived: false,
+      row: item.row,
+      blockKey: '',
+      rowHash: item.rowHash,
+      bindingHash: item.bindingHash,
+      valid: false,
+      invalidReason: 'migration_pending',
+      pendingSync: false,
+      pendingDelete: false,
+      pendingResolution: false,
+      pendingResolutionReason: '',
+      pendingError: ''
+    };
+  const deletePending =
+    item.action === 'stop_tracking' ||
+    item.action === 'orphan_delete';
+  return {
+    ...base,
+    eventId: item.eventId,
+    rowHash: item.rowHash || base.rowHash,
+    bindingHash: item.bindingHash || base.bindingHash,
+    pendingSync: !deletePending && item.action !== 'manual',
+    pendingDelete: deletePending,
+    pendingResolution: item.action === 'manual' ||
+      status === 'calendar_state_changed' ||
+      status === 'calendar_fingerprint_changed',
+    pendingResolutionReason: item.action === 'manual'
+      ? item.reason
+      : status || 'migration_failed',
+    pendingError: status || 'migration_failed'
+  };
+}
+
+function applyFuLifecycleRecoveryMigrationPlan_(
+  spreadsheet,
+  expectedPlan,
+  options
+) {
+  const settings = options || {};
+  const fresh = buildFuLifecycleRecoveryMigrationPlan_(spreadsheet);
+  if (!fresh.ok) {
+    throw new Error(
+      fresh.message || '目前狀態無法安全執行 FU 生命週期修復。'
+    );
+  }
+  if (fresh.fingerprint !== expectedPlan.fingerprint) {
+    throw new Error(
+      '預覽後 Sheet、V2 索引或 Calendar 狀態已改變；' +
+      '本次未寫入，請重新預覽。'
+    );
+  }
+  const confirmedOrphanIds = {};
+  (settings.confirmedOrphanIds || []).forEach(eventId => {
+    confirmedOrphanIds[eventId] = true;
+  });
+  const unconfirmed = fresh.items.filter(item => {
+    return item.action === 'orphan_delete' &&
+      !confirmedOrphanIds[item.eventId];
+  });
+  if (unconfirmed.length) {
+    throw new Error(
+      `仍有 ${unconfirmed.length} 個無資料來源事件未取得刪除確認。`
+    );
+  }
+
+  const backup = createAndVerifyFuLifecycleRegistryBackup_();
+  const baseline = readCalendarRegistryStore_();
+  if (!baseline.ok) {
+    throw new Error('備份後 V2 索引回讀失敗；本次未執行。');
+  }
+  const previousById = {};
+  baseline.entries.forEach(entry => {
+    if (!previousById[entry.eventId]) previousById[entry.eventId] = entry;
+  });
+  const results = [];
+  const resolvedIds = {};
+  const retainedById = {};
+
+  fresh.items.forEach(item => {
+    if (item.action === 'manual') {
+      if (item.eventId) {
+        retainedById[item.eventId] = makeFuLifecyclePendingRegistryEntry_(
+          item,
+          previousById[item.eventId],
+          item.reason
+        );
+      }
+      return;
+    }
+    const calendarState = verifyFuLifecycleMigrationCalendarState_(item);
+    if (!calendarState.ok) {
+      const result = {
+        ok: false,
+        status: calendarState.status,
+        message: calendarState.message || ''
+      };
+      results.push({ item, result });
+      if (item.eventId) {
+        retainedById[item.eventId] = makeFuLifecyclePendingRegistryEntry_(
+          item,
+          previousById[item.eventId],
+          result.status
+        );
+      }
+      return;
+    }
+
+    let result = { ok: true, status: 'index_removed' };
+    let context = null;
+    if (
+      item.action === 'stop_tracking' ||
+      item.action === 'rebind' ||
+      item.action === 'recreate_missing' ||
+      item.action === 'remove_missing'
+    ) {
+      context = getFuLifecycleMigrationContext_(spreadsheet, item);
+      if (!context) {
+        result = { ok: false, status: 'sheet_fingerprint_changed' };
+      }
+    }
+    if (result.ok && item.action === 'stop_tracking') {
+      result = deleteCurrentContextEvent_({
+        ...context,
+        eventId: item.eventId,
+        recoveredEventId: !context.eventId
+      }, { bestEffort: true });
+    } else if (result.ok && item.action === 'rebind') {
+      if (context.eventId && context.eventId !== item.eventId) {
+        result = { ok: false, status: 'event_id_cell_changed' };
+      } else {
+        context.sheet
+          .getRange(context.row, context.columns.EVENT_ID)
+          .setValue(item.eventId);
+        const rebound = buildFuRowContext_(
+          context.sheet,
+          context.row,
+          context.columns
+        );
+        result = syncManagedContext_(
+          rebound,
+          { [item.eventId]: [rebound] }
+        );
+      }
+    } else if (result.ok && item.action === 'recreate_missing') {
+      result = syncManagedContext_(
+        context,
+        { [item.eventId]: [context] }
+      );
+    } else if (result.ok && item.action === 'remove_missing') {
+      if (context.eventId && context.eventId !== item.eventId) {
+        result = { ok: false, status: 'event_id_cell_changed' };
+      } else {
+        context.sheet
+          .getRange(context.row, context.columns.EVENT_ID)
+          .clearContent();
+        clearContextSystemNotes_(context);
+        result = { ok: true, status: 'stale_id_cleared' };
+      }
+    } else if (result.ok && item.action === 'orphan_delete') {
+      result = deleteCalendarEvent_(item.eventId);
+    }
+    results.push({ item, context, result });
+    if (result.ok) {
+      if (item.eventId) resolvedIds[item.eventId] = true;
+    } else if (item.eventId) {
+      retainedById[item.eventId] = makeFuLifecyclePendingRegistryEntry_(
+        item,
+        previousById[item.eventId],
+        result.status || 'migration_failed'
+      );
+    }
+  });
+
+  const fuSheet = getMainTrackingSheet_(spreadsheet);
+  if (!fuSheet) {
+    throw new Error('FU 分頁在遷移執行期間消失；索引未寫入。');
+  }
+  const refreshedFu = buildManagedSheetCalendarScan_(fuSheet);
+  const liveGlobalIds = buildGlobalEventIdLocationsLightweight_(spreadsheet);
+  if (liveGlobalIds.duplicateIds.length) {
+    return {
+      ok: false,
+      status: 'duplicate_event_id_after_migration',
+      plan: fresh,
+      backup,
+      results,
+      registry: {
+        ok: false,
+        deferred: true,
+        duplicateIds: liveGlobalIds.duplicateIds
+      }
+    };
+  }
+  const currentIds = {};
+  Object.keys(refreshedFu.eventLocations || {}).forEach(eventId => {
+    currentIds[eventId] = true;
+  });
+  baseline.entries.forEach(entry => {
+    if (resolvedIds[entry.eventId] || retainedById[entry.eventId]) return;
+    if (Number(entry.sheetId) !== Number(fuSheet.getSheetId())) {
+      retainedById[entry.eventId] = entry;
+      return;
+    }
+    if (
+      entry.pendingSync ||
+      entry.pendingDelete ||
+      entry.pendingResolution
+    ) {
+      retainedById[entry.eventId] = entry;
+      return;
+    }
+    if (!currentIds[entry.eventId]) {
+      retainedById[entry.eventId] = {
+        ...entry,
+        pendingResolution: true,
+        pendingResolutionReason: 'unmatched_registry_entry',
+        pendingError: entry.pendingError || 'migration_manual_review'
+      };
+    }
+  });
+  const index = writeCalendarRegistryStore_(
+    refreshedFu,
+    Object.values(retainedById),
+    baseline.index && baseline.index.sheets
+  );
+  const verified = readCalendarRegistryStore_();
+  if (!verified.ok || verified.entries.length !== index.eventCount) {
+    throw new Error(
+      '遷移後 V2 索引回讀驗證失敗；' +
+      `已保留備份 ${backup.manifestKey}。`
+    );
+  }
+  return {
+    ok:
+      results.every(item => item.result && item.result.ok) &&
+      fresh.counts.manual === 0,
+    status: 'applied',
+    plan: fresh,
+    backup,
+    results,
+    registry: {
+      ok: true,
+      eventCount: index.eventCount,
+      fingerprint: index.fingerprint
+    }
+  };
+}
+
+function previewFuLifecycleRecoveryMigration() {
+  return runMenuAction_('預覽 FU 追蹤生命週期修復', () => {
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    assertNoLegacyArchiveState_();
+    assertNoActiveAnnualArchiveTransaction_();
+    const properties = PropertiesService.getScriptProperties();
+    properties.deleteProperty(FU_LIFECYCLE_RECOVERY_PREVIEW_PROPERTY);
+    const plan = buildFuLifecycleRecoveryMigrationPlan_(spreadsheet);
+    if (plan.ok) {
+      properties.setProperty(
+        FU_LIFECYCLE_RECOVERY_PREVIEW_PROPERTY,
+        JSON.stringify({
+          version: FU_LIFECYCLE_RECOVERY_MIGRATION_VERSION,
+          createdAt: new Date().toISOString(),
+          spreadsheetId: plan.spreadsheetId,
+          fingerprint: plan.fingerprint,
+          counts: plan.counts
+        })
+      );
+    }
+    const health = buildFuLifecycleMigrationHealthResult_(plan, []);
+    const report = writeHealthReportSheet_(spreadsheet, health);
+    reorderManagedSheets_(spreadsheet);
+    const counts = plan.counts;
+    const message = plan.ok
+      ? [
+        '預覽完成；未修改 FU／月表、V2 索引或 Calendar，' +
+          '只儲存預覽指紋並更新安全健康報告。',
+        `停止追蹤 ${counts.stopTracking} 筆；` +
+          `重綁 ${counts.rebind} 筆；` +
+          `404 重建 ${counts.recreateMissing} 筆；` +
+          `失效 ID／索引 ${counts.removeMissing} 筆。`,
+        `無資料來源刪除候選 ${counts.orphanDelete} 筆；` +
+          `人工處理 ${counts.manual} 筆。`,
+        counts.orphanDelete
+          ? '執行時會再顯示候選數量並要求確認。'
+          : '可執行「執行 FU 追蹤生命週期修復」。',
+        report.hasIssues
+          ? `安全摘要已寫入「${HEALTH_REPORT_SHEET}」。`
+          : ''
+      ].filter(Boolean).join('\n')
+      : `無法建立安全預覽：${plan.message}`;
+    SpreadsheetApp.getUi().alert(
+      '預覽 FU 追蹤生命週期修復',
+      message,
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+    return plan;
+  });
+}
+
+function executeFuLifecycleRecoveryMigration() {
+  return runMenuAction_('執行 FU 追蹤生命週期修復', () => {
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    assertNoLegacyArchiveState_();
+    assertNoActiveAnnualArchiveTransaction_();
+    const properties = PropertiesService.getScriptProperties();
+    const stored = safeJsonParse_(
+      properties.getProperty(FU_LIFECYCLE_RECOVERY_PREVIEW_PROPERTY),
+      null
+    );
+    if (
+      !stored ||
+      Number(stored.version) !==
+        FU_LIFECYCLE_RECOVERY_MIGRATION_VERSION
+    ) {
+      throw new Error('請先執行「預覽 FU 追蹤生命週期修復」。');
+    }
+    const spreadsheetId = spreadsheet.getId
+      ? toCellText_(spreadsheet.getId())
+      : '';
+    if (
+      stored.spreadsheetId &&
+      spreadsheetId &&
+      stored.spreadsheetId !== spreadsheetId
+    ) {
+      throw new Error('預覽屬於另一份試算表，請重新預覽。');
+    }
+    const current = buildFuLifecycleRecoveryMigrationPlan_(spreadsheet);
+    if (!current.ok) {
+      throw new Error(current.message || '目前狀態無法安全執行。');
+    }
+    if (current.fingerprint !== stored.fingerprint) {
+      throw new Error(
+        '預覽後 Sheet、V2 索引或 Calendar 狀態已改變；' +
+        '請重新預覽。'
+      );
+    }
+    const orphanItems = current.items.filter(item => {
+      return item.action === 'orphan_delete';
+    });
+    if (orphanItems.length) {
+      const response = SpreadsheetApp.getUi().alert(
+        '確認刪除無資料來源事件',
+        `預覽中有 ${orphanItems.length} 個已無 FU、月表或封存資料來源的` +
+          '可驗證 FU 重複或系統管理事件。\n' +
+          '按下 OK 才會刪除；取消則整批不執行。',
+        SpreadsheetApp.getUi().ButtonSet.OK_CANCEL
+      );
+      if (response !== SpreadsheetApp.getUi().Button.OK) {
+        return { ok: false, cancelled: true, plan: current };
+      }
+    }
+    const result = withCalendarSyncLock_(() => {
+      return applyFuLifecycleRecoveryMigrationPlan_(
+        spreadsheet,
+        current,
+        {
+          confirmedOrphanIds: orphanItems.map(item => item.eventId)
+        }
+      );
+    });
+    properties.deleteProperty(FU_LIFECYCLE_RECOVERY_PREVIEW_PROPERTY);
+    const health = buildFuLifecycleMigrationHealthResult_(
+      result.plan,
+      result.results
+    );
+    const report = writeHealthReportSheet_(spreadsheet, health);
+    reorderManagedSheets_(spreadsheet);
+    const failed = result.results.filter(item => {
+      return !item.result || !item.result.ok;
+    }).length;
+    SpreadsheetApp.getUi().alert(
+      '執行 FU 追蹤生命週期修復',
+      `已執行 ${result.results.length} 項；失敗 ${failed} 項；` +
+        `人工處理 ${result.plan.counts.manual} 項。\n` +
+        `執行前索引備份已建立並回讀驗證（` +
+        `${result.backup.partCount} 分段）。` +
+        (
+          report.hasIssues
+            ? `\n待處理安全摘要已寫入「${HEALTH_REPORT_SHEET}」。`
+            : '\n所有可安全處理項目均已完成。'
         ),
       SpreadsheetApp.getUi().ButtonSet.OK
     );

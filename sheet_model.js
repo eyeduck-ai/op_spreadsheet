@@ -1022,6 +1022,12 @@ function buildPlanContainsAnyFormula_(cellReference, keywords) {
   return clauses.length === 1 ? clauses[0] : `OR(${clauses.join(',')})`;
 }
 
+function buildMonthlyHeaderConditionalPredicate_(columns) {
+  const markerLetter = columnToLetter_(columns.CHART_NO);
+  const markerValue = String(MONTHLY_DATE_HEADER_MARKER).replace(/"/g, '""');
+  return `$${markerLetter}2="${markerValue}"`;
+}
+
 function applyFuConditionalFormats_(sheet, columns, lastColumn) {
   const maxRows = Math.max(sheet.getMaxRows(), 2);
   const dataRows = buildVisibleRangesExcludingColumns_(
@@ -1092,8 +1098,6 @@ function applyMonthlyConditionalFormats_(sheet, columns, lastColumn) {
     lastColumn,
     [columns.GA, columns.SIDE, columns.EVENT_ID]
   );
-  const timeLetter = columnToLetter_(columns.TIME);
-  const eventIdLetter = columnToLetter_(columns.EVENT_ID);
   const planLetter = columnToLetter_(columns.PLAN);
   const gaLetter = columnToLetter_(columns.GA);
   const sideLetter = columnToLetter_(columns.SIDE);
@@ -1111,10 +1115,7 @@ function applyMonthlyConditionalFormats_(sheet, columns, lastColumn) {
     planReference,
     CONFIG.PLAN_YELLOW_KEYWORDS
   );
-  const headerPredicate =
-    `AND(ISNUMBER($${timeLetter}2),YEAR($${timeLetter}2)>=2000,` +
-    `YEAR($${timeLetter}2)<=2099,MOD($${timeLetter}2,1)=0,` +
-    `$${eventIdLetter}2="")`;
+  const headerPredicate = buildMonthlyHeaderConditionalPredicate_(columns);
   const headerFormula =
     `=AND(${headerPredicate},` +
     `N("${marker('MONTH_HEADER')}")=0)`;
@@ -1224,7 +1225,9 @@ function applyMonthlyFormatting_(sheet, options) {
   });
   const dataRowCount = Math.max(1, sheet.getMaxRows() - 1);
   sheet.getRange(2, columns.TIME, dataRowCount, 1).setNumberFormat('@');
-  applyMonthlyTextNumberFormats_(sheet, columns, 2, dataRowCount);
+  if (settings.initializeTextInputs) {
+    applyMonthlyTextNumberFormats_(sheet, columns, 2, dataRowCount);
+  }
   sheet.getRange(2, columns.HOSPITAL, dataRowCount, 1)
     .setDataValidation(buildListValidation_(CONFIG.HOSPITAL_OPTIONS, false));
   sheet.getRange(2, columns.GA, dataRowCount, 1)
@@ -1476,7 +1479,7 @@ function applyTouchedManagedRowsFormatBatch_(
       CONFIG.MONTHLY_PROCEDURE_OPTIONS,
       true
     );
-    const textKeys = ['TIME'].concat(MONTHLY_TEXT_KEYS)
+    const textKeys = ['TIME']
       .filter(key => keys.indexOf(key) !== -1 && columns[key]);
     const textAddresses = [];
     textKeys.forEach(key => {
@@ -1814,6 +1817,11 @@ function appendMonthlyBlock_(sheet, date, hospital, columns, options) {
   sheet.getRange(row, cols.CHART_NO).setValue(MONTHLY_DATE_HEADER_MARKER);
   applyManagedRowFormat_(sheet, row, 'MONTHLY', cols);
   ensureMonthlyHeaderPresentation_(sheet, row, cols);
+  const blankRows = Array.from(
+    { length: MONTHLY_TEMPLATE_BLANK_ROWS },
+    (_, index) => row + index + 1
+  );
+  applyManagedRowsFormatBatch_(sheet, blankRows, 'MONTHLY', cols);
   return {
     row,
     date,
@@ -1821,10 +1829,7 @@ function appendMonthlyBlock_(sheet, date, hospital, columns, options) {
     hospital: normalizedHospital,
     blockKey: `${dateKey}|${normalizedHospital}`,
     patientRows: [],
-    blankRows: Array.from(
-      { length: MONTHLY_TEMPLATE_BLANK_ROWS },
-      (_, index) => row + index + 1
-    )
+    blankRows
   };
 }
 
@@ -2538,18 +2543,34 @@ function insertPatientAtBlockEnd_(
   sheet.getRange(targetRow, 1, 1, lastColumn).setValues([rowValues]);
   applyManagedRowFormat_(sheet, targetRow, 'MONTHLY', columns);
 
+  const insertedBlankRows = [];
   if (nextHeaderRow) {
     const blankCount = Math.max(0, nextHeaderRow - targetRow - 1);
     const shortage = MONTHLY_TEMPLATE_BLANK_ROWS - blankCount;
     if (shortage > 0) {
       sheet.insertRowsBefore(nextHeaderRow, shortage);
+      for (let offset = 0; offset < shortage; offset++) {
+        insertedBlankRows.push(nextHeaderRow + offset);
+      }
     }
   } else {
     const blankCount = Math.max(0, sheet.getMaxRows() - targetRow);
     const shortage = MONTHLY_TEMPLATE_BLANK_ROWS - blankCount;
     if (shortage > 0) {
+      const firstInsertedRow = sheet.getMaxRows() + 1;
       sheet.insertRowsAfter(sheet.getMaxRows(), shortage);
+      for (let offset = 0; offset < shortage; offset++) {
+        insertedBlankRows.push(firstInsertedRow + offset);
+      }
     }
+  }
+  if (insertedBlankRows.length) {
+    applyManagedRowsFormatBatch_(
+      sheet,
+      insertedBlankRows,
+      'MONTHLY',
+      columns
+    );
   }
   return targetRow;
 }

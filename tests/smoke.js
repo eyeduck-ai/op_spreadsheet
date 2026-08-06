@@ -176,6 +176,24 @@ class FakeRange {
     });
   }
 
+  getFontLines() {
+    this.sheet.calls.getFontLines++;
+    const result = [];
+    for (let rowOffset = 0; rowOffset < this.numRows; rowOffset++) {
+      const row = [];
+      for (let columnOffset = 0; columnOffset < this.numColumns; columnOffset++) {
+        row.push(
+          this.sheet.fontLineAt(
+            this.row + rowOffset,
+            this.column + columnOffset
+          )
+        );
+      }
+      result.push(row);
+    }
+    return result;
+  }
+
   getFormulas() {
     this.sheet.calls.getFormulas++;
     const result = [];
@@ -357,6 +375,7 @@ class FakeSheet {
     this.rows = rows.map(row => row.slice());
     this.notes = {};
     this.formulas = {};
+    this.fontLines = {};
     this.validations = {};
     this.columnWidths = {};
     this.calls = {
@@ -367,6 +386,7 @@ class FakeSheet {
       deleteColumns: 0,
       autoResizeRows: 0,
       getFormulas: 0,
+      getFontLines: 0,
       getNotes: 0,
       setColumnWidth: [],
       rangeLists: [],
@@ -480,6 +500,11 @@ class FakeSheet {
             .filter(([key]) => Number(key.split(':')[0]) === sourceRow)
             .map(([key, value]) => [Number(key.split(':')[1]), value])
         ),
+        fontLines: Object.fromEntries(
+          Object.entries(this.fontLines)
+            .filter(([key]) => Number(key.split(':')[0]) === sourceRow)
+            .map(([key, value]) => [Number(key.split(':')[1]), value])
+        ),
         validations: Object.fromEntries(
           Object.entries(this.validations)
             .filter(([key]) => Number(key.split(':')[0]) === sourceRow)
@@ -506,6 +531,9 @@ class FakeSheet {
       Object.keys(this.formulas).forEach(key => {
         if (Number(key.split(':')[0]) === targetRow) delete this.formulas[key];
       });
+      Object.keys(this.fontLines).forEach(key => {
+        if (Number(key.split(':')[0]) === targetRow) delete this.fontLines[key];
+      });
       Object.keys(this.validations).forEach(key => {
         if (Number(key.split(':')[0]) === targetRow) {
           delete this.validations[key];
@@ -516,6 +544,9 @@ class FakeSheet {
       });
       Object.entries(record.formulas).forEach(([targetColumn, value]) => {
         this.formulas[`${targetRow}:${targetColumn}`] = value;
+      });
+      Object.entries(record.fontLines).forEach(([targetColumn, value]) => {
+        this.fontLines[`${targetRow}:${targetColumn}`] = value;
       });
       Object.entries(record.validations).forEach(([targetColumn, value]) => {
         this.validations[`${targetRow}:${targetColumn}`] = value;
@@ -537,6 +568,14 @@ class FakeSheet {
     return this.formulas[`${row}:${column}`] || '';
   }
 
+  fontLineAt(row, column) {
+    return this.fontLines[`${row}:${column}`] || 'none';
+  }
+
+  setFontLineAt(row, column, value) {
+    this.fontLines[`${row}:${column}`] = value;
+  }
+
   noteAt(row, column) {
     return this.notes[`${row}:${column}`] || '';
   }
@@ -546,8 +585,18 @@ class FakeSheet {
   }
 }
 
+function makeFakeSpreadsheet(sheets, id = 'spreadsheet-test') {
+  return {
+    getId: () => id,
+    getSheets: () => sheets.slice(),
+    getSheetByName: name => (
+      sheets.find(sheet => sheet.getName() === name) || null
+    )
+  };
+}
+
 function testVersionAndModuleSplit() {
-  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.07.28.3');
+  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.08.06.4');
   assert.strictEqual(evaluate('typeof processRowChange'), 'function');
   assert.strictEqual(evaluate('typeof processCalendarStructureChange'), 'function');
   assert.strictEqual(evaluate('typeof createMonthlySurgerySheet'), 'function');
@@ -604,6 +653,8 @@ function testCurrentMenuHasNoCompletedMigrationOrLegacyOutput() {
     '安裝／修復系統',
     '檢查同步健康',
     '同步待處理變更',
+    '預覽 FU 追蹤生命週期修復',
+    '執行 FU 追蹤生命週期修復',
     '套用所有 FU／月表建議欄寬',
     '月刀表 => FU',
     'FU => 月刀表',
@@ -640,6 +691,14 @@ function testCurrentMenuHasNoCompletedMigrationOrLegacyOutput() {
   assert.strictEqual(
     evaluate('typeof executeLegacyBackupAndGridCleanup'),
     'undefined'
+  );
+  assert.strictEqual(
+    evaluate('typeof previewFuLifecycleRecoveryMigration'),
+    'function'
+  );
+  assert.strictEqual(
+    evaluate('typeof executeFuLifecycleRecoveryMigration'),
+    'function'
   );
 }
 
@@ -2212,6 +2271,18 @@ function testRepairEventFingerprintIgnoresApiObjectKeyOrder() {
     call('getRepairEventFingerprint_', first),
     call('getRepairEventFingerprint_', reordered)
   );
+  assert.notStrictEqual(
+    call('getRepairEventFingerprint_', first),
+    call('getRepairEventFingerprint_', {
+      ...first,
+      extendedProperties: {
+        private: {
+          surgerySyncKind: 'MONTHLY',
+          surgerySyncState: 'CANCELLED'
+        }
+      }
+    })
+  );
 }
 
 function testMonthlyConditionComposition() {
@@ -2317,6 +2388,114 @@ function testCalendarResourceTimedAndAllDay() {
     ),
     false
   );
+}
+
+function testMonthlyStrikethroughControlsCancellationColorAndMarker() {
+  const standardHeaders = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
+  const headers = ['自訂欄'].concat(standardHeaders.slice().reverse());
+  const sheet = new FakeSheet('202608', 2026081, [
+    headers,
+    Array(headers.length).fill(''),
+    Array(headers.length).fill('')
+  ]);
+  const columns = call('getRequiredMonthlyColumns_', sheet);
+  sheet.setValueAt(2, columns.TIME, new Date(2026, 7, 28));
+  sheet.setValueAt(2, columns.HOSPITAL, '高榮');
+  sheet.setValueAt(
+    2,
+    columns.CHART_NO,
+    evaluate('MONTHLY_DATE_HEADER_MARKER')
+  );
+  sheet.setValueAt(3, columns.TIME, '08:00');
+  sheet.setValueAt(3, columns.CHART_NO, 'CANCEL-001');
+  sheet.setValueAt(3, columns.NAME, '虛構取消個案');
+  sheet.setValueAt(3, columns.DIAGNOSIS, 'CATA');
+  sheet.setValueAt(3, columns.IOL_TARGET, '+20.0');
+  sheet.setValueAt(3, columns.EVENT_ID, 'cancel-event');
+
+  const normalScan = call('buildManagedSheetCalendarScan_', sheet);
+  const normal = normalScan.contexts.find(item => item.row === 3);
+  assert.ok(normal);
+  assert.strictEqual(normal.cancelled, false);
+  assert.strictEqual(call('getCalendarColorId_', normal), '10');
+  assert.strictEqual(
+    call('buildCalendarResource_', normal).extendedProperties,
+    undefined
+  );
+
+  sheet.setFontLineAt(3, columns.CHART_NO, 'line-through');
+  const cancelledScan = call('buildManagedSheetCalendarScan_', sheet);
+  const cancelled = cancelledScan.contexts.find(item => item.row === 3);
+  const cancelledResource = call('buildCalendarResource_', cancelled);
+  assert.strictEqual(cancelled.cancelled, true);
+  assert.strictEqual(cancelledResource.colorId, '8');
+  assert.deepStrictEqual(
+    plain(cancelledResource.extendedProperties.private),
+    {
+      surgerySyncKind: 'MONTHLY',
+      surgerySyncState: 'CANCELLED'
+    }
+  );
+  assert.strictEqual(cancelled.bindingHash, normal.bindingHash);
+  assert.notStrictEqual(cancelled.rowHash, normal.rowHash);
+  assert.notStrictEqual(
+    cancelledScan.fastFingerprint,
+    normalScan.fastFingerprint
+  );
+  assert.strictEqual(
+    call('calendarEventMatchesResource_', cancelledResource, cancelledResource),
+    true
+  );
+  assert.strictEqual(
+    call(
+      'calendarEventMatchesResource_',
+      { ...cancelledResource, extendedProperties: undefined },
+      cancelledResource
+    ),
+    false
+  );
+
+  sheet.setValueAt(3, columns.GA, 'GA');
+  const cancelledGa = call('buildManagedSheetCalendarScan_', sheet)
+    .contexts.find(item => item.row === 3);
+  assert.strictEqual(call('getCalendarColorId_', cancelledGa), '8');
+
+  sheet.setFontLineAt(3, columns.CHART_NO, 'none');
+  const restored = call('buildManagedSheetCalendarScan_', sheet)
+    .contexts.find(item => item.row === 3);
+  const restoredResource = call('buildCalendarResource_', restored);
+  assert.strictEqual(restored.cancelled, false);
+  assert.strictEqual(restoredResource.colorId, '4');
+  assert.strictEqual(restoredResource.extendedProperties, undefined);
+  assert.ok(sheet.calls.getFontLines >= 4);
+}
+
+function testFuIgnoresStrikethroughAndFormatQueuesCalendarScanOnly() {
+  const headers = plain(evaluate('CONFIG.HEADERS'));
+  const row = Array(headers.length).fill('');
+  row[headers.indexOf('病歷號')] = 'FU-STRIKE';
+  row[headers.indexOf('日期')] = new Date(2026, 7, 28);
+  row[headers.indexOf('Condition')] = '追蹤';
+  const sheet = new FakeSheet('FU', 2026082, [headers, row]);
+  const columns = call('getRequiredFuColumns_', sheet);
+  sheet.setFontLineAt(2, columns.CHART_NO, 'line-through');
+  const scan = call('buildManagedSheetCalendarScan_', sheet);
+  assert.strictEqual(scan.contexts.length, 1);
+  assert.strictEqual(scan.contexts[0].cancelled, undefined);
+  assert.strictEqual(sheet.calls.getFontLines, 0);
+  assert.strictEqual(
+    call('buildCalendarResource_', scan.contexts[0]).colorId,
+    '8'
+  );
+
+  const source = sourceByFile['calendar_sync.js'];
+  const body = source.slice(
+    source.indexOf('function processCalendarStructureChange'),
+    source.indexOf('function buildCalendarSyncRuntime_')
+  );
+  assert.ok(body.includes('fullScan: true'));
+  assert.ok(body.includes('reason: `CHANGE_${changeType}`'));
+  assert.strictEqual(body.includes('setNumberFormat'), false);
 }
 
 function testArbitraryHeaderOrderUsesNames() {
@@ -2426,6 +2605,7 @@ function registryContext(overrides = {}) {
     row: 5,
     blockKey: '2026-08-10|高榮',
     rowHash: 'row-hash-1',
+    bindingHash: 'binding-hash-1',
     valid: true,
     invalidReason: '',
     ...overrides
@@ -2442,9 +2622,11 @@ function registryEntry(overrides = {}) {
     row: 3,
     blockKey: '2026-08-10|高榮',
     rowHash: 'row-hash-1',
+    bindingHash: 'binding-hash-1',
     valid: true,
     invalidReason: '',
     pendingDelete: false,
+    pendingResolution: false,
     ...overrides
   };
 }
@@ -2884,16 +3066,139 @@ function testMonthlyClinicalIdentifiersDefaultToPlainText() {
   ));
 }
 
-function testMonthlyHeaderConditionalFormatUsesEventIdNotEmptyPatientFields() {
+function testMonthlyTextFormatsOnlyInitializeSystemCreatedRows() {
+  assert.strictEqual(
+    evaluate('typeof repairMonthlyTextInputFormats_'),
+    'undefined'
+  );
+  const deployedSource = files.map(file => sourceByFile[file]).join('\n');
+  assert.strictEqual(
+    deployedSource.includes('repairMonthlyTextInputFormats_'),
+    false
+  );
+
+  const codeSource = sourceByFile['code.js'];
+  const onOpenBody = codeSource.slice(
+    codeSource.indexOf('function onOpen()'),
+    codeSource.indexOf("const maintenance = ui.createMenu('維護工具')")
+  );
+  assert.ok(onOpenBody.includes('SpreadsheetApp.getUi()'));
+  assert.strictEqual(onOpenBody.includes('getActiveSpreadsheet'), false);
+
+  const calendarSource = sourceByFile['calendar_sync.js'];
+  const structureBody = calendarSource.slice(
+    calendarSource.indexOf('function processCalendarStructureChange'),
+    calendarSource.indexOf('function buildCalendarSyncRuntime_')
+  );
+  assert.ok(structureBody.includes("allowMissingDeletes: changeType === 'REMOVE_ROW'"));
+  assert.strictEqual(structureBody.includes('setNumberFormat'), false);
+
+  const sheetSource = sourceByFile['sheet_model.js'];
+  const monthlyFormattingBody = sheetSource.slice(
+    sheetSource.indexOf('function applyMonthlyFormatting_'),
+    sheetSource.indexOf('function applyManagedRowFormat_')
+  );
+  assert.ok(monthlyFormattingBody.includes('settings.initializeTextInputs'));
+  const touchedRowsBody = sheetSource.slice(
+    sheetSource.indexOf('function applyTouchedManagedRowsFormatBatch_'),
+    sheetSource.indexOf('function applyTouchedManagedRowsFormat_')
+  );
+  assert.ok(touchedRowsBody.includes("const textKeys = ['TIME']"));
+  assert.strictEqual(touchedRowsBody.includes('MONTHLY_TEXT_KEYS'), false);
+
+  const workflowSource = sourceByFile['workflows.js'];
+  const createMonthlyBody = workflowSource.slice(
+    workflowSource.indexOf('function createOrInitializeMonthlySheet_'),
+    workflowSource.indexOf('function createMonthlySurgerySheet')
+  );
+  assert.ok(createMonthlyBody.includes('initializeTextInputs: created'));
+
+  const appendBlockBody = sheetSource.slice(
+    sheetSource.indexOf('function appendMonthlyBlock_'),
+    sheetSource.indexOf('function ensureDefaultMonthlyBlocks_')
+  );
+  assert.ok(appendBlockBody.includes('applyManagedRowsFormatBatch_'));
+  const insertPatientBody = sheetSource.slice(
+    sheetSource.indexOf('function insertPatientAtBlockEnd_'),
+    sheetSource.indexOf('function getMonthlyBlockOptions_')
+  );
+  assert.ok(insertPatientBody.includes('insertedBlankRows'));
+  assert.ok(insertPatientBody.includes('applyManagedRowsFormatBatch_'));
+}
+
+function testMonthlyIolTextInputsHaveNoPostEditRewrite() {
+  const sheetSource = sourceByFile['sheet_model.js'];
+  const calendarSource = sourceByFile['calendar_sync.js'];
+  const onEditBody = calendarSource.slice(
+    calendarSource.indexOf('function processRowChange'),
+    calendarSource.indexOf('function processCalendarStructureChange')
+  );
+  assert.strictEqual(
+    sheetSource.includes('normalizeMonthlySignedTextInputs_'),
+    false
+  );
+  assert.strictEqual(
+    sheetSource.includes('normalizeMonthlySignedTextValue_'),
+    false
+  );
+  assert.strictEqual(onEditBody.includes('IOL_SIGNED'), false);
+  assert.strictEqual(
+    onEditBody.includes('normalizeMonthlySignedTextInputs_'),
+    false
+  );
+}
+
+function testMonthlyHeaderConditionalFormatUsesExactMarker() {
+  const expectedMarker = evaluate('MONTHLY_DATE_HEADER_MARKER');
+  assert.strictEqual(
+    call('buildMonthlyHeaderConditionalPredicate_', { CHART_NO: 3 }),
+    `$C2="${expectedMarker}"`
+  );
+  assert.strictEqual(
+    call('buildMonthlyHeaderConditionalPredicate_', { CHART_NO: 27 }),
+    `$AA2="${expectedMarker}"`
+  );
+
+  const columns = monthlyColumns();
+  ['PM', 'AM', '待通知', ''].forEach((time, index) => {
+    const row = Array(plain(evaluate('CONFIG.MONTHLY_HEADERS')).length).fill('');
+    row[columns.TIME - 1] = time;
+    row[columns.CHART_NO - 1] = `TEST-${index + 1}`;
+    row[columns.PLAN - 1] = ['#', '!', 'APPLY', '#'][index];
+    assert.strictEqual(
+      call('getMonthlyHeaderMarkerState_', row, columns).valid,
+      false
+    );
+  });
+  const headerRow = Array(plain(evaluate('CONFIG.MONTHLY_HEADERS')).length).fill('');
+  headerRow[columns.CHART_NO - 1] = expectedMarker;
+  headerRow[columns.PLAN - 1] = '#!APPLY';
+  assert.strictEqual(
+    call('getMonthlyHeaderMarkerState_', headerRow, columns).valid,
+    true
+  );
+
   const source = sourceByFile['sheet_model.js'];
   const body = source.slice(
     source.indexOf('function applyMonthlyConditionalFormats_'),
     source.indexOf('function applyFuFormatting_')
   );
-  assert.ok(body.includes('eventIdLetter'));
-  assert.ok(body.includes('$${eventIdLetter}2=""'));
+  assert.ok(body.includes(
+    'buildMonthlyHeaderConditionalPredicate_(columns)'
+  ));
+  assert.strictEqual(body.includes('timeLetter'), false);
+  assert.strictEqual(body.includes('eventIdLetter'), false);
+  assert.strictEqual(body.includes('YEAR('), false);
+  assert.strictEqual(body.includes('MOD('), false);
   assert.strictEqual(body.includes('patientFieldReferences'), false);
   assert.strictEqual(body.includes('COUNTA('), false);
+  assert.strictEqual(
+    (body.match(/NOT\(\$\{headerPredicate\}\)/g) || []).length,
+    6
+  );
+  assert.ok(body.includes('`=AND(${headerPredicate},`'));
+  assert.ok(body.includes('`=AND(NOT(${headerPredicate}),${redMatch},`'));
+  assert.ok(body.includes('`=AND(NOT(${headerPredicate}),`'));
   assert.ok(body.includes('.setBold(true)'));
   assert.strictEqual(body.includes(".setFontWeight('bold')"), false);
 }
@@ -3327,6 +3632,9 @@ function installCalendarMock(options = {}) {
       },
       get(_calendarId, eventId) {
         getCount++;
+        if ((options.getErrorIds || []).includes(eventId)) {
+          throw new Error(options.getErrorMessage || '503 read failed');
+        }
         if (
           (options.get404Ids || []).includes(eventId) ||
           !events[eventId]
@@ -3337,6 +3645,7 @@ function installCalendarMock(options = {}) {
       },
       remove(_calendarId, eventId) {
         removeCount++;
+        if (options.removeError) throw new Error(options.removeError);
         if (options.remove404 || !events[eventId]) throw new Error('404 not found');
         delete events[eventId];
       },
@@ -3655,6 +3964,932 @@ function testPendingDeleteIsRetried() {
   );
 }
 
+function testRemoveRowQueuePreservesDeletionSemantics() {
+  const previous = context.reconcileCalendarRegistry_;
+  let captured = null;
+  context.reconcileCalendarRegistry_ = (_spreadsheet, options) => {
+    captured = options;
+    return { ok: true, results: [] };
+  };
+  try {
+    const queue = call('emptyPendingCalendarQueue_');
+    queue.fullScan = true;
+    queue.allowMissingDeletes = true;
+    const result = call('applyPendingCalendarQueue_', {}, queue);
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(captured.changeType, 'REMOVE_ROW');
+    assert.strictEqual(captured.allowMissingDeletes, true);
+  } finally {
+    context.reconcileCalendarRegistry_ = previous;
+  }
+}
+
+function testNativeRemoveRowsDeletesEventsAndUpdatesRegistry() {
+  clearScriptProperties();
+  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
+  const headers = plain(evaluate('CONFIG.HEADERS'));
+  const sheet = new FakeSheet('FU', 6001, [headers]);
+  const spreadsheet = makeFakeSpreadsheet([sheet]);
+  const entries = ['removed-a', 'removed-b'].map((eventId, index) => {
+    return registryEntry({
+      eventId,
+      sheetId: 6001,
+      sheetName: 'FU',
+      kind: 'FU',
+      row: index + 2,
+      rowHash: `removed-row-${index}`,
+      bindingHash: `removed-binding-${index}`
+    });
+  });
+  call(
+    'writeCalendarRegistryStore_',
+    registryScan([], [{
+      sheetId: 6001,
+      sheetName: 'FU',
+      kind: 'FU',
+      archived: false
+    }]),
+    entries
+  );
+  const api = installCalendarMock({
+    initialEvents: entries.map(entry => ({
+      id: entry.eventId,
+      summary: 'X |  | 追蹤',
+      description: 'Plan: delete row'
+    }))
+  });
+  const queue = call('emptyPendingCalendarQueue_');
+  queue.fullScan = true;
+  queue.allowMissingDeletes = true;
+  const result = call(
+    'applyPendingCalendarQueue_',
+    spreadsheet,
+    queue
+  );
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(api.counts().removeCount, 2);
+  assert.strictEqual(call('readCalendarRegistryStore_').entries.length, 0);
+}
+
+function testNativeRemoveRowDeleteFailureKeepsPendingDelete() {
+  clearScriptProperties();
+  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
+  const headers = plain(evaluate('CONFIG.HEADERS'));
+  const sheet = new FakeSheet('FU', 6002, [headers]);
+  const spreadsheet = makeFakeSpreadsheet([sheet]);
+  const entry = registryEntry({
+    eventId: 'removed-fails',
+    sheetId: 6002,
+    sheetName: 'FU',
+    kind: 'FU',
+    row: 2,
+    rowHash: 'removed-row-fails',
+    bindingHash: 'removed-binding-fails'
+  });
+  call(
+    'writeCalendarRegistryStore_',
+    registryScan([], [{
+      sheetId: 6002,
+      sheetName: 'FU',
+      kind: 'FU',
+      archived: false
+    }]),
+    [entry]
+  );
+  installCalendarMock({
+    initialEvents: [{ id: entry.eventId, summary: 'X |  | 追蹤' }],
+    removeError: '503 delete unavailable'
+  });
+  const queue = call('emptyPendingCalendarQueue_');
+  queue.fullScan = true;
+  queue.allowMissingDeletes = true;
+  const result = call(
+    'applyPendingCalendarQueue_',
+    spreadsheet,
+    queue
+  );
+  assert.strictEqual(result.ok, false);
+  const retained = call('readCalendarRegistryStore_').entries[0];
+  assert.strictEqual(retained.eventId, 'removed-fails');
+  assert.strictEqual(retained.pendingDelete, true);
+}
+
+function testRegistryDeleteNeverUsesShiftedRowNumberAsIdentity() {
+  const result = analyze(
+    [registryEntry({ row: 3, rowHash: 'old', bindingHash: 'old-binding' })],
+    [registryContext({
+      eventId: '',
+      row: 3,
+      rowHash: 'different',
+      bindingHash: 'different-binding'
+    })],
+    { changeType: 'REMOVE_ROW' }
+  );
+  assert.ok(result.actions.some(item => item.type === 'delete_missing'));
+  assert.ok(result.actions.some(item => item.type === 'create'));
+  assert.strictEqual(
+    result.conflicts.some(item => {
+      return item.type === 'event_id_removed_or_partial_move';
+    }),
+    false
+  );
+}
+
+function testRegistryBindingMatchPreventsUnsafeRowDelete() {
+  const result = analyze(
+    [registryEntry({ row: 3, rowHash: 'old', bindingHash: 'same-binding' })],
+    [registryContext({
+      eventId: '',
+      row: 30,
+      rowHash: 'changed-after-move',
+      bindingHash: 'same-binding'
+    })],
+    { changeType: 'REMOVE_ROW' }
+  );
+  assert.strictEqual(
+    result.actions.some(item => item.type === 'delete_missing'),
+    false
+  );
+  assert.ok(result.conflicts.some(item => {
+    return item.type === 'event_id_removed_or_partial_move';
+  }));
+}
+
+function testPendingResolutionIsNotDeletedByLaterUnrelatedRemoveRow() {
+  const result = analyze(
+    [registryEntry({
+      pendingResolution: true,
+      pendingResolutionReason: 'multiple_binding_match'
+    })],
+    [],
+    { changeType: 'REMOVE_ROW', allowMissingDeletes: true }
+  );
+  assert.strictEqual(
+    result.actions.some(item => item.type === 'delete_missing'),
+    false
+  );
+  assert.ok(result.conflicts.some(item => {
+    return item.type === 'multiple_binding_match';
+  }));
+}
+
+function testPendingResolutionClearsWhenSameBindingIdReturns() {
+  const result = analyze(
+    [registryEntry({
+      pendingResolution: true,
+      pendingResolutionReason: 'missing_event_id_from_sheet'
+    })],
+    [registryContext()],
+    { changeType: 'HEALTH' }
+  );
+  assert.deepStrictEqual(
+    plain(result.actions.map(item => item.type)),
+    ['resolve_pending_resolution']
+  );
+  assert.strictEqual(result.conflicts.length, 0);
+}
+
+function testSingleSheetRefreshIsolatesMissingRegistryEntry() {
+  clearScriptProperties();
+  const headers = plain(evaluate('CONFIG.HEADERS'));
+  const row = Array(headers.length).fill('');
+  row[headers.indexOf('病歷號')] = 'CURRENT';
+  row[headers.indexOf('日期')] = new Date(2026, 7, 20);
+  row[headers.indexOf('CalendarEventId')] = 'event-current';
+  const sheet = new FakeSheet('FU', 6101, [headers, row]);
+  const spreadsheet = makeFakeSpreadsheet([sheet]);
+  const current = call(
+    'buildFuRowContext_',
+    sheet,
+    2,
+    call('getRequiredFuColumns_', sheet)
+  );
+  const stale = registryEntry({
+    eventId: 'event-stale',
+    sheetId: 6101,
+    sheetName: 'FU',
+    kind: 'FU',
+    row: 80,
+    rowHash: 'stale-row',
+    bindingHash: 'stale-binding'
+  });
+  call(
+    'writeCalendarRegistryStore_',
+    registryScan(
+      [current],
+      [{ sheetId: 6101, sheetName: 'FU', kind: 'FU', archived: false }]
+    ),
+    [stale]
+  );
+  const refreshed = call(
+    'refreshCalendarRegistryForSheet_',
+    spreadsheet,
+    sheet
+  );
+  assert.strictEqual(refreshed.ok, true);
+  assert.strictEqual(refreshed.pendingResolutionCount, 1);
+  const loaded = call('readCalendarRegistryStore_');
+  const retained = loaded.entries.find(entry => {
+    return entry.eventId === 'event-stale';
+  });
+  assert.strictEqual(retained.pendingResolution, true);
+  assert.strictEqual(
+    retained.pendingResolutionReason,
+    'missing_event_id_from_sheet'
+  );
+  assert.ok(loaded.entries.some(entry => {
+    return entry.eventId === 'event-current';
+  }));
+}
+
+function testPendingResolutionDoesNotBlockUnrelatedFuCreate() {
+  clearScriptProperties();
+  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
+  const fixture = makeFuLifecycleFixture({
+    sheetId: 6102,
+    date: new Date(2026, 7, 20),
+    chartNo: 'NEW-ROW'
+  });
+  seedFuLifecycleRegistry(fixture, [
+    makeFuRegistryEntry(fixture, 'event-stale-other', {
+      row: 90,
+      rowHash: 'stale-other-row',
+      bindingHash: 'stale-other-binding'
+    })
+  ]);
+  const api = installCalendarMock();
+  const result = call(
+    'syncManagedRowsAt_',
+    fixture.spreadsheet,
+    fixture.sheet,
+    [2]
+  );
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.results[0].result.status, 'created');
+  assert.strictEqual(api.counts().insertCount, 1);
+  const loaded = call('readCalendarRegistryStore_');
+  assert.ok(loaded.entries.some(entry => {
+    return entry.eventId === 'created-1' && !entry.pendingResolution;
+  }));
+  assert.ok(loaded.entries.some(entry => {
+    return entry.eventId === 'event-stale-other' && entry.pendingResolution;
+  }));
+}
+
+function makeFuLifecycleFixture(options = {}) {
+  const headers = plain(evaluate('CONFIG.HEADERS'));
+  const row = Array(headers.length).fill('');
+  row[headers.indexOf('病歷號')] = options.chartNo || 'LIFE-001';
+  row[headers.indexOf('姓名')] = options.patientName || '';
+  row[headers.indexOf('Condition')] = options.condition || '追蹤';
+  row[headers.indexOf('日期')] = options.date || '';
+  row[headers.indexOf('CalendarEventId')] = options.eventId || '';
+  const sheet = new FakeSheet(
+    'FU',
+    options.sheetId === undefined ? 6201 : options.sheetId,
+    [headers, row]
+  );
+  const spreadsheet = makeFakeSpreadsheet(
+    [sheet],
+    options.spreadsheetId || 'fu-lifecycle-test'
+  );
+  const columns = call('getRequiredFuColumns_', sheet);
+  const contextValue = call('buildFuRowContext_', sheet, 2, columns);
+  return { headers, row, sheet, spreadsheet, columns, context: contextValue };
+}
+
+function seedFuLifecycleRegistry(fixture, entries) {
+  call(
+    'writeCalendarRegistryStore_',
+    registryScan(
+      [],
+      [{
+        sheetId: fixture.sheet.getSheetId(),
+        sheetName: 'FU',
+        kind: 'FU',
+        archived: false,
+        fastFingerprint: 'fixture'
+      }]
+    ),
+    entries
+  );
+}
+
+function makeFuRegistryEntry(fixture, eventId, overrides = {}) {
+  return {
+    ...registryEntry({
+      eventId,
+      sheetId: fixture.sheet.getSheetId(),
+      sheetName: 'FU',
+      kind: 'FU',
+      row: 2,
+      blockKey: '2026-07-01',
+      rowHash: 'historical-row-hash',
+      bindingHash: fixture.context.bindingHash,
+      ...overrides
+    })
+  };
+}
+
+function testFuDateAndIdClearUsesUniqueBindingAndDeletesEvent() {
+  clearScriptProperties();
+  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
+  const fixture = makeFuLifecycleFixture();
+  seedFuLifecycleRegistry(fixture, [
+    makeFuRegistryEntry(fixture, 'event-old')
+  ]);
+  const api = installCalendarMock({
+    initialEvents: [{
+      id: 'event-old',
+      summary: 'LIFE-001 |  | 追蹤',
+      description: 'Plan: lifecycle',
+      colorId: '8',
+      start: { date: '2026-07-01' },
+      end: { date: '2026-07-02' }
+    }]
+  });
+  const result = call(
+    'syncManagedRowsAt_',
+    fixture.spreadsheet,
+    fixture.sheet,
+    [2]
+  );
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.results[0].result.status, 'deleted');
+  assert.strictEqual(api.counts().removeCount, 1);
+  assert.strictEqual(api.counts().insertCount, 0);
+  assert.strictEqual(
+    fixture.sheet.valueAt(2, fixture.columns.EVENT_ID),
+    ''
+  );
+  assert.strictEqual(fixture.sheet.valueAt(2, fixture.columns.CHART_NO), 'LIFE-001');
+  const loaded = call('readCalendarRegistryStore_');
+  assert.strictEqual(
+    loaded.entries.some(entry => entry.eventId === 'event-old'),
+    false
+  );
+}
+
+function testFuRecoveredDeleteFailureStillStopsTracking() {
+  clearScriptProperties();
+  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
+  const fixture = makeFuLifecycleFixture({ sheetId: 6202 });
+  seedFuLifecycleRegistry(fixture, [
+    makeFuRegistryEntry(fixture, 'event-delete-fails')
+  ]);
+  installCalendarMock({
+    initialEvents: [{
+      id: 'event-delete-fails',
+      summary: 'LIFE-001 |  | 追蹤',
+      description: 'Plan: lifecycle',
+      colorId: '8',
+      start: { date: '2026-07-01' },
+      end: { date: '2026-07-02' }
+    }],
+    removeError: '503 temporary delete failure'
+  });
+  const result = call(
+    'syncManagedRowsAt_',
+    fixture.spreadsheet,
+    fixture.sheet,
+    [2]
+  );
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.results[0].result.status, 'tracking_stopped');
+  assert.strictEqual(
+    result.results[0].result.calendarDeleteStatus,
+    'delete_failed'
+  );
+  assert.strictEqual(
+    fixture.sheet.valueAt(2, fixture.columns.EVENT_ID),
+    ''
+  );
+  assert.strictEqual(
+    fixture.sheet.noteAt(2, fixture.columns.CHART_NO),
+    ''
+  );
+  const loaded = call('readCalendarRegistryStore_');
+  const pending = loaded.entries.find(entry => {
+    return entry.eventId === 'event-delete-fails';
+  });
+  assert.strictEqual(pending, undefined);
+}
+
+function testInstallPreflightIgnoresUniqueFuStoppedTrackingConflict() {
+  const fixture = makeFuLifecycleFixture({ sheetId: 6204 });
+  const previous = makeFuRegistryEntry(fixture, 'event-stopped');
+  const conflict = {
+    type: 'event_id_removed_or_partial_move',
+    eventId: previous.eventId,
+    context: fixture.context,
+    previous
+  };
+  assert.strictEqual(
+    call('isIgnorableFuStoppedTrackingConflict_', conflict),
+    true
+  );
+  assert.strictEqual(
+    call('isIgnorableFuStoppedTrackingConflict_', {
+      ...conflict,
+      type: 'multiple_binding_match'
+    }),
+    false
+  );
+  const dated = makeFuLifecycleFixture({
+    sheetId: 6205,
+    date: new Date(2026, 7, 20)
+  });
+  assert.strictEqual(
+    call('isIgnorableFuStoppedTrackingConflict_', {
+      ...conflict,
+      context: dated.context
+    }),
+    false
+  );
+}
+
+function testFuStopTrackingContextAllowsNonBindingChanges() {
+  const fixture = makeFuLifecycleFixture({ sheetId: 6206 });
+  const item = {
+    action: 'stop_tracking',
+    sheetId: fixture.sheet.getSheetId(),
+    row: 2,
+    rowHash: 'stale-non-binding-row-hash',
+    bindingHash: fixture.context.bindingHash
+  };
+  const recovered = call(
+    'getFuLifecycleMigrationContext_',
+    fixture.spreadsheet,
+    item
+  );
+  assert.ok(recovered);
+  assert.strictEqual(recovered.row, 2);
+  assert.strictEqual(
+    call(
+      'getFuLifecycleMigrationContext_',
+      fixture.spreadsheet,
+      { ...item, action: 'rebind' }
+    ),
+    null
+  );
+
+  const stillBound = makeFuLifecycleFixture({
+    sheetId: 6207,
+    eventId: 'same-preview-event'
+  });
+  const stillBoundItem = {
+    action: 'stop_tracking',
+    sheetId: stillBound.sheet.getSheetId(),
+    row: 2,
+    rowHash: 'stale-non-binding-row-hash',
+    bindingHash: stillBound.context.bindingHash,
+    eventId: 'same-preview-event'
+  };
+  assert.ok(call(
+    'getFuLifecycleMigrationContext_',
+    stillBound.spreadsheet,
+    stillBoundItem
+  ));
+  assert.ok(call(
+    'getFuLifecycleMigrationContext_',
+    stillBound.spreadsheet,
+    {
+      ...stillBoundItem,
+      bindingHash: 'event-binding-does-not-match-stale-row'
+    }
+  ));
+  assert.strictEqual(
+    call(
+      'getFuLifecycleMigrationContext_',
+      stillBound.spreadsheet,
+      { ...stillBoundItem, eventId: 'different-event' }
+    ),
+    null
+  );
+
+  const zeroSheetId = makeFuLifecycleFixture({
+    sheetId: 0,
+    eventId: 'zero-sheet-event'
+  });
+  assert.ok(call(
+    'getFuLifecycleMigrationContext_',
+    zeroSheetId.spreadsheet,
+    {
+      action: 'stop_tracking',
+      sheetId: 0,
+      row: 2,
+      rowHash: zeroSheetId.context.rowHash,
+      bindingHash: zeroSheetId.context.bindingHash,
+      eventId: 'zero-sheet-event'
+    }
+  ));
+}
+
+function testFuAmbiguousBindingNeverCallsCalendar() {
+  clearScriptProperties();
+  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
+  const fixture = makeFuLifecycleFixture({ sheetId: 6203 });
+  seedFuLifecycleRegistry(fixture, [
+    makeFuRegistryEntry(fixture, 'event-a'),
+    makeFuRegistryEntry(fixture, 'event-b')
+  ]);
+  const api = installCalendarMock({
+    initialEvents: [
+      { id: 'event-a', summary: 'A', description: '' },
+      { id: 'event-b', summary: 'B', description: '' }
+    ]
+  });
+  const result = call(
+    'syncManagedRowsAt_',
+    fixture.spreadsheet,
+    fixture.sheet,
+    [2]
+  );
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(
+    result.results[0].result.status,
+    'pending_resolution'
+  );
+  assert.strictEqual(api.counts().removeCount, 0);
+  assert.strictEqual(api.counts().insertCount, 0);
+  const loaded = call('readCalendarRegistryStore_');
+  assert.strictEqual(
+    loaded.entries.filter(entry => entry.pendingResolution).length,
+    2
+  );
+}
+
+function testRegistryRoundTripIncludesBindingAndResolutionFingerprint() {
+  clearScriptProperties();
+  const scan = registryScan([registryContext()]);
+  const first = call('writeCalendarRegistryStore_', scan, []);
+  const retained = registryEntry({
+    pendingResolution: true,
+    pendingResolutionReason: 'ambiguous_binding',
+    pendingError: '虛構病患敏感錯誤內容'
+  });
+  const second = call('writeCalendarRegistryStore_', registryScan([]), [retained]);
+  assert.notStrictEqual(first.fingerprint, second.fingerprint);
+  const loaded = call('readCalendarRegistryStore_');
+  assert.strictEqual(loaded.entries[0].bindingHash, 'binding-hash-1');
+  assert.strictEqual(loaded.entries[0].pendingResolution, true);
+  assert.strictEqual(
+    loaded.entries[0].pendingResolutionReason,
+    'ambiguous_binding'
+  );
+  assert.strictEqual(
+    loaded.entries[0].pendingError,
+    'legacy_error_redacted'
+  );
+  assert.strictEqual(
+    JSON.stringify(scriptPropertyStore).includes('虛構病患敏感錯誤內容'),
+    false
+  );
+  assert.strictEqual(Object.hasOwn(loaded.entries[0], 'patientName'), false);
+}
+
+function testFuLifecycleMigrationPreviewAndApplyStopTracking() {
+  clearScriptProperties();
+  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
+  const fixture = makeFuLifecycleFixture({ sheetId: 6301 });
+  seedFuLifecycleRegistry(fixture, [
+    makeFuRegistryEntry(fixture, 'migration-event', { bindingHash: '' }),
+    registryEntry({
+      eventId: 'unrelated-monthly-event',
+      sheetId: 9999,
+      sheetName: '202607',
+      kind: 'MONTHLY',
+      row: 5,
+      rowHash: 'unrelated-monthly-row',
+      bindingHash: 'unrelated-monthly-binding'
+    })
+  ]);
+  const api = installCalendarMock({
+    initialEvents: [{
+      id: 'migration-event',
+      summary: 'LIFE-001 |  | 追蹤',
+      description: 'Plan: legacy migration',
+      colorId: '8',
+      start: { date: '2026-07-01' },
+      end: { date: '2026-07-02' }
+    }]
+  });
+  const preview = call(
+    'buildFuLifecycleRecoveryMigrationPlan_',
+    fixture.spreadsheet
+  );
+  assert.strictEqual(preview.ok, true);
+  assert.strictEqual(preview.counts.stopTracking, 1);
+  assert.strictEqual(preview.items[0].action, 'stop_tracking');
+  assert.strictEqual(JSON.stringify(preview).includes('LIFE-001'), false);
+  const result = call(
+    'applyFuLifecycleRecoveryMigrationPlan_',
+    fixture.spreadsheet,
+    preview,
+    { confirmedOrphanIds: [] }
+  );
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(api.counts().removeCount, 1);
+  assert.strictEqual(api.events['migration-event'], undefined);
+  assert.strictEqual(fixture.sheet.valueAt(2, fixture.columns.CHART_NO), 'LIFE-001');
+  const remaining = call('readCalendarRegistryStore_').entries;
+  assert.deepStrictEqual(
+    plain(remaining.map(entry => entry.eventId)),
+    ['unrelated-monthly-event']
+  );
+  assert.ok(result.backup.partCount >= 1);
+  assert.ok(scriptPropertyStore[result.backup.manifestKey]);
+}
+
+function testFuLifecycleMigrationRepairsTwoVerifiedDuplicateGroups() {
+  clearScriptProperties();
+  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
+  const headers = plain(evaluate('CONFIG.HEADERS'));
+  const makeRow = values => {
+    const row = Array(headers.length).fill('');
+    Object.entries(values).forEach(([header, value]) => {
+      row[headers.indexOf(header)] = value;
+    });
+    return row;
+  };
+  const rows = [
+    headers,
+    makeRow({
+      病歷號: 'DUP-A',
+      姓名: '虛構甲',
+      Condition: '追蹤甲',
+      日期: new Date(2026, 7, 28),
+      CalendarEventId: 'keep-a'
+    }),
+    makeRow({
+      病歷號: 'DUP-B',
+      姓名: '虛構乙',
+      Condition: '追蹤乙',
+      日期: new Date(2026, 9, 12),
+      CalendarEventId: 'keep-b'
+    }),
+    makeRow({
+      病歷號: 'HISTORY-ONLY',
+      姓名: '特殊案例保留',
+      Condition: '不再追蹤',
+      CalendarEventId: 'stale-b'
+    })
+  ];
+  const sheet = new FakeSheet('FU', 6401, rows);
+  const spreadsheet = makeFakeSpreadsheet(
+    [sheet],
+    'fu-duplicate-lifecycle-test'
+  );
+  const scan = call('buildCurrentCalendarScan_', spreadsheet);
+  const keepAContext = scan.contexts.find(item => item.eventId === 'keep-a');
+  const keepBContext = scan.contexts.find(item => item.eventId === 'keep-b');
+  const staleContext = scan.contexts.find(item => item.eventId === 'stale-b');
+  call('writeCalendarRegistryStore_', scan, []);
+
+  const keepA = {
+    id: 'keep-a',
+    ...plain(call('buildCalendarResource_', keepAContext))
+  };
+  const keepB = {
+    id: 'keep-b',
+    ...plain(call('buildCalendarResource_', keepBContext))
+  };
+  const api = installCalendarMock({
+    initialEvents: [
+      keepA,
+      keepB,
+      {
+        ...keepA,
+        id: 'orphan-a',
+        description: ''
+      },
+      {
+        ...keepB,
+        id: 'stale-b',
+        description: 'Plan: 舊資料略有差異'
+      }
+    ]
+  });
+  const preview = call(
+    'buildFuLifecycleRecoveryMigrationPlan_',
+    spreadsheet
+  );
+  assert.strictEqual(preview.ok, true);
+  assert.strictEqual(preview.counts.stopTracking, 1);
+  assert.strictEqual(preview.counts.orphanDelete, 1);
+  assert.strictEqual(preview.counts.manual, 0);
+  assert.strictEqual(preview.counts.actionable, 2);
+  const stop = preview.items.find(item => item.eventId === 'stale-b');
+  const orphan = preview.items.find(item => item.eventId === 'orphan-a');
+  assert.strictEqual(stop.action, 'stop_tracking');
+  assert.strictEqual(stop.row, staleContext.row);
+  assert.ok(stop.duplicateGroupHash);
+  assert.strictEqual(orphan.action, 'orphan_delete');
+  assert.strictEqual(orphan.reason, 'fu_duplicate_without_data_source');
+  assert.ok(orphan.duplicateGroupHash);
+  assert.strictEqual(JSON.stringify(preview).includes('虛構甲'), false);
+
+  const before = sheet.rows[staleContext.row - 1].slice();
+  const result = call(
+    'applyFuLifecycleRecoveryMigrationPlan_',
+    spreadsheet,
+    preview,
+    { confirmedOrphanIds: ['orphan-a'] }
+  );
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(api.counts().removeCount, 2);
+  assert.ok(api.events['keep-a']);
+  assert.ok(api.events['keep-b']);
+  assert.strictEqual(api.events['orphan-a'], undefined);
+  assert.strictEqual(api.events['stale-b'], undefined);
+  const eventIdColumn = headers.indexOf('CalendarEventId');
+  const after = sheet.rows[staleContext.row - 1].slice();
+  assert.strictEqual(after[eventIdColumn], '');
+  before.forEach((value, index) => {
+    if (index !== eventIdColumn) assert.strictEqual(after[index], value);
+  });
+  assert.deepStrictEqual(
+    plain(call('readCalendarRegistryStore_').entries.map(entry => {
+      return entry.eventId;
+    }).sort()),
+    ['keep-a', 'keep-b']
+  );
+}
+
+function testFuLifecycleMigrationIgnoresCancelledMonthlyGrayEvent() {
+  clearScriptProperties();
+  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
+  const fixture = makeFuLifecycleFixture({ sheetId: 6402 });
+  seedFuLifecycleRegistry(fixture, []);
+  installCalendarMock({
+    initialEvents: [{
+      id: 'cancelled-monthly',
+      summary: 'LIFE-001 |  | 追蹤',
+      description: 'Plan: 月表取消',
+      colorId: '8',
+      start: { date: '2026-07-01' },
+      end: { date: '2026-07-02' },
+      extendedProperties: {
+        private: {
+          surgerySyncKind: 'MONTHLY',
+          surgerySyncState: 'CANCELLED'
+        }
+      }
+    }]
+  });
+  const preview = call(
+    'buildFuLifecycleRecoveryMigrationPlan_',
+    fixture.spreadsheet
+  );
+  assert.strictEqual(preview.ok, true);
+  assert.strictEqual(preview.items.length, 0);
+  assert.strictEqual(preview.counts.orphanDelete, 0);
+  assert.strictEqual(
+    call(
+      'isFuLifecycleMigrationManagedEvent_',
+      context.Calendar.Events.get('calendar@example.test', 'cancelled-monthly'),
+      true
+    ),
+    false
+  );
+}
+
+function testFuLifecycleMigrationRecreatesValid404Event() {
+  clearScriptProperties();
+  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
+  const fixture = makeFuLifecycleFixture({
+    sheetId: 6304,
+    date: new Date(2026, 7, 20),
+    eventId: 'missing-valid-event'
+  });
+  seedFuLifecycleRegistry(fixture, [
+    makeFuRegistryEntry(fixture, 'missing-valid-event', {
+      rowHash: fixture.context.rowHash,
+      bindingHash: fixture.context.bindingHash
+    })
+  ]);
+  const api = installCalendarMock();
+  const preview = call(
+    'buildFuLifecycleRecoveryMigrationPlan_',
+    fixture.spreadsheet
+  );
+  assert.strictEqual(preview.ok, true);
+  assert.strictEqual(preview.counts.recreateMissing, 1);
+  const result = call(
+    'applyFuLifecycleRecoveryMigrationPlan_',
+    fixture.spreadsheet,
+    preview,
+    { confirmedOrphanIds: [] }
+  );
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(api.counts().updateCount, 1);
+  assert.strictEqual(api.counts().insertCount, 1);
+  assert.strictEqual(
+    fixture.sheet.valueAt(2, fixture.columns.EVENT_ID),
+    'created-1'
+  );
+  const ids = call('readCalendarRegistryStore_').entries.map(entry => {
+    return entry.eventId;
+  });
+  assert.deepStrictEqual(plain(ids), ['created-1']);
+}
+
+function testFuLifecycleMigrationPlansRebind404OrphanAndManual() {
+  clearScriptProperties();
+  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
+  const fixture = makeFuLifecycleFixture({
+    sheetId: 6302,
+    date: new Date(2026, 7, 20)
+  });
+  seedFuLifecycleRegistry(fixture, [
+    makeFuRegistryEntry(fixture, 'event-missing', {
+      row: 80,
+      bindingHash: 'unmatched-old-binding'
+    }),
+    makeFuRegistryEntry(fixture, 'event-read-fails', {
+      row: 81,
+      bindingHash: 'unmatched-error-binding'
+    })
+  ]);
+  installCalendarMock({
+    initialEvents: [
+      {
+        id: 'event-rebind',
+        summary: 'LIFE-001 |  | 追蹤',
+        description: 'Plan: rebind',
+        colorId: '8',
+        start: { date: '2026-08-20' },
+        end: { date: '2026-08-21' }
+      },
+      {
+        id: 'event-orphan',
+        summary: 'ORPHAN |  | 追蹤',
+        description: 'Plan: orphan',
+        colorId: '8',
+        start: { date: '2026-08-01' },
+        end: { date: '2026-08-02' }
+      }
+    ],
+    getErrorIds: ['event-read-fails']
+  });
+  const preview = call(
+    'buildFuLifecycleRecoveryMigrationPlan_',
+    fixture.spreadsheet
+  );
+  assert.strictEqual(preview.ok, true);
+  assert.strictEqual(preview.counts.rebind, 1);
+  assert.strictEqual(preview.counts.removeMissing, 1);
+  assert.strictEqual(preview.counts.orphanDelete, 1);
+  assert.strictEqual(preview.counts.manual, 1);
+  const originalFingerprint = preview.fingerprint;
+  fixture.sheet.setValueAt(2, fixture.columns.COND, '追蹤已變更');
+  const changed = call(
+    'buildFuLifecycleRecoveryMigrationPlan_',
+    fixture.spreadsheet
+  );
+  assert.notStrictEqual(changed.fingerprint, originalFingerprint);
+}
+
+function testFuLifecycleMigrationAmbiguityIsFailClosed() {
+  clearScriptProperties();
+  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
+  const fixture = makeFuLifecycleFixture({
+    sheetId: 6303,
+    date: new Date(2026, 7, 20),
+    eventId: 'ambiguous-keeper'
+  });
+  seedFuLifecycleRegistry(fixture, [
+    makeFuRegistryEntry(fixture, 'ambiguous-keeper', {
+      rowHash: fixture.context.rowHash,
+      bindingHash: fixture.context.bindingHash
+    })
+  ]);
+  const makeEvent = id => ({
+    id,
+    summary: 'LIFE-001 |  | 追蹤',
+    description: 'Plan: ambiguous',
+    colorId: '8',
+    start: { date: '2026-08-20' },
+    end: { date: '2026-08-21' }
+  });
+  const api = installCalendarMock({
+    initialEvents: [
+      makeEvent('ambiguous-keeper'),
+      makeEvent('ambiguous-a'),
+      makeEvent('ambiguous-b')
+    ]
+  });
+  const preview = call(
+    'buildFuLifecycleRecoveryMigrationPlan_',
+    fixture.spreadsheet
+  );
+  assert.strictEqual(preview.ok, true);
+  assert.strictEqual(preview.counts.manual, 3);
+  assert.strictEqual(preview.counts.stopTracking, 0);
+  assert.strictEqual(preview.counts.orphanDelete, 0);
+  assert.strictEqual(api.counts().removeCount, 0);
+}
+
 function testHtmlUsesCollapsedAdvancedAreaAndArchiveLanguage() {
   const fuHtml = fs.readFileSync(path.join(root, 'fu_to_monthly.html'), 'utf8');
   const rollupHtml = fs.readFileSync(path.join(root, 'monthly_rollup.html'), 'utf8');
@@ -3719,6 +4954,8 @@ const tests = [
   testRepairEventFingerprintIgnoresApiObjectKeyOrder,
   testMonthlyConditionComposition,
   testCalendarResourceTimedAndAllDay,
+  testMonthlyStrikethroughControlsCancellationColorAndMarker,
+  testFuIgnoresStrikethroughAndFormatQueuesCalendarScanOnly,
   testArbitraryHeaderOrderUsesNames,
   testDuplicateHeadersAreDiagnosed,
   testFuNameOnlyRowIsValid,
@@ -3730,6 +4967,10 @@ const tests = [
   testRegistryMissingIdNewRowCreatesEvent,
   testRegistryManualIdClearIsConflictNotDuplicateCreate,
   testRegistryNativeRowDeleteDeletesEvent,
+  testRegistryDeleteNeverUsesShiftedRowNumberAsIdentity,
+  testRegistryBindingMatchPreventsUnsafeRowDelete,
+  testPendingResolutionIsNotDeletedByLaterUnrelatedRemoveRow,
+  testPendingResolutionClearsWhenSameBindingIdReturns,
   testRegistryAmbiguousMissingRowWaitsForConfirmation,
   testRegistryWholeSheetDeletionNeverDeletesEvents,
   testRegistryHeaderDeletionDoesNotBatchReschedule,
@@ -3746,7 +4987,9 @@ const tests = [
   testColumnWidthsAndFonts,
   testExplicitColumnWidthsPreserveCustomColumns,
   testMonthlyClinicalIdentifiersDefaultToPlainText,
-  testMonthlyHeaderConditionalFormatUsesEventIdNotEmptyPatientFields,
+  testMonthlyTextFormatsOnlyInitializeSystemCreatedRows,
+  testMonthlyIolTextInputsHaveNoPostEditRewrite,
+  testMonthlyHeaderConditionalFormatUsesExactMarker,
   testPlanConditionalFormatMarkersAndPriority,
   testConditionalFormatCleanupRemovesCurrentAndLegacySystemRules,
   testPermanentArchiveIsPrivateTransactionalAndCalendarFree,
@@ -3770,6 +5013,23 @@ const tests = [
   testRegistryChunkRoundTrip,
   testRetainedRegistryEntryOverridesCurrentScopedScan,
   testPendingDeleteIsRetried,
+  testRemoveRowQueuePreservesDeletionSemantics,
+  testNativeRemoveRowsDeletesEventsAndUpdatesRegistry,
+  testNativeRemoveRowDeleteFailureKeepsPendingDelete,
+  testSingleSheetRefreshIsolatesMissingRegistryEntry,
+  testPendingResolutionDoesNotBlockUnrelatedFuCreate,
+  testFuDateAndIdClearUsesUniqueBindingAndDeletesEvent,
+  testFuRecoveredDeleteFailureStillStopsTracking,
+  testInstallPreflightIgnoresUniqueFuStoppedTrackingConflict,
+  testFuStopTrackingContextAllowsNonBindingChanges,
+  testFuAmbiguousBindingNeverCallsCalendar,
+  testRegistryRoundTripIncludesBindingAndResolutionFingerprint,
+  testFuLifecycleMigrationPreviewAndApplyStopTracking,
+  testFuLifecycleMigrationRepairsTwoVerifiedDuplicateGroups,
+  testFuLifecycleMigrationIgnoresCancelledMonthlyGrayEvent,
+  testFuLifecycleMigrationRecreatesValid404Event,
+  testFuLifecycleMigrationPlansRebind404OrphanAndManual,
+  testFuLifecycleMigrationAmbiguityIsFailClosed,
   testHtmlUsesCollapsedAdvancedAreaAndArchiveLanguage,
   testClaspIncludesAllRuntimeModules
 ];
