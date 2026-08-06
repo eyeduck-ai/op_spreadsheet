@@ -148,7 +148,8 @@ function createOrInitializeMonthlySheet_(spreadsheet, monthName) {
   const created = !sheet;
   if (!sheet) sheet = spreadsheet.insertSheet(monthName);
   const format = applyMonthlyFormatting_(sheet, {
-    forceWidths: created
+    forceWidths: created,
+    initializeTextInputs: created
   });
   const addedBlocks = ensureDefaultMonthlyBlocks_(sheet, format.columns);
   return { sheet, created, addedBlocks, columns: format.columns };
@@ -190,6 +191,12 @@ function buildSurgeryDateInsertionPreview_(sheet, insertRow, date) {
   }
   const columns = getRequiredMonthlyColumns_(sheet);
   const scan = scanMonthlyBlocks_(sheet, columns);
+  const cancelledRows = readMonthlyCancelledRows_(
+    sheet,
+    columns,
+    scan.firstRow || 2,
+    (scan.values || []).length
+  );
   const conflicts = getMonthlyStructureIssues_(sheet, scan)
     .filter(issue => issue.severity === 'conflict');
   if (conflicts.length) {
@@ -210,7 +217,8 @@ function buildSurgeryDateInsertionPreview_(sheet, insertRow, date) {
         patient,
         block,
         columns,
-        false
+        false,
+        cancelledRows
       );
     });
   });
@@ -220,7 +228,8 @@ function buildSurgeryDateInsertionPreview_(sheet, insertRow, date) {
       patient,
       null,
       columns,
-      false
+      false,
+      cancelledRows
     );
   });
   const affectedRows = Object.keys(contextsByRow)
@@ -1123,6 +1132,12 @@ function locateCachedMonthlySchedule_(spreadsheet, cached) {
     const sheet = sheets[sheetIndex];
     const columns = getRequiredMonthlyColumns_(sheet);
     const scan = scanMonthlyBlocks_(sheet, columns);
+    const cancelledRows = readMonthlyCancelledRows_(
+      sheet,
+      columns,
+      scan.firstRow || 2,
+      (scan.values || []).length
+    );
     if (
       Number(sheet.getSheetId()) === Number(cached.sheetId) &&
       Number(cached.row) >= 2
@@ -1138,7 +1153,8 @@ function locateCachedMonthlySchedule_(spreadsheet, cached) {
           patient,
           block,
           columns,
-          false
+          false,
+          cancelledRows
         );
         const idMatches = cached.eventId &&
           context.eventId === cached.eventId;
@@ -1163,7 +1179,8 @@ function locateCachedMonthlySchedule_(spreadsheet, cached) {
           patient,
           block,
           columns,
-          false
+          false,
+          cancelledRows
         );
         const idMatches = cached.eventId &&
           context.eventId === cached.eventId;
@@ -1372,7 +1389,8 @@ function submitFuToMonthlySchedule(payload) {
       { row, values: written },
       block,
       columns,
-      false
+      false,
+      {}
     );
     if (!createdContext.valid) {
       throw new Error('新建月份資料列無法建立安全重送指紋；未呼叫 Calendar。');

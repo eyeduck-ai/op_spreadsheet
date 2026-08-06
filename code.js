@@ -9,7 +9,7 @@
  * - annual_archive.js：私人備份與永久年度封存
  */
 const CONFIG = {
-  VERSION: '2026.07.28.3',
+  VERSION: '2026.08.06.4',
   CALENDAR_ID: 'YOUR_CALENDAR_ID_HERE',
   SHEET_ALL: 'All',
   SHEET_FU: 'FU',
@@ -167,6 +167,7 @@ const CONFIG = {
     MONTHLY_TIMED: '10',
     MONTHLY_UNDECIDED: '2',
     MONTHLY_GA: '4',
+    MONTHLY_CANCELLED: '8',
     FU: '8'
   }
 };
@@ -193,6 +194,10 @@ const CALENDAR_SYNC_NOTE_PREFIX = '系統日曆同步：';
 const CALENDAR_CONFLICT_NOTE_PREFIX = '系統同步衝突：';
 const MONTHLY_STRUCTURE_NOTE_PREFIX = '系統刀日結構：';
 const CALENDAR_TITLE_SEPARATOR = '|';
+const CALENDAR_PRIVATE_KIND_KEY = 'surgerySyncKind';
+const CALENDAR_PRIVATE_STATE_KEY = 'surgerySyncState';
+const CALENDAR_PRIVATE_MONTHLY_KIND = 'MONTHLY';
+const CALENDAR_PRIVATE_CANCELLED_STATE = 'CANCELLED';
 const CALENDAR_ON_EDIT_HANDLER = 'processRowChange';
 const CALENDAR_ON_CHANGE_HANDLER = 'processCalendarStructureChange';
 const CALENDAR_PENDING_RETRY_HANDLER = 'retryPendingCalendarSync';
@@ -223,6 +228,11 @@ const ANNUAL_ARCHIVE_TRANSACTION_PROPERTY =
   'ANNUAL_SURGERY_ARCHIVE_TRANSACTION_V1';
 const LEGACY_ARCHIVED_MONTHS_PROPERTY = 'ARCHIVED_MONTHLY_SHEETS_V1';
 const HEALTH_REPORT_SHEET = '同步健康報告';
+const FU_LIFECYCLE_RECOVERY_PREVIEW_PROPERTY =
+  'FU_LIFECYCLE_RECOVERY_PREVIEW_V1';
+const FU_LIFECYCLE_RECOVERY_BACKUP_PREFIX =
+  'FU_LIFECYCLE_RECOVERY_REGISTRY_BACKUP_V1';
+const FU_LIFECYCLE_RECOVERY_MIGRATION_VERSION = 2;
 
 function toCellText_(value) {
   return value === null || value === undefined ? '' : String(value).trim();
@@ -590,6 +600,15 @@ function onOpen() {
     .addSeparator()
     .addItem('檢查同步健康', 'checkSyncHealth')
     .addItem('同步待處理變更', 'syncPendingChanges')
+    .addSeparator()
+    .addItem(
+      '預覽 FU 追蹤生命週期修復',
+      'previewFuLifecycleRecoveryMigration'
+    )
+    .addItem(
+      '執行 FU 追蹤生命週期修復',
+      'executeFuLifecycleRecoveryMigration'
+    )
     .addItem(`版本：${CONFIG.VERSION}`, 'showVersionInfo');
 
   ui.createMenu('手術排程系統')
