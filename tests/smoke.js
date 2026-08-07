@@ -217,10 +217,11 @@ class FakeRange {
   }
 
   getFormula() {
-    return '';
+    return this.sheet.formulaAt(this.row, this.column);
   }
 
   setValue(value) {
+    this.sheet.setFormulaAt(this.row, this.column, '');
     this.sheet.setValueAt(this.row, this.column, value);
     this.sheet.calls.setValues++;
     return this;
@@ -229,6 +230,11 @@ class FakeRange {
   setValues(values) {
     for (let rowOffset = 0; rowOffset < this.numRows; rowOffset++) {
       for (let columnOffset = 0; columnOffset < this.numColumns; columnOffset++) {
+        this.sheet.setFormulaAt(
+          this.row + rowOffset,
+          this.column + columnOffset,
+          ''
+        );
         this.sheet.setValueAt(
           this.row + rowOffset,
           this.column + columnOffset,
@@ -240,9 +246,24 @@ class FakeRange {
     return this;
   }
 
+  setFormula(formula) {
+    this.sheet.setFormulaAt(this.row, this.column, formula);
+    this.sheet.calls.setFormulas++;
+    return this;
+  }
+
+  setFormulaR1C1(formula) {
+    return this.setFormula(formula);
+  }
+
   clearContent() {
     for (let rowOffset = 0; rowOffset < this.numRows; rowOffset++) {
       for (let columnOffset = 0; columnOffset < this.numColumns; columnOffset++) {
+        this.sheet.setFormulaAt(
+          this.row + rowOffset,
+          this.column + columnOffset,
+          ''
+        );
         this.sheet.setValueAt(
           this.row + rowOffset,
           this.column + columnOffset,
@@ -381,6 +402,7 @@ class FakeSheet {
     this.calls = {
       getRange: 0,
       setValues: 0,
+      setFormulas: 0,
       sort: 0,
       insertColumnsAfter: 0,
       deleteColumns: 0,
@@ -568,6 +590,12 @@ class FakeSheet {
     return this.formulas[`${row}:${column}`] || '';
   }
 
+  setFormulaAt(row, column, formula) {
+    const key = `${row}:${column}`;
+    if (formula) this.formulas[key] = formula;
+    else delete this.formulas[key];
+  }
+
   fontLineAt(row, column) {
     return this.fontLines[`${row}:${column}`] || 'none';
   }
@@ -596,10 +624,14 @@ function makeFakeSpreadsheet(sheets, id = 'spreadsheet-test') {
 }
 
 function testVersionAndModuleSplit() {
-  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.08.06.4');
+  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.08.08');
   assert.strictEqual(evaluate('typeof processRowChange'), 'function');
   assert.strictEqual(evaluate('typeof processCalendarStructureChange'), 'function');
   assert.strictEqual(evaluate('typeof createMonthlySurgerySheet'), 'function');
+  assert.strictEqual(
+    evaluate('typeof migrateMonthlyDiagnosisSummaryHeaders'),
+    'function'
+  );
   assert.strictEqual(evaluate('typeof rebuildCalendarRegistry_'), 'function');
   assert.ok(sourceByFile['code.js'].includes('sheet_model.js'));
   assert.ok(sourceByFile['code.js'].includes('calendar_sync.js'));
@@ -656,6 +688,7 @@ function testCurrentMenuHasNoCompletedMigrationOrLegacyOutput() {
     '預覽 FU 追蹤生命週期修復',
     '執行 FU 追蹤生命週期修復',
     '套用所有 FU／月表建議欄寬',
+    '啟用／修復月表診斷統計表頭',
     '月刀表 => FU',
     'FU => 月刀表',
     '建立新月刀表',
@@ -2538,6 +2571,335 @@ function testDuplicateHeadersAreDiagnosed() {
   const sheet = new FakeSheet('FU', 1, [headers]);
   const info = call('getFuColumnInfo_', sheet);
   assert.ok(info.duplicateMessages.some(message => message.includes('姓名')));
+}
+
+function testMonthlyDiagnosisSummaryFormulaDefinition() {
+  const definitions = plain(call(
+    'getMonthlyDiagnosisSummaryDefinitions_'
+  ));
+  assert.deepStrictEqual(definitions, [
+    {
+      label: 'CATA',
+      keywords: ['CATA', 'Cataract']
+    },
+    {
+      label: 'Retina',
+      keywords: [
+        'VH',
+        'ERM',
+        'Subluxation',
+        'Dislocation',
+        'RRD',
+        'TRD',
+        'Subluxated IOL',
+        'RD'
+      ]
+    },
+    {
+      label: 'Plasty',
+      keywords: ['Dermatochalasis', 'Ptosis', 'Dacryocystitis']
+    }
+  ]);
+  const categories = plain(call('getMonthlyDiagnosisSummaryCategories_'));
+  assert.deepStrictEqual(categories, ['CATA', 'Retina', 'Plasty']);
+  const patterns = definitions.map(definition => call(
+    'buildMonthlyDiagnosisSummaryPattern_',
+    definition.keywords
+  ));
+  assert.deepStrictEqual(patterns, [
+    '(^|[^A-Z0-9])(CATA|CATARACT)([^A-Z0-9]|$)',
+    '(^|[^A-Z0-9])' +
+      '(VH|ERM|SUBLUXATION|DISLOCATION|RRD|TRD|SUBLUXATED IOL|RD)' +
+      '([^A-Z0-9]|$)',
+    '(^|[^A-Z0-9])' +
+      '(DERMATOCHALASIS|PTOSIS|DACRYOCYSTITIS)' +
+      '([^A-Z0-9]|$)'
+  ]);
+  const cataPattern = new RegExp(patterns[0], 'i');
+  const retinaPattern = new RegExp(patterns[1], 'i');
+  const plastyPattern = new RegExp(patterns[2], 'i');
+  assert.ok(cataPattern.test('cataract'));
+  assert.ok(retinaPattern.test('ERM(4)'));
+  assert.ok(retinaPattern.test('IOL subluxation with VH'));
+  assert.ok(retinaPattern.test('Subluxated IOL'));
+  assert.ok(retinaPattern.test('RD'));
+  assert.ok(retinaPattern.test('RRD'));
+  assert.ok(retinaPattern.test('TRD'));
+  assert.ok(retinaPattern.test('IOL dislocation'));
+  assert.strictEqual(retinaPattern.test('Dermatochalasis'), false);
+  assert.ok(plastyPattern.test('Acute dacryocystitis'));
+  assert.ok(cataPattern.test('Cataract + ptosis'));
+  assert.ok(plastyPattern.test('Cataract + ptosis'));
+  const formula = call('buildMonthlyDiagnosisSummaryFormula_', {
+    SIDE: 28,
+    DIAGNOSIS: 31
+  });
+  assert.ok(formula.startsWith('=LET('));
+  assert.ok(formula.includes('SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V2'));
+  assert.ok(formula.includes('TO_TEXT(IFERROR($AE$2:$AE,""))'));
+  assert.ok(formula.includes('TO_TEXT(IFERROR($AB$2:$AB,""))'));
+  assert.strictEqual(formula.includes('$G$2:$G'), false);
+  assert.strictEqual(formula.includes('$H$2:$H'), false);
+  assert.ok(formula.includes('IF(sideValues="OU",2'));
+  assert.ok(formula.includes('"^(OD|OS)$"),1,0'));
+  assert.ok(formula.includes(
+    '"(^|[^A-Z0-9])(CATA|CATARACT)([^A-Z0-9]|$)"'
+  ));
+  assert.ok(formula.includes(
+    '"(^|[^A-Z0-9])' +
+      '(VH|ERM|SUBLUXATION|DISLOCATION|RRD|TRD|SUBLUXATED IOL|RD)' +
+      '([^A-Z0-9]|$)"'
+  ));
+  assert.ok(formula.includes('TEXTJOIN(" | ",TRUE'));
+  assert.ok(formula.includes(
+    'managedMarker&"診斷"&IF(summaryText="","","｜"&summaryText)'
+  ));
+  assert.strictEqual(
+    (formula.match(/SUMPRODUCT\(/g) || []).length,
+    categories.length
+  );
+  let previousOutputIndex = -1;
+  categories.forEach((category, index) => {
+    const variable = `diagnosisCount${index + 1}`;
+    assert.ok(formula.includes(
+      `IF(${variable}>0,"${category} "&${variable},"")`
+    ));
+    const outputIndex = formula.indexOf(`"${category} "&${variable}`);
+    assert.ok(outputIndex > previousOutputIndex);
+    previousOutputIndex = outputIndex;
+  });
+}
+
+function testMonthlyDiagnosisSummaryHeadersStayCanonical() {
+  const standardHeaders = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
+  const diagnosisColumn = standardHeaders.indexOf('診斷') + 1;
+
+  const dynamicHeaders = standardHeaders.slice();
+  dynamicHeaders[diagnosisColumn - 1] = '診斷｜CATA 12 | Retina 2';
+  const dynamicSheet = new FakeSheet('202608', 2601, [dynamicHeaders]);
+  const dynamicInfo = call('getMonthlyColumnInfo_', dynamicSheet);
+  assert.strictEqual(dynamicInfo.columns.DIAGNOSIS, diagnosisColumn);
+  assert.strictEqual(dynamicInfo.missingKeys.length, 0);
+
+  const duplicateHeaders = dynamicHeaders.concat(['診斷']);
+  const duplicateSheet = new FakeSheet('202608', 2602, [duplicateHeaders]);
+  const duplicateInfo = call('getMonthlyColumnInfo_', duplicateSheet);
+  assert.ok(
+    duplicateInfo.duplicateMessages.some(message => {
+      return message.includes('診斷') &&
+        message.includes('H') &&
+        message.includes('X');
+    })
+  );
+
+  const errorHeaders = standardHeaders.slice();
+  errorHeaders[diagnosisColumn - 1] = '#ERROR!';
+  const errorSheet = new FakeSheet('202608', 2603, [errorHeaders]);
+  errorSheet.setFormulaAt(
+    1,
+    diagnosisColumn,
+    '=T(N("SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V1"))&"診斷"'
+  );
+  const errorInfo = call('getMonthlyColumnInfo_', errorSheet);
+  assert.strictEqual(errorInfo.columns.DIAGNOSIS, diagnosisColumn);
+  assert.strictEqual(errorInfo.missingKeys.length, 0);
+  assert.strictEqual(errorSheet.calls.getFormulas, 1);
+
+  const errorDuplicateHeaders = errorHeaders.concat(['診斷']);
+  const errorDuplicateSheet = new FakeSheet(
+    '202608',
+    2604,
+    [errorDuplicateHeaders]
+  );
+  errorDuplicateSheet.setFormulaAt(
+    1,
+    diagnosisColumn,
+    call('buildMonthlyDiagnosisSummaryFormula_', monthlyColumns())
+  );
+  const errorDuplicateInfo = call(
+    'getMonthlyColumnInfo_',
+    errorDuplicateSheet
+  );
+  assert.ok(
+    errorDuplicateInfo.duplicateMessages.some(message => {
+      return message.includes('診斷');
+    })
+  );
+}
+
+function testMonthlyDiagnosisSummaryMigrationIsSafeAndIdempotent() {
+  const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
+  const columns = monthlyColumns();
+  const diagnosisColumn = columns.DIAGNOSIS;
+  const dataRow = Array(headers.length).fill('');
+  dataRow[columns.SIDE - 1] = 'OU';
+  dataRow[columns.DIAGNOSIS - 1] = 'CATA + ERM';
+  dataRow[columns.CHART_NO - 1] = 'SAFE-001';
+
+  const plainSheet = new FakeSheet('202608', 2610, [
+    headers.slice(),
+    dataRow.slice()
+  ]);
+  const passive = call(
+    'ensureMonthlyDiagnosisSummaryHeader_',
+    plainSheet,
+    columns,
+    { enable: false }
+  );
+  assert.strictEqual(passive.status, 'plain');
+  assert.strictEqual(plainSheet.formulaAt(1, diagnosisColumn), '');
+
+  const expectedFormula = call(
+    'buildMonthlyDiagnosisSummaryFormula_',
+    columns
+  );
+  assert.ok(expectedFormula.includes(
+    'SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V2'
+  ));
+  assert.strictEqual(call(
+    'isManagedMonthlyDiagnosisSummaryFormula_',
+    '=T(N("SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V1"))&"診斷"'
+  ), true);
+  const currentSheet = new FakeSheet('202609', 2611, [headers.slice()]);
+  currentSheet.setFormulaAt(1, diagnosisColumn, expectedFormula);
+
+  const staleSheet = new FakeSheet('202610', 2612, [headers.slice()]);
+  staleSheet.setFormulaAt(
+    1,
+    diagnosisColumn,
+    '=T(N("SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V1"))&"診斷"'
+  );
+
+  const customSheet = new FakeSheet('202611', 2613, [
+    headers.slice(),
+    dataRow.slice()
+  ]);
+  const customFormula = '="人工診斷摘要"';
+  customSheet.setFormulaAt(1, diagnosisColumn, customFormula);
+
+  const spreadsheet = makeFakeSpreadsheet([
+    plainSheet,
+    currentSheet,
+    staleSheet,
+    customSheet,
+    new FakeSheet('備註', 2614, [['不處理']])
+  ], 'diagnosis-summary-migration');
+  const originalData = plain(plainSheet.rows.slice(1));
+  const plan = call(
+    'buildMonthlyDiagnosisSummaryMigrationPlan_',
+    spreadsheet
+  );
+  assert.deepStrictEqual(plain(plan.counts), {
+    enable: 1,
+    refresh: 1,
+    enabled: 0,
+    refreshed: 0,
+    unchanged: 1,
+    manual: 1
+  });
+  const previewText = call(
+    'buildMonthlyDiagnosisSummaryMigrationPreviewText_',
+    plan
+  );
+  assert.ok(previewText.includes('病人資料列複製：0'));
+  assert.ok(previewText.includes('病人資料列移除：0'));
+  assert.ok(previewText.includes('202611：診斷表頭已有非系統公式'));
+  const result = call('applyMonthlyDiagnosisSummaryMigrationPlan_', plan);
+  assert.deepStrictEqual(plain(result.counts), {
+    enable: 0,
+    refresh: 0,
+    enabled: 1,
+    refreshed: 1,
+    unchanged: 1,
+    manual: 1
+  });
+  assert.strictEqual(result.dataRowsCopied, 0);
+  assert.strictEqual(result.dataRowsRemoved, 0);
+  assert.strictEqual(result.calendarTouched, false);
+  const resultText = call(
+    'buildMonthlyDiagnosisSummaryMigrationResultText_',
+    result
+  );
+  assert.ok(resultText.includes('Calendar 變更：0'));
+  assert.strictEqual(
+    plainSheet.formulaAt(1, diagnosisColumn),
+    expectedFormula
+  );
+  assert.strictEqual(
+    staleSheet.formulaAt(1, diagnosisColumn),
+    expectedFormula
+  );
+  assert.strictEqual(customSheet.formulaAt(1, diagnosisColumn), customFormula);
+  assert.deepStrictEqual(plain(plainSheet.rows.slice(1)), originalData);
+  assert.deepStrictEqual(plain(customSheet.rows.slice(1)), originalData);
+
+  const setFormulaCalls = plainSheet.calls.setFormulas;
+  const secondPlan = call(
+    'buildMonthlyDiagnosisSummaryMigrationPlan_',
+    spreadsheet
+  );
+  assert.strictEqual(secondPlan.counts.unchanged, 3);
+  assert.strictEqual(secondPlan.counts.manual, 1);
+  const secondResult = call(
+    'applyMonthlyDiagnosisSummaryMigrationPlan_',
+    secondPlan
+  );
+  assert.strictEqual(secondResult.counts.unchanged, 3);
+  assert.strictEqual(secondResult.counts.manual, 1);
+  assert.strictEqual(plainSheet.calls.setFormulas, setFormulaCalls);
+
+  const workflowSource = sourceByFile['workflows.js'];
+  const createBody = workflowSource.slice(
+    workflowSource.indexOf('function createOrInitializeMonthlySheet_'),
+    workflowSource.indexOf('function createMonthlySurgerySheet')
+  );
+  assert.ok(createBody.includes('enableDiagnosisSummary: created'));
+}
+
+function testAnnualArchiveCanonicalizesDiagnosisSummaryHeader() {
+  const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
+  const columns = monthlyColumns();
+  headers[columns.DIAGNOSIS - 1] = '診斷｜CATA 4 | Retina 2';
+  const sheet = new FakeSheet('202608', 2620, [headers]);
+  const canonical = plain(call(
+    'getCanonicalMonthlyHeaderValues_',
+    sheet,
+    columns
+  ));
+  assert.strictEqual(
+    canonical[columns.DIAGNOSIS - 1],
+    evaluate('CONFIG.MONTHLY_FIELD_HEADERS.DIAGNOSIS')
+  );
+  assert.strictEqual(
+    sheet.valueAt(1, columns.DIAGNOSIS),
+    '診斷｜CATA 4 | Retina 2'
+  );
+  assert.strictEqual(
+    plain(call('getMonthlyCustomHeaders_', canonical))
+      .includes('診斷｜CATA 4 | Retina 2'),
+    false
+  );
+
+  const snapshot = {
+    values: Array(canonical.length).fill(''),
+    formulas: Array(canonical.length).fill(''),
+    notes: Array(canonical.length).fill('')
+  };
+  snapshot.values[columns.DIAGNOSIS - 1] = 'CATA';
+  const outputHeaders = plain(evaluate('CONFIG.MONTHLY_HEADERS'))
+    .filter(Boolean);
+  const mapped = call(
+    'remapArchiveSnapshot_',
+    snapshot,
+    canonical,
+    outputHeaders,
+    '202608',
+    'PATIENT'
+  );
+  assert.strictEqual(
+    mapped.values[outputHeaders.indexOf('診斷')],
+    'CATA'
+  );
 }
 
 function testFuNameOnlyRowIsValid() {
@@ -4958,6 +5320,10 @@ const tests = [
   testFuIgnoresStrikethroughAndFormatQueuesCalendarScanOnly,
   testArbitraryHeaderOrderUsesNames,
   testDuplicateHeadersAreDiagnosed,
+  testMonthlyDiagnosisSummaryFormulaDefinition,
+  testMonthlyDiagnosisSummaryHeadersStayCanonical,
+  testMonthlyDiagnosisSummaryMigrationIsSafeAndIdempotent,
+  testAnnualArchiveCanonicalizesDiagnosisSummaryHeader,
   testFuNameOnlyRowIsValid,
   testMonthlyNameOnlyRowIsValid,
   testRegistrySameBlockRowReorderNeedsNoApi,

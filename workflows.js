@@ -149,7 +149,8 @@ function createOrInitializeMonthlySheet_(spreadsheet, monthName) {
   if (!sheet) sheet = spreadsheet.insertSheet(monthName);
   const format = applyMonthlyFormatting_(sheet, {
     forceWidths: created,
-    initializeTextInputs: created
+    initializeTextInputs: created,
+    enableDiagnosisSummary: created
   });
   const addedBlocks = ensureDefaultMonthlyBlocks_(sheet, format.columns);
   return { sheet, created, addedBlocks, columns: format.columns };

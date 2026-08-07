@@ -9,7 +9,7 @@
  * - annual_archive.js：私人備份與永久年度封存
  */
 const CONFIG = {
-  VERSION: '2026.08.06.4',
+  VERSION: '2026.08.08',
   CALENDAR_ID: 'YOUR_CALENDAR_ID_HERE',
   SHEET_ALL: 'All',
   SHEET_FU: 'FU',
@@ -150,6 +150,29 @@ const CONFIG = {
     'Ptosis',
     'Dermatochalasis'
   ],
+  MONTHLY_DIAGNOSIS_SUMMARY_GROUPS: [
+    {
+      label: 'CATA',
+      keywords: ['CATA', 'Cataract']
+    },
+    {
+      label: 'Retina',
+      keywords: [
+        'VH',
+        'ERM',
+        'Subluxation',
+        'Dislocation',
+        'RRD',
+        'TRD',
+        'Subluxated IOL',
+        'RD'
+      ]
+    },
+    {
+      label: 'Plasty',
+      keywords: ['Dermatochalasis', 'Ptosis', 'Dacryocystitis']
+    }
+  ],
   MONTHLY_PROCEDURE_OPTIONS: [
     'Phaco-IOL',
     'LenSx-Phaco-IOL',
@@ -176,6 +199,12 @@ const CALENDAR_ID_PROPERTY = 'CALENDAR_ID';
 const LEGACY_EVENT_ID_HEADERS = ['日曆eventID', '日曆apiEventID'];
 const LEGACY_MONTHLY_TIME_HEADERS = ['時間'];
 const MONTHLY_DATE_HEADER_MARKER = '◆ 刀日';
+const MONTHLY_DIAGNOSIS_SUMMARY_FORMULA_MARKER =
+  'SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V2';
+const LEGACY_MONTHLY_DIAGNOSIS_SUMMARY_FORMULA_MARKERS = [
+  'SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V1'
+];
+const MONTHLY_DIAGNOSIS_SUMMARY_NOTE_PREFIX = '系統月表診斷統計：';
 const HOSPITAL_KAOH = '高榮';
 const HOSPITAL_UNION = '聯醫';
 const MONTHLY_TEMPLATE_BLANK_ROWS = 5;
@@ -596,6 +625,10 @@ function onOpen() {
     .addItem(
       '套用所有 FU／月表建議欄寬',
       'applyAllRecommendedColumnWidths'
+    )
+    .addItem(
+      '啟用／修復月表診斷統計表頭',
+      'migrateMonthlyDiagnosisSummaryHeaders'
     )
     .addSeparator()
     .addItem('檢查同步健康', 'checkSyncHealth')

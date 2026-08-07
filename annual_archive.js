@@ -357,7 +357,7 @@ function buildArchiveSourceSection_(sheet) {
       );
     }
   });
-  const headers = getSheetHeaderValues_(sheet);
+  const headers = getCanonicalMonthlyHeaderValues_(sheet, columns);
   const lastColumn = headers.length;
   const snapshots = captureMonthlyRows_(
     sheet,

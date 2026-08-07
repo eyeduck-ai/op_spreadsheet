@@ -112,6 +112,36 @@ function getLastHeaderColumn_(sheet) {
   return getLastHeaderColumnFromValues_(getSheetHeaderValues_(sheet));
 }
 
+function isSpreadsheetFormulaErrorHeader_(value) {
+  return /^#(?:ERROR!|REF!|VALUE!|NAME\?|N\/A|NUM!|DIV\/0!|NULL!)$/i
+    .test(toCellText_(value));
+}
+
+function isMonthlyDiagnosisSummaryHeaderText_(value) {
+  const text = toCellText_(value);
+  const header = CONFIG.MONTHLY_FIELD_HEADERS.DIAGNOSIS;
+  return text === header || text.indexOf(`${header}｜`) === 0;
+}
+
+function isManagedMonthlyDiagnosisSummaryFormula_(formula) {
+  const text = toCellText_(formula);
+  const markers = [MONTHLY_DIAGNOSIS_SUMMARY_FORMULA_MARKER].concat(
+    LEGACY_MONTHLY_DIAGNOSIS_SUMMARY_FORMULA_MARKERS || []
+  );
+  return markers.some(marker => {
+    const value = toCellText_(marker);
+    return value && text.indexOf(value) !== -1;
+  });
+}
+
+function resolveHeaderKeyFromMatchers_(value, matchers) {
+  for (let index = 0; index < (matchers || []).length; index++) {
+    const matcher = matchers[index];
+    if (matcher && matcher.matches(value)) return matcher.key;
+  }
+  return '';
+}
+
 function buildHeaderColumnMap_(sheet, headerByKey, fieldKeys, options) {
   const settings = options || {};
   const headers = getSheetHeaderValues_(sheet);
@@ -123,14 +153,46 @@ function buildHeaderColumnMap_(sheet, headerByKey, fieldKeys, options) {
     headerToKey[alias.header] = alias.key;
   });
 
+  const keyByIndex = headers.map(value => {
+    const header = toCellText_(value);
+    return headerToKey[header] || resolveHeaderKeyFromMatchers_(
+      header,
+      settings.headerMatchers
+    );
+  });
+  const formulaMatchers = settings.formulaMatchers || [];
+  const formulaKeys = {};
+  formulaMatchers.forEach(matcher => {
+    if (matcher && matcher.key) formulaKeys[matcher.key] = true;
+  });
+  const needsFormulaLookup = formulaMatchers.length && (
+    Object.keys(formulaKeys).some(key => keyByIndex.indexOf(key) === -1) ||
+    headers.some(isSpreadsheetFormulaErrorHeader_)
+  );
+  let formulas = [];
+  if (needsFormulaLookup) {
+    const range = sheet.getRange(1, 1, 1, Math.max(1, headers.length));
+    if (typeof range.getFormulas === 'function') {
+      formulas = (range.getFormulas()[0] || []).slice();
+      formulas.forEach((formula, index) => {
+        if (keyByIndex[index]) return;
+        keyByIndex[index] = resolveHeaderKeyFromMatchers_(
+          toCellText_(formula),
+          formulaMatchers
+        );
+      });
+    }
+  }
+
   const columns = {};
   const occurrences = {};
   headers.forEach((value, index) => {
     const header = toCellText_(value);
-    if (!header) return;
-    if (!occurrences[header]) occurrences[header] = [];
-    occurrences[header].push(index + 1);
-    const key = headerToKey[header];
+    const key = keyByIndex[index];
+    const canonicalHeader = key ? headerByKey[key] : header;
+    if (!canonicalHeader) return;
+    if (!occurrences[canonicalHeader]) occurrences[canonicalHeader] = [];
+    occurrences[canonicalHeader].push(index + 1);
     if (key && !columns[key]) columns[key] = index + 1;
   });
 
@@ -146,6 +208,7 @@ function buildHeaderColumnMap_(sheet, headerByKey, fieldKeys, options) {
   return {
     columns,
     headers,
+    formulas,
     missingKeys,
     duplicateMessages,
     lastColumn: Math.max(getLastHeaderColumnFromValues_(headers), 1)
@@ -180,9 +243,194 @@ function getMonthlyColumnInfo_(sheet) {
           header,
           key: 'EVENT_ID'
         }))
-      )
+      ),
+      headerMatchers: [{
+        key: 'DIAGNOSIS',
+        matches: isMonthlyDiagnosisSummaryHeaderText_
+      }],
+      formulaMatchers: [{
+        key: 'DIAGNOSIS',
+        matches: isManagedMonthlyDiagnosisSummaryFormula_
+      }]
     }
   );
+}
+
+function escapeGoogleSheetsFormulaString_(value) {
+  return String(value === undefined ? '' : value).replace(/"/g, '""');
+}
+
+function escapeGoogleSheetsRegex_(value) {
+  return String(value === undefined ? '' : value)
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function getMonthlyDiagnosisSummaryDefinitions_() {
+  return (CONFIG.MONTHLY_DIAGNOSIS_SUMMARY_GROUPS || [])
+    .map(group => {
+      const seen = {};
+      const keywords = (group && group.keywords || [])
+        .map(toCellText_)
+        .filter(keyword => {
+          const key = keyword.toUpperCase();
+          if (!keyword || seen[key]) return false;
+          seen[key] = true;
+          return true;
+        });
+      return {
+        label: toCellText_(group && group.label),
+        keywords
+      };
+    })
+    .filter(group => group.label && group.keywords.length);
+}
+
+function getMonthlyDiagnosisSummaryCategories_() {
+  return getMonthlyDiagnosisSummaryDefinitions_()
+    .map(group => group.label);
+}
+
+function buildMonthlyDiagnosisSummaryPattern_(keywords) {
+  const alternatives = (keywords || [])
+    .map(toCellText_)
+    .filter(Boolean)
+    .map(keyword => escapeGoogleSheetsRegex_(keyword.toUpperCase()));
+  if (!alternatives.length) {
+    throw new Error('月表診斷統計分類至少需要一個關鍵字。');
+  }
+  return `(^|[^A-Z0-9])(${alternatives.join('|')})([^A-Z0-9]|$)`;
+}
+
+function buildMonthlyDiagnosisSummaryFormula_(columns) {
+  if (!columns || !columns.SIDE || !columns.DIAGNOSIS) {
+    throw new Error('月表診斷統計需要「側別」與「診斷」欄。');
+  }
+  const sideLetter = columnToLetter_(columns.SIDE);
+  const diagnosisLetter = columnToLetter_(columns.DIAGNOSIS);
+  const sideRange = `$${sideLetter}$2:$${sideLetter}`;
+  const diagnosisRange = `$${diagnosisLetter}$2:$${diagnosisLetter}`;
+  const definitions = getMonthlyDiagnosisSummaryDefinitions_();
+  if (!definitions.length) {
+    throw new Error('月表診斷統計至少需要一個分類。');
+  }
+  const countVariables = definitions.map((_definition, index) => {
+    return `diagnosisCount${index + 1}`;
+  });
+  const countBindings = definitions.map((definition, index) => {
+    const escapedPattern = escapeGoogleSheetsFormulaString_(
+      buildMonthlyDiagnosisSummaryPattern_(definition.keywords)
+    );
+    return (
+      `${countVariables[index]},SUMPRODUCT(` +
+      'ARRAYFORMULA(N(REGEXMATCH(diagnosisValues,' +
+      `"${escapedPattern}"))),sideWeights)`
+    );
+  });
+  const summaryParts = definitions.map((definition, index) => {
+    const label = escapeGoogleSheetsFormulaString_(definition.label);
+    const variable = countVariables[index];
+    return `IF(${variable}>0,"${label} "&${variable},"")`;
+  });
+  const formulaParts = [
+    'managedMarker,T(N("' + escapeGoogleSheetsFormulaString_(
+      MONTHLY_DIAGNOSIS_SUMMARY_FORMULA_MARKER
+    ) + '"))',
+    `diagnosisValues,ARRAYFORMULA(UPPER(TO_TEXT(IFERROR(${diagnosisRange},""))))`,
+    `sideValues,ARRAYFORMULA(UPPER(TRIM(TO_TEXT(IFERROR(${sideRange},"")))))`,
+    'sideWeights,ARRAYFORMULA(IF(sideValues="OU",2,' +
+      'IF(REGEXMATCH(sideValues,"^(OD|OS)$"),1,0)))'
+  ].concat(countBindings).concat([
+    `summaryText,TEXTJOIN(" | ",TRUE,${summaryParts.join(',')})`,
+    'managedMarker&"' + escapeGoogleSheetsFormulaString_(
+      CONFIG.MONTHLY_FIELD_HEADERS.DIAGNOSIS
+    ) + '"&IF(summaryText="","","｜"&summaryText)'
+  ]);
+  return `=LET(${formulaParts.join(',')})`;
+}
+
+function getMonthlyDiagnosisSummaryNoteText_() {
+  const groups = getMonthlyDiagnosisSummaryDefinitions_()
+    .map(group => `${group.label}（${group.keywords.join('、')}）`)
+    .join('；');
+  return (
+    `此表頭依完整詞界、不分大小寫統計：${groups}。` +
+    '同列同分類命中多個關鍵字只計一次；OD／OS 計 1，OU 計 2，' +
+    '其他或空白側別計 0。複合診斷可同時計入多類，取消列仍會計入。'
+  );
+}
+
+function ensureMonthlyDiagnosisSummaryNote_(cell) {
+  const current = toCellText_(cell.getNote());
+  const expected = buildSystemNoteText_(
+    current,
+    MONTHLY_DIAGNOSIS_SUMMARY_NOTE_PREFIX,
+    getMonthlyDiagnosisSummaryNoteText_()
+  );
+  if (expected === current) return false;
+  cell.setNote(expected);
+  return true;
+}
+
+function ensureMonthlyDiagnosisSummaryHeader_(sheet, columns, options) {
+  const settings = options || {};
+  const cell = sheet.getRange(1, columns.DIAGNOSIS);
+  const formula = typeof cell.getFormula === 'function'
+    ? toCellText_(cell.getFormula())
+    : '';
+  const value = toCellText_(cell.getValue());
+  const expectedFormula = buildMonthlyDiagnosisSummaryFormula_(columns);
+  if (isManagedMonthlyDiagnosisSummaryFormula_(formula)) {
+    const status = formula === expectedFormula ? 'unchanged' : 'refreshed';
+    if (status === 'refreshed') cell.setFormula(expectedFormula);
+    const noteUpdated = ensureMonthlyDiagnosisSummaryNote_(cell);
+    return { ok: true, status, noteUpdated, expectedFormula };
+  }
+  if (
+    settings.enable &&
+    !formula &&
+    value === CONFIG.MONTHLY_FIELD_HEADERS.DIAGNOSIS
+  ) {
+    cell.setFormula(expectedFormula);
+    ensureMonthlyDiagnosisSummaryNote_(cell);
+    return {
+      ok: true,
+      status: 'enabled',
+      noteUpdated: true,
+      expectedFormula
+    };
+  }
+  if (
+    formula ||
+    (
+      value !== CONFIG.MONTHLY_FIELD_HEADERS.DIAGNOSIS &&
+      isMonthlyDiagnosisSummaryHeaderText_(value)
+    )
+  ) {
+    return {
+      ok: false,
+      status: 'conflict',
+      reason: formula
+        ? '診斷表頭已有非系統公式。'
+        : '診斷表頭是動態文字，但不是系統公式。',
+      expectedFormula
+    };
+  }
+  return {
+    ok: true,
+    status: 'plain',
+    noteUpdated: false,
+    expectedFormula
+  };
+}
+
+function getCanonicalMonthlyHeaderValues_(sheet, columns) {
+  const headers = getSheetHeaderValues_(sheet).slice();
+  const cols = columns || getRequiredMonthlyColumns_(sheet);
+  Object.keys(CONFIG.MONTHLY_FIELD_HEADERS).forEach(key => {
+    const column = cols[key];
+    if (column) headers[column - 1] = CONFIG.MONTHLY_FIELD_HEADERS[key];
+  });
+  return headers;
 }
 
 function assertUniqueHeaders_(info, label) {
@@ -1212,6 +1460,11 @@ function applyFuFormatting_(sheet, options) {
 function applyMonthlyFormatting_(sheet, options) {
   const settings = options || {};
   const columns = ensureManagedHeaders_(sheet, 'MONTHLY');
+  const diagnosisSummary = ensureMonthlyDiagnosisSummaryHeader_(
+    sheet,
+    columns,
+    { enable: Boolean(settings.enableDiagnosisSummary) }
+  );
   const lastColumn = Math.max(getLastHeaderColumn_(sheet), ...Object.values(columns));
   applyHeaderFormat_(sheet, lastColumn);
   CONFIG.MONTHLY_FIELD_KEYS.forEach(key => {
@@ -1257,7 +1510,7 @@ function applyMonthlyFormatting_(sheet, options) {
       block.values
     );
   });
-  return { columns, lastColumn, widths };
+  return { columns, lastColumn, widths, diagnosisSummary };
 }
 
 function applyManagedRowFormat_(sheet, row, kind, columns) {
@@ -1555,6 +1808,216 @@ function applyAllRecommendedColumnWidths() {
         : '沒有可套用的 FU 或月份刀表。'
     );
     return { ok: true, appliedSheets: applied };
+  });
+}
+
+function inspectMonthlyDiagnosisSummaryMigrationSheet_(sheet) {
+  try {
+    const info = getMonthlyColumnInfo_(sheet);
+    const base = {
+      sheet,
+      sheetId: sheet.getSheetId(),
+      sheetName: sheet.getName(),
+      columns: info.columns
+    };
+    if (info.duplicateMessages.length) {
+      return {
+        ...base,
+        action: 'manual',
+        reason: `欄名重複：${info.duplicateMessages.join('；')}`
+      };
+    }
+    if (info.missingKeys.length) {
+      return {
+        ...base,
+        action: 'manual',
+        reason: `缺少欄位：${info.missingKeys
+          .map(key => CONFIG.MONTHLY_FIELD_HEADERS[key])
+          .join('、')}`
+      };
+    }
+    const cell = sheet.getRange(1, info.columns.DIAGNOSIS);
+    const formula = typeof cell.getFormula === 'function'
+      ? toCellText_(cell.getFormula())
+      : '';
+    const value = toCellText_(cell.getValue());
+    const expectedFormula = buildMonthlyDiagnosisSummaryFormula_(info.columns);
+    if (formula) {
+      if (!isManagedMonthlyDiagnosisSummaryFormula_(formula)) {
+        return {
+          ...base,
+          action: 'manual',
+          reason: '診斷表頭已有非系統公式。'
+        };
+      }
+      return {
+        ...base,
+        action: formula === expectedFormula ? 'unchanged' : 'refresh',
+        reason: formula === expectedFormula ? '已是最新版。' : '系統公式需要更新。'
+      };
+    }
+    if (value === CONFIG.MONTHLY_FIELD_HEADERS.DIAGNOSIS) {
+      return {
+        ...base,
+        action: 'enable',
+        reason: '可由標準診斷表頭安全啟用。'
+      };
+    }
+    return {
+      ...base,
+      action: 'manual',
+      reason: isMonthlyDiagnosisSummaryHeaderText_(value)
+        ? '診斷表頭是動態文字，但不是系統公式。'
+        : '找不到可安全轉換的標準診斷表頭。'
+    };
+  } catch (err) {
+    return {
+      sheet,
+      sheetId: sheet.getSheetId(),
+      sheetName: sheet.getName(),
+      columns: {},
+      action: 'manual',
+      reason: (err && err.message) || String(err)
+    };
+  }
+}
+
+function countMonthlyDiagnosisSummaryMigrationEntries_(entries, key) {
+  const field = key || 'action';
+  const counts = {
+    enable: 0,
+    refresh: 0,
+    enabled: 0,
+    refreshed: 0,
+    unchanged: 0,
+    manual: 0
+  };
+  (entries || []).forEach(entry => {
+    const value = entry[field];
+    if (counts[value] !== undefined) counts[value]++;
+  });
+  return counts;
+}
+
+function buildMonthlyDiagnosisSummaryMigrationPlan_(spreadsheet) {
+  const entries = getActiveMonthlySheets_(spreadsheet)
+    .map(inspectMonthlyDiagnosisSummaryMigrationSheet_);
+  return {
+    ok: true,
+    entries,
+    counts: countMonthlyDiagnosisSummaryMigrationEntries_(entries, 'action')
+  };
+}
+
+function applyMonthlyDiagnosisSummaryMigrationPlan_(plan) {
+  const entries = (plan.entries || []).map(entry => {
+    if (entry.action === 'manual') {
+      return { ...entry, status: 'manual' };
+    }
+    const result = ensureMonthlyDiagnosisSummaryHeader_(
+      entry.sheet,
+      entry.columns,
+      { enable: entry.action === 'enable' }
+    );
+    const status = result.status === 'conflict' || result.status === 'plain'
+      ? 'manual'
+      : result.status;
+    return {
+      ...entry,
+      status,
+      reason: status === 'manual'
+        ? (result.reason || '表頭狀態已改變，未覆寫。')
+        : entry.reason
+    };
+  });
+  return {
+    ok: true,
+    entries,
+    counts: countMonthlyDiagnosisSummaryMigrationEntries_(entries, 'status'),
+    dataRowsCopied: 0,
+    dataRowsRemoved: 0,
+    calendarTouched: false
+  };
+}
+
+function formatMonthlyDiagnosisSummaryManualReview_(entries, field) {
+  const key = field || 'action';
+  const items = (entries || []).filter(entry => entry[key] === 'manual');
+  if (!items.length) return '';
+  return '人工檢查：\n' + items
+    .map(entry => `- ${entry.sheetName}：${entry.reason}`)
+    .join('\n');
+}
+
+function buildMonthlyDiagnosisSummaryMigrationPreviewText_(plan) {
+  const counts = plan.counts;
+  const lines = [
+    `未封存月表：${plan.entries.length} 張`,
+    `可啟用：${counts.enable} 張`,
+    `可更新：${counts.refresh} 張`,
+    `已是最新版：${counts.unchanged} 張`,
+    `保留人工檢查：${counts.manual} 張`,
+    '',
+    '本操作只會寫入第一列的診斷統計公式與說明 note。',
+    '病人資料列複製：0；病人資料列移除：0；不呼叫 Calendar。'
+  ];
+  const manualReview = formatMonthlyDiagnosisSummaryManualReview_(
+    plan.entries,
+    'action'
+  );
+  if (manualReview) lines.push('', manualReview);
+  return lines.join('\n');
+}
+
+function buildMonthlyDiagnosisSummaryMigrationResultText_(result) {
+  const counts = result.counts;
+  const lines = [
+    `已啟用：${counts.enabled} 張`,
+    `已更新：${counts.refreshed} 張`,
+    `已是最新版：${counts.unchanged} 張`,
+    `保留人工檢查：${counts.manual} 張`,
+    '',
+    `病人資料列複製：${result.dataRowsCopied}`,
+    `病人資料列移除：${result.dataRowsRemoved}`,
+    'Calendar 變更：0'
+  ];
+  const manualReview = formatMonthlyDiagnosisSummaryManualReview_(
+    result.entries,
+    'status'
+  );
+  if (manualReview) lines.push('', manualReview);
+  return lines.join('\n');
+}
+
+function migrateMonthlyDiagnosisSummaryHeaders() {
+  const title = '啟用／修復月表診斷統計表頭';
+  return runMenuAction_(title, () => {
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const ui = SpreadsheetApp.getUi();
+    const preview = buildMonthlyDiagnosisSummaryMigrationPlan_(spreadsheet);
+    if (!preview.entries.length) {
+      ui.alert(title, '沒有未封存的 YYYYMM 月份刀表。', ui.ButtonSet.OK);
+      return { ok: true, ...preview };
+    }
+    const response = ui.alert(
+      title,
+      buildMonthlyDiagnosisSummaryMigrationPreviewText_(preview) +
+        '\n\n是否繼續？',
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (response !== ui.Button.OK) {
+      return { ok: false, cancelled: true, preview };
+    }
+    const result = withCalendarSyncLock_(() => {
+      const lockedPlan = buildMonthlyDiagnosisSummaryMigrationPlan_(spreadsheet);
+      return applyMonthlyDiagnosisSummaryMigrationPlan_(lockedPlan);
+    });
+    ui.alert(
+      title,
+      buildMonthlyDiagnosisSummaryMigrationResultText_(result),
+      ui.ButtonSet.OK
+    );
+    return result;
   });
 }
 
