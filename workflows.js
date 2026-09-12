@@ -318,14 +318,14 @@ function insertSurgeryDateAtSelection() {
     const response = ui.prompt(
       '選取列新增刀日',
       `將在 ${sheet.getName()} 第 ${insertRow} 列前插入刀日標題。\n` +
-      '請輸入完整日期（例如 2026/8/17）：',
+      '請輸入八位數日期（例如 20260908）：',
       ui.ButtonSet.OK_CANCEL
     );
     if (response.getSelectedButton() !== ui.Button.OK) {
       return { ok: false, cancelled: true };
     }
-    const date = parseFullDate_(response.getResponseText());
-    if (!date) throw new Error('請輸入 2000–2099 年的有效完整日期。');
+    const date = parseEightDigitDate_(response.getResponseText());
+    if (!date) throw new Error('請輸入有效八位數日期 YYYYMMDD，例如 20260908。');
 
     const preview = buildSurgeryDateInsertionPreview_(sheet, insertRow, date);
     const globalIds = buildGlobalEventIdLocationsLightweight_(spreadsheet);
@@ -430,12 +430,13 @@ function insertSurgeryDateAtSelection() {
       const failed = syncResult.results
         .filter(item => !item.result.ok)
         .length;
+      let failureSummary = '';
       if (failed) {
         const health = reconcileCalendarRegistry_(spreadsheet, {
           apply: false,
           changeType: 'MANUAL'
         });
-        writeHealthReportSheet_(spreadsheet, health);
+        failureSummary = buildHealthAlertSummary_(health, 8).text;
       }
       ui.alert(
         `已在第 ${insertRow} 列建立 ${preview.dateKey}／高榮刀日。` +
@@ -443,7 +444,8 @@ function insertSurgeryDateAtSelection() {
           shiftedCalendarRows.length
             ? `\nCalendar 同步 ${shiftedCalendarRows.length - failed} 筆，失敗 ${failed} 筆。`
             : '\n沒有病人事件需要更新。'
-        )
+        ) +
+        (failureSummary ? `\n\n未完成摘要：\n${failureSummary}` : '')
       );
       return {
         ok: failed === 0,
@@ -454,6 +456,15 @@ function insertSurgeryDateAtSelection() {
         syncResult
       };
     });
+  });
+}
+
+function sortCurrentScheduleSheet() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  if (isMainTrackingSheetName_(sheet.getName())) return sortFuByDate();
+  if (isMonthlySheetName_(sheet.getName())) return sortCurrentMonthlySheet();
+  return runMenuAction_('整理目前分頁', () => {
+    throw new Error('請先切換至 FU 或 YYYYMM 月刀表。');
   });
 }
 
@@ -1039,6 +1050,73 @@ function showFuToMonthlyDialog() {
   });
 }
 
+function showIolListDialog() {
+  return runMenuAction_('水晶體清單', () => {
+    SpreadsheetApp.getUi().showModalDialog(
+      HtmlService.createHtmlOutputFromFile('iol_list').setWidth(620).setHeight(620),
+      '水晶體清單'
+    );
+    return { ok: true };
+  });
+}
+
+function getIolListDates() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const dates = new Set();
+  getActiveMonthlySheets_(spreadsheet).forEach(sheet => {
+    scanMonthlyBlocks_(sheet, getRequiredMonthlyColumns_(sheet)).blocks.forEach(block => {
+      if (formatMonthKey_(block.date) === sheet.getName()) dates.add(formatCompactDate_(block.date));
+    });
+  });
+  return Array.from(dates).sort().reverse();
+}
+
+function buildIolListForDate_(sheet, date, includeCancelled) {
+  const columns = getRequiredMonthlyColumns_(sheet);
+  const scan = scanMonthlyBlocks_(sheet, columns);
+  const dateKey = formatDateKey_(date);
+  const blocks = scan.blocks.filter(block => formatDateKey_(block.date) === dateKey);
+  if (scan.hybrids.length || scan.orphans.length) {
+    throw new Error('月表有日期／事件 ID 衝突或孤立病人列，請修復結構後再輸出清單。');
+  }
+  const patientRows = blocks.flatMap(block => block.patientRows.map(patient => patient.row));
+  const firstRow = patientRows.length ? Math.min(...patientRows) : 2;
+  const rowCount = patientRows.length ? Math.max(...patientRows) - firstRow + 1 : 0;
+  const lastDisplayColumn = Math.max(columns.CHART_NO, columns.NAME, columns.IOL, columns.IOL_FINAL);
+  const cancelled = readMonthlyCancelledRows_(sheet, columns, firstRow, rowCount);
+  const display = rowCount
+    ? sheet.getRange(firstRow, 1, rowCount, lastDisplayColumn).getDisplayValues() : [];
+  const lines = [`水晶體清單 ${formatCompactDate_(date)}`];
+  let count = 0;
+  let excluded = 0;
+  blocks.forEach(block => {
+    const rows = [];
+    block.patientRows.forEach(patient => {
+      const values = display[patient.row - firstRow];
+      if (!toCellText_(getRowFieldValue_(values, columns, 'NAME')) &&
+        !toCellText_(getRowFieldValue_(values, columns, 'CHART_NO'))) return;
+      if (cancelled[patient.row] && !includeCancelled) { excluded++; return; }
+      const name = toSingleLineText_(getRowFieldValue_(values, columns, 'NAME')) || '姓名未填';
+      const iol = toSingleLineText_(getRowFieldValue_(values, columns, 'IOL')) || '未填';
+      const final = toSingleLineText_(getRowFieldValue_(values, columns, 'IOL_FINAL')) || '未填';
+      rows.push(`${name}${cancelled[patient.row] ? '（已取消）' : ''}｜${iol}｜${final}`);
+      count++;
+    });
+    if (rows.length) lines.push('', `${block.hospital}（第 ${block.row} 列刀日）`, '姓名｜IOL｜IOL Final', ...rows);
+  });
+  if (!count) lines.push('此刀日沒有符合條件的病人資料。');
+  return { date: formatCompactDate_(date), count, excluded, text: lines.join('\n') };
+}
+
+function getIolListForDate(dateText, includeCancelled) {
+  assertNoActiveAnnualArchiveTransaction_();
+  const date = parseEightDigitDate_(dateText);
+  if (!date) throw new Error('請選擇有效八位數刀日，例如 20260908。');
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(formatMonthKey_(date));
+  if (!sheet) throw new Error('找不到該日期所屬的月份刀表。');
+  return buildIolListForDate_(sheet, date, includeCancelled === true);
+}
+
 function findMonthlyDuplicateCandidates_(
   sheet,
   request,
@@ -1210,8 +1288,8 @@ function submitFuToMonthlySchedule(payload) {
       throw new Error('FU 來源列已變更，請關閉視窗後重新開啟。');
     }
     const targetMonth = toCellText_(request.targetMonth);
-    const date = parseFullDate_(request.date);
-    if (!date) throw new Error('請輸入有效手術日期。');
+    const date = parseEightDigitDate_(request.date);
+    if (!date) throw new Error('請輸入有效八位數手術日期，例如 20260908。');
     if (formatMonthKey_(date) !== targetMonth) {
       throw new Error('手術日期必須屬於目標月份。');
     }

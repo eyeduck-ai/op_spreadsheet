@@ -9,7 +9,7 @@
  * - annual_archive.js：私人備份與永久年度封存
  */
 const CONFIG = {
-  VERSION: '2026.08.08',
+  VERSION: '2026.09.12.2',
   CALENDAR_ID: 'YOUR_CALENDAR_ID_HERE',
   SHEET_ALL: 'All',
   SHEET_FU: 'FU',
@@ -63,11 +63,11 @@ const CONFIG = {
     'DIAGNOSIS',
     'GRADE',
     'PROCEDURE',
-    'PLAN',
     'IOL',
     'IOL_TARGET',
     'IOL_FINAL',
     'AXIS',
+    'PLAN',
     'MEMO',
     'SN',
     'CDE',
@@ -112,11 +112,11 @@ const CONFIG = {
     '診斷',
     'Grade',
     '術式',
-    'Plan',
     'IOL',
     'IOL Target',
     'IOL Final',
     'Axis',
+    'Plan',
     '心得',
     '',
     'SN',
@@ -148,7 +148,8 @@ const CONFIG = {
     'ERM',
     'RD',
     'Ptosis',
-    'Dermatochalasis'
+    'Dermatochalasis',
+    'Entropion'
   ],
   MONTHLY_DIAGNOSIS_SUMMARY_GROUPS: [
     {
@@ -170,7 +171,7 @@ const CONFIG = {
     },
     {
       label: 'Plasty',
-      keywords: ['Dermatochalasis', 'Ptosis', 'Dacryocystitis']
+      keywords: ['Dermatochalasis', 'Ptosis', 'Dacryocystitis', 'Entropion']
     }
   ],
   MONTHLY_PROCEDURE_OPTIONS: [
@@ -256,7 +257,6 @@ const ANNUAL_ARCHIVE_ROW_TYPE_HEADER = 'ArchiveRowType';
 const ANNUAL_ARCHIVE_TRANSACTION_PROPERTY =
   'ANNUAL_SURGERY_ARCHIVE_TRANSACTION_V1';
 const LEGACY_ARCHIVED_MONTHS_PROPERTY = 'ARCHIVED_MONTHLY_SHEETS_V1';
-const HEALTH_REPORT_SHEET = '同步健康報告';
 const FU_LIFECYCLE_RECOVERY_PREVIEW_PROPERTY =
   'FU_LIFECYCLE_RECOVERY_PREVIEW_V1';
 const FU_LIFECYCLE_RECOVERY_BACKUP_PREFIX =
@@ -619,6 +619,12 @@ function showVersionInfo() {
 
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
+  const migrations = ui.createMenu('資料遷移與舊版修復')
+    .addItem('調整月表 Plan 至 Axis 後方', 'migrateMonthlyPlanOrder')
+    .addItem('恢復工作表原日期顯示格式', 'restoreWorksheetDateFormats')
+    .addItem('統一 Entropion 大小寫', 'migrateEntropionCase')
+    .addItem('預覽 FU 追蹤生命週期修復', 'previewFuLifecycleRecoveryMigration')
+    .addItem('執行 FU 追蹤生命週期修復', 'executeFuLifecycleRecoveryMigration');
   const maintenance = ui.createMenu('維護工具')
     .addItem('設定日曆', 'promptAndSaveCalendarId')
     .addItem('安裝／修復系統', 'installOrRepairSystem')
@@ -634,21 +640,14 @@ function onOpen() {
     .addItem('檢查同步健康', 'checkSyncHealth')
     .addItem('同步待處理變更', 'syncPendingChanges')
     .addSeparator()
-    .addItem(
-      '預覽 FU 追蹤生命週期修復',
-      'previewFuLifecycleRecoveryMigration'
-    )
-    .addItem(
-      '執行 FU 追蹤生命週期修復',
-      'executeFuLifecycleRecoveryMigration'
-    )
+    .addSubMenu(migrations)
     .addItem(`版本：${CONFIG.VERSION}`, 'showVersionInfo');
 
   ui.createMenu('手術排程系統')
     .addItem('建立新月刀表', 'createMonthlySurgerySheet')
     .addItem('選取列新增刀日', 'insertSurgeryDateAtSelection')
-    .addItem('整理月刀表', 'sortCurrentMonthlySheet')
-    .addItem('整理FU日期', 'sortFuByDate')
+    .addItem('整理目前分頁', 'sortCurrentScheduleSheet')
+    .addItem('水晶體清單（選刀日／複製）', 'showIolListDialog')
     .addItem('修復選取列同步', 'repairSelectedCalendarRows')
     .addSeparator()
     .addItem('月刀表 => FU', 'addSelectedMonthlyRowToFu')

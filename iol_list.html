@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <base target="_top">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 24px; font: 15px/1.6 Arial, sans-serif; color: #202124; background: #f8f9fa; }
+      h1 { font-size: 22px; margin: 0 0 4px; }
+      p { margin: 0 0 20px; color: #5f6368; }
+      label { display: block; margin-top: 12px; }
+      select, textarea, button { font: inherit; }
+      select, textarea { width: 100%; border: 1px solid #bdc1c6; border-radius: 4px; padding: 8px 10px; background: white; }
+      textarea { min-height: 240px; resize: vertical; white-space: pre; }
+      button { padding: 8px 16px; border: 0; border-radius: 4px; cursor: pointer; background: #e8eaed; color: #202124; }
+      button.primary { background: #1a73e8; color: white; }
+      button:disabled { opacity: .5; cursor: default; }
+      :focus-visible { outline: 3px solid #8ab4f8; outline-offset: 2px; }
+      .actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0; }
+      #status { min-height: 24px; color: #5f6368; }
+      #status.error { color: #b3261e; }
+    </style>
+  </head>
+  <body>
+    <h1>水晶體清單</h1>
+    <p>選擇刀日，產生姓名、IOL 與 IOL Final 清單。</p>
+    <form id="form">
+      <label for="date">刀日（YYYYMMDD）</label>
+      <select id="date" required disabled><option value="">正在載入刀日…</option></select>
+      <label><input id="cancelled" type="checkbox">包含已取消個案（清單會標示）</label>
+      <div class="actions"><button id="generate" class="primary" disabled>產生清單</button></div>
+    </form>
+    <label for="output">可複製內容</label>
+    <textarea id="output" readonly spellcheck="false" placeholder="選擇刀日後按「產生清單」。"></textarea>
+    <div class="actions">
+      <button type="button" id="copy" class="primary" disabled>複製全部</button>
+      <button type="button" id="select" disabled>全選文字</button>
+      <button type="button" id="close">關閉</button>
+    </div>
+    <div id="status" role="status" aria-live="polite"></div>
+    <script>
+      const byId = id => document.getElementById(id);
+      let generation = 0;
+      function status(text, error = false) {
+        byId('status').textContent = text;
+        byId('status').className = error ? 'error' : '';
+      }
+      function invalidate() {
+        generation++;
+        byId('output').value = '';
+        byId('copy').disabled = byId('select').disabled = true;
+        byId('generate').disabled = !byId('date').value;
+        status('');
+      }
+      byId('date').addEventListener('change', invalidate);
+      byId('cancelled').addEventListener('change', invalidate);
+      google.script.run.withSuccessHandler(dates => {
+        byId('date').replaceChildren();
+        dates.forEach(date => {
+          const option = document.createElement('option');
+          option.value = option.textContent = date;
+          byId('date').appendChild(option);
+        });
+        byId('date').disabled = !dates.length;
+        byId('generate').disabled = !dates.length;
+        if (!dates.length) status('目前沒有可選擇的刀日。');
+      }).withFailureHandler(error => status(error.message || String(error), true)).getIolListDates();
+      byId('form').addEventListener('submit', event => {
+        event.preventDefault();
+        const token = ++generation;
+        byId('generate').disabled = true;
+        byId('copy').disabled = byId('select').disabled = true;
+        byId('output').value = '';
+        status('正在讀取刀日資料…');
+        google.script.run.withSuccessHandler(result => {
+          if (token !== generation) return;
+          byId('generate').disabled = false;
+          byId('output').value = result.text;
+          byId('copy').disabled = byId('select').disabled = false;
+          status(`共 ${result.count} 筆${result.excluded ? `；已排除 ${result.excluded} 筆取消個案` : ''}。`);
+        }).withFailureHandler(error => {
+          if (token !== generation) return;
+          byId('generate').disabled = false;
+          status(error.message || String(error), true);
+        }).getIolListForDate(byId('date').value, byId('cancelled').checked);
+      });
+      function selectText() { byId('output').focus(); byId('output').select(); }
+      byId('select').addEventListener('click', () => { selectText(); status('已全選，可按 Ctrl+C／⌘C 複製。'); });
+      byId('copy').addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(byId('output').value);
+          status('已複製。');
+        } catch (_) {
+          selectText();
+          status('瀏覽器未允許直接複製；文字已全選，請按 Ctrl+C／⌘C。');
+        }
+      });
+      byId('close').addEventListener('click', () => google.script.host.close());
+    </script>
+  </body>
+</html>

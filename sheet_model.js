@@ -15,6 +15,7 @@ const MONTHLY_WRAP_KEYS = [
   'REFRACTION'
 ];
 const MONTHLY_TEXT_KEYS = [
+  'TEL',
   'IOL',
   'IOL_TARGET',
   'IOL_FINAL',
@@ -301,14 +302,65 @@ function buildMonthlyDiagnosisSummaryPattern_(keywords) {
   return `(^|[^A-Z0-9])(${alternatives.join('|')})([^A-Z0-9]|$)`;
 }
 
+function buildMonthlyDataColumnFormulaRange_(column) {
+  const letter = columnToLetter_(column);
+  const fullColumn = `$${letter}:$${letter}`;
+  // Keep the numeric start on row 2 even after inserting rows at the top.
+  return `INDEX(${fullColumn},2):INDEX(${fullColumn},ROWS(${fullColumn}))`;
+}
+
+function normalizeEntropionCase_(value) {
+  return typeof value === 'string' ? value.replace(/\bENTROPION\b/g, 'Entropion') : value;
+}
+
+function migrateEntropionCase() {
+  return runMenuAction_('統一 Entropion 大小寫', () => withCalendarSyncLock_(() => {
+    assertNoActiveAnnualArchiveTransaction_();
+    const reports = getActiveMonthlySheets_(SpreadsheetApp.getActiveSpreadsheet()).map(sheet => {
+      const columns = getRequiredMonthlyColumns_(sheet);
+      const count = sheet.getMaxRows() - 1;
+      const report = { sheetName: sheet.getName(), changed: 0, dropdowns: 0, formulaRows: [] };
+      if (count < 1) return report;
+      const range = sheet.getRange(2, columns.DIAGNOSIS, count, 1);
+      const values = range.getValues();
+      const formulas = range.getFormulas();
+      const rules = range.getDataValidations();
+      values.forEach((row, index) => {
+        const updated = normalizeEntropionCase_(row[0]);
+        if (updated !== row[0]) {
+          if (formulas[index][0]) report.formulaRows.push(index + 2);
+          else {
+            sheet.getRange(index + 2, columns.DIAGNOSIS).setValue(updated);
+            report.changed++;
+          }
+        }
+        const rule = rules[index][0];
+        if (!rule || rule.getCriteriaType() !== SpreadsheetApp.DataValidationCriteria.VALUE_IN_LIST) return;
+        const args = rule.getCriteriaValues();
+        const options = args[0].map(normalizeEntropionCase_);
+        if (options.every((option, i) => option === args[0][i])) return;
+        sheet.getRange(index + 2, columns.DIAGNOSIS).setDataValidation(
+          rule.copy().requireValueInList(Array.from(new Set(options)), args[1] !== false).build()
+        );
+        report.dropdowns++;
+      });
+      ensureMonthlyDiagnosisSummaryHeader_(sheet, columns);
+      return report;
+    });
+    SpreadsheetApp.getUi().alert(reports.map(item =>
+      `${item.sheetName}：更新文字 ${item.changed} 格、選單 ${item.dropdowns} 格；未刪除資料。` +
+      (item.formulaRows.length ? `公式保留，請人工確認列 ${item.formulaRows.join('、')}。` : '')
+    ).join('\n'));
+    return { ok: reports.every(item => !item.formulaRows.length), reports };
+  }));
+}
+
 function buildMonthlyDiagnosisSummaryFormula_(columns) {
   if (!columns || !columns.SIDE || !columns.DIAGNOSIS) {
     throw new Error('月表診斷統計需要「側別」與「診斷」欄。');
   }
-  const sideLetter = columnToLetter_(columns.SIDE);
-  const diagnosisLetter = columnToLetter_(columns.DIAGNOSIS);
-  const sideRange = `$${sideLetter}$2:$${sideLetter}`;
-  const diagnosisRange = `$${diagnosisLetter}$2:$${diagnosisLetter}`;
+  const sideRange = buildMonthlyDataColumnFormulaRange_(columns.SIDE);
+  const diagnosisRange = buildMonthlyDataColumnFormulaRange_(columns.DIAGNOSIS);
   const definitions = getMonthlyDiagnosisSummaryDefinitions_();
   if (!definitions.length) {
     throw new Error('月表診斷統計至少需要一個分類。');
@@ -755,6 +807,102 @@ function parseFullDate_(value) {
     if (weekdayByName[weekdayText] !== date.getDay()) return null;
   }
   return date;
+}
+
+function parseEightDigitDate_(value) {
+  const text = toCellText_(value);
+  return /^\d{8}$/.test(text) ? parseFullDate_(text) : null;
+}
+
+// Undo the prior eight-digit display migration without changing cell values.
+function restoreWorksheetDateFormatsInSpreadsheet_(spreadsheet) {
+  const reports = [];
+  spreadsheet.getSheets().filter(sheet => !isAnnualArchiveSheet_(sheet)).forEach(sheet => {
+    let restored = 0;
+    const monthly = isMonthlySheetName_(sheet.getName());
+    getSheetHeaderValues_(sheet).forEach((value, index) => {
+      const header = toCellText_(value);
+      const mixed = monthly && (header === CONFIG.MONTHLY_FIELD_HEADERS.TIME ||
+        LEGACY_MONTHLY_TIME_HEADERS.indexOf(header) !== -1);
+      if (!mixed && !/日期|生日|出生年月日|^下次回診時間$|^Date$/i.test(header)) return;
+      const count = sheet.getMaxRows() - 1;
+      if (count <= 0) return;
+      const range = sheet.getRange(2, index + 1, count, 1);
+      const values = range.getValues();
+      const formats = range.getNumberFormats();
+      values.forEach((row, offset) => {
+        if (formats[offset][0] !== 'yyyyMMdd') return;
+        if (mixed && !(row[0] instanceof Date && !isNaN(row[0].getTime()))) return;
+        sheet.getRange(offset + 2, index + 1)
+          .setNumberFormat(mixed ? 'yyyy/m/d ddd' : 'yyyy/m/d');
+        restored++;
+      });
+    });
+    if (restored) reports.push({ sheetName: sheet.getName(), restored });
+  });
+  return reports;
+}
+
+function restoreWorksheetDateFormats() {
+  return runMenuAction_('恢復工作表原日期顯示格式', () => withCalendarSyncLock_(() => {
+    assertNoActiveAnnualArchiveTransaction_();
+    const reports = restoreWorksheetDateFormatsInSpreadsheet_(SpreadsheetApp.getActiveSpreadsheet());
+    SpreadsheetApp.getUi().alert('僅恢復日期顯示格式，未修改日期值。\n' +
+      (reports.map(item => item.sheetName + '：' + item.restored + ' 格').join('\n') || '無需恢復。'));
+    return { ok: true, reports };
+  }));
+}
+
+function moveMonthlyPlanAfterAxis_(sheet) {
+  const headers = getSheetHeaderValues_(sheet).map(toCellText_);
+  const positions = header => headers.map((value, index) => value === header ? index + 1 : 0).filter(Boolean);
+  const plans = positions(CONFIG.MONTHLY_FIELD_HEADERS.PLAN);
+  const axes = positions(CONFIG.MONTHLY_FIELD_HEADERS.AXIS);
+  if (plans.length !== 1 || axes.length !== 1) {
+    return { ok: false, moved: false, sheetName: sheet.getName(),
+      message: 'Plan 或 Axis 表頭缺漏／重複；完整保留，請人工確認。' };
+  }
+  const moved = plans[0] !== axes[0] + 1;
+  if (moved) sheet.moveColumns(sheet.getRange(1, plans[0], sheet.getMaxRows(), 1), axes[0] + 1);
+  const after = getSheetHeaderValues_(sheet).map(toCellText_);
+  if (after.indexOf('Plan') !== after.indexOf('Axis') + 1) throw new Error('Plan 搬欄後驗證失敗，請檢查欄位。');
+  const repairedRules = repairMonthlyPlanConditionalReferences_(sheet, after.indexOf('Plan') + 1);
+  return { ok: true, moved, repairedRules, sheetName: sheet.getName() };
+}
+
+function repairMonthlyPlanConditionalReferences_(sheet, planColumn) {
+  let repaired = 0;
+  const rules = sheet.getConditionalFormatRules().map(rule => {
+    const condition = rule.getBooleanCondition();
+    const formula = condition && toCellText_(condition.getCriteriaValues()[0]);
+    if (!formula || !formula.includes(`${CONDITIONAL_FORMAT_MARKER_PREFIX}MONTH_PLAN_`)) return rule;
+    const ranges = rule.getRanges();
+    if (!ranges.length) return rule;
+    const reference = `$${columnToLetter_(planColumn)}${ranges[0].getRow()}`;
+    // Native column moves can invalidate custom-formula references. Repair
+    // only the managed Plan SEARCH operands; retain rule order/ranges/styles.
+    const updated = formula.replace(
+      /(SEARCH\("[^"]*",)(?:#REF!|\$[A-Z]+\$?\d+)(\))/g,
+      (_match, before, after) => before + reference + after
+    );
+    if (updated === formula) return rule;
+    repaired++;
+    return rule.copy().whenFormulaSatisfied(updated).build();
+  });
+  if (repaired) sheet.setConditionalFormatRules(rules);
+  return repaired;
+}
+
+function migrateMonthlyPlanOrder() {
+  return runMenuAction_('調整月表 Plan 至 Axis 後方', () => withCalendarSyncLock_(() => {
+    const reports = getActiveMonthlySheets_(SpreadsheetApp.getActiveSpreadsheet())
+      .map(moveMonthlyPlanAfterAxis_);
+    SpreadsheetApp.getUi().alert(reports.map(item => `${item.sheetName}：` +
+      (item.ok ? (item.moved ? '已移動完整 Plan 欄至 Axis 後方；未複製或刪除資料。' : '順序已符合，無須移動。') +
+        ` 已修復 ${item.repairedRules} 項 Plan 配色參照。` : item.message)
+    ).join('\n'));
+    return { ok: reports.every(item => item.ok), reports };
+  }));
 }
 
 function isCompletelyBlankRow_(rowValues) {
@@ -2049,77 +2197,13 @@ function initializeAllMonthlySheets_(spreadsheet, showAlert, options) {
   return { ok: true, count: sheets.length, normalized, errors, message };
 }
 
-function normalizeTimeCell_(sheet, row, column, kind, columns) {
-  const cell = sheet.getRange(row, column);
-  const value = cell.getValue();
-  if (
-    kind === 'MONTHLY' &&
-    column === columns.TIME
-  ) {
-    const rowValues = sheet.getRange(
-      row,
-      1,
-      1,
-      Math.max(getLastHeaderColumn_(sheet), ...Object.values(columns))
-    ).getValues()[0];
-    const classification = classifyMonthlyRowValues_(rowValues, columns);
-    if (classification.type === MONTHLY_ROW_TYPES.DATE_HEADER) {
-      const presentation = ensureMonthlyHeaderPresentation_(
-        sheet,
-        row,
-        columns,
-        rowValues
-      );
-      clearSystemNote_(cell, [TIME_ERROR_NOTE_PREFIX]);
-      return {
-        header: true,
-        normalized: false,
-        error: false,
-        conflict: !presentation.ok
-      };
-    }
-    if (classification.type === MONTHLY_ROW_TYPES.HYBRID_CONFLICT) {
-      clearSystemNote_(cell, [TIME_ERROR_NOTE_PREFIX]);
-      setSystemNote_(
-        sheet.getRange(row, columns.CHART_NO),
-        MONTHLY_STRUCTURE_NOTE_PREFIX,
-        '第一欄是完整日期但該列已有 CalendarEventId；系統未將它當作日期標題或報到時間。'
-      );
-      return {
-        header: false,
-        normalized: false,
-        error: false,
-        conflict: true
-      };
-    }
-    ensureMonthlyHeaderPresentation_(sheet, row, columns, rowValues);
-  }
-
-  const info = resolveCalendarTime_(value);
-  if (info.errorMessage) {
-    setSystemNote_(cell, TIME_ERROR_NOTE_PREFIX, info.errorMessage);
-    return { header: false, normalized: false, error: true };
-  }
-  clearSystemNote_(cell, [TIME_ERROR_NOTE_PREFIX]);
-  if (info.parsedTime && toCellText_(value) !== info.parsedTime.text) {
-    cell.setNumberFormat('@').setValue(info.parsedTime.text);
-    return { header: false, normalized: true, error: false };
-  }
-  return { header: false, normalized: false, error: false };
-}
-
 function normalizeExistingTimeColumn_(sheet, kind, columns) {
-  const lastRow = sheet.getLastRow();
-  const timeColumn = columns.TIME;
-  if (!timeColumn) return { normalized: 0, errors: 0 };
-  let normalized = 0;
-  let errors = 0;
-  for (let row = 2; row <= lastRow; row++) {
-    const result = normalizeTimeCell_(sheet, row, timeColumn, kind, columns);
-    if (result.normalized) normalized++;
-    if (result.error) errors++;
-  }
-  return { normalized, errors };
+  const rowCount = sheet.getLastRow() - 1;
+  if (!columns.TIME || rowCount <= 0) return { normalized: 0, errors: 0 };
+  const result = normalizeEditedTimes_(
+    { range: sheet.getRange(2, columns.TIME, rowCount, 1) }, sheet, kind, columns
+  );
+  return { normalized: result.normalized, errors: result.errors };
 }
 
 function normalizeEditedTimes_(event, sheet, kind, columns) {
@@ -2180,6 +2264,11 @@ function normalizeEditedTimes_(event, sheet, kind, columns) {
         return;
       }
       if (classification.type === MONTHLY_ROW_TYPES.HYBRID_CONFLICT) {
+        const cleared = buildSystemNoteText_(originalNotes[index][0], TIME_ERROR_NOTE_PREFIX, '');
+        if (cleared !== originalNotes[index][0]) {
+          updatedNotes[index][0] = cleared;
+          notesChanged = true;
+        }
         setSystemNote_(
           sheet.getRange(row, columns.CHART_NO),
           MONTHLY_STRUCTURE_NOTE_PREFIX,
@@ -3051,7 +3140,7 @@ function getMonthlyBlockOptions_(sheet) {
     headerRow: block.row,
     occurrence: block.occurrence,
     label:
-      `${block.dateKey}｜${block.hospital}` +
+      `${formatCompactDate_(block.date)}｜${block.hospital}` +
       (counts[block.blockKey] > 1 ? `｜第 ${block.row} 列` : '')
   }));
 }

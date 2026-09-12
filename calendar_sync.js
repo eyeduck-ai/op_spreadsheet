@@ -463,9 +463,9 @@ function getContextExpectedScheduleText_(context) {
 
 function buildFuRowContext_(sheet, row, columns, rowValues) {
   const cols = columns || getRequiredFuColumns_(sheet);
-  const lastColumn = Math.max(getLastHeaderColumn_(sheet), ...Object.values(cols));
-  const values = rowValues ||
-    sheet.getRange(row, 1, 1, lastColumn).getValues()[0];
+  // Batch callers already supply a fresh row snapshot; do not reread headers per row.
+  const values = rowValues || sheet.getRange(row, 1, 1,
+    Math.max(getLastHeaderColumn_(sheet), ...Object.values(cols))).getValues()[0];
   const chartNo = toCellText_(getRowFieldValue_(values, cols, 'CHART_NO'));
   const patientName = toSingleLineText_(getRowFieldValue_(values, cols, 'NAME'));
   const date = parseEventDate_(getRowFieldValue_(values, cols, 'DATE'));
@@ -3217,7 +3217,12 @@ function syncManagedContext_(context, duplicateLocations, runtime) {
     setContextSyncNote_(context, 'Calendar API 未回傳 event ID。', false);
     return { ok: false, status: 'missing_created_event_id' };
   }
-  context.sheet.getRange(context.row, context.columns.EVENT_ID).setValue(eventId);
+  // An editor can move rows while Calendar is responding; the script lock
+  // does not lock the sheet UI. Updating an event never needs to rewrite its
+  // ID to the row number captured before the API call.
+  if (eventId !== context.eventId) {
+    context.sheet.getRange(context.row, context.columns.EVENT_ID).setValue(eventId);
+  }
   try {
     const verified = Calendar.Events.get(calendarId, eventId);
     if (!calendarEventMatchesResource_(verified, resource)) {
@@ -3238,7 +3243,29 @@ function syncManagedContext_(context, duplicateLocations, runtime) {
     );
     return { ok: false, status: 'verify_failed', eventId };
   }
-  clearContextSystemNotes_(context);
+  if (status === 'updated') {
+    const currentMatches = buildManagedSheetCalendarScan_(context.sheet)
+      .contexts.filter(item => item.eventId === eventId);
+    if (currentMatches.length !== 1) {
+      return {
+        ok: false,
+        status: currentMatches.length > 1
+          ? 'duplicate_event_id'
+          : 'row_changed_during_sync',
+        eventId
+      };
+    }
+    const current = currentMatches[0];
+    if (
+      !current.valid || current.rowHash !== context.rowHash ||
+      current.blockKey !== context.blockKey
+    ) {
+      return { ok: false, status: 'row_changed_during_sync', eventId };
+    }
+    clearContextSystemNotes_(current);
+  } else {
+    clearContextSystemNotes_(context);
+  }
   return { ok: true, status, eventId };
 }
 
@@ -3454,6 +3481,25 @@ function reconcileCalendarRegistry_(spreadsheet, options) {
   });
   const refreshed = buildCurrentCalendarScan_(spreadsheet);
   writeCalendarRegistryStore_(refreshed, Object.values(retainedById));
+  // Pure reorders require no Calendar call, but may carry obsolete failure
+  // notes. Only clear notes for unique, unchanged, previously settled IDs.
+  const settledById = {};
+  baseline.entries.forEach(entry => {
+    if (!entry.pendingSync && !entry.pendingDelete && !entry.pendingResolution) {
+      settledById[entry.eventId] = entry;
+    }
+  });
+  const blockedIds = new Set((analysis.conflicts || []).map(item => item.eventId));
+  clearContextsSystemNotesBatch_(refreshed.contexts.filter(context => {
+    const previous = settledById[context.eventId];
+    return previous && context.valid && !context.archived &&
+      isContextAffected_(context, settings) &&
+      !blockedIds.has(context.eventId) && !retainedById[context.eventId] &&
+      (refreshed.eventLocations[context.eventId] || []).length === 1 &&
+      Number(previous.sheetId) === Number(context.sheetId) &&
+      previous.rowHash === context.rowHash &&
+      previous.blockKey === context.blockKey;
+  }));
   return {
     ok:
       results.every(item => item.result.ok) &&
@@ -3493,6 +3539,7 @@ function describeHealthFailure_(item) {
     missing_created_event_id: 'Calendar API 建立事件後未回傳 Event ID。',
     verify_mismatch: 'Calendar 回讀內容與工作表不一致。',
     verify_failed: 'Calendar 回讀驗證失敗，請稍後重試。',
+    row_changed_during_sync: '同步期間資料列已移動或變更，等待依最新位置重試。',
     delete_failed: 'Calendar API 刪除事件失敗，已保留待重試狀態。',
     calendar_list_failed: 'Calendar 事件清單讀取失敗，請稍後重試。',
     calendar_read_failed: 'Calendar 事件回讀失敗，請稍後重試。'
@@ -3502,7 +3549,9 @@ function describeHealthFailure_(item) {
 }
 
 function describePendingHealthAction_(action) {
-  if (action && action.message) return action.message;
+  if (action && action.message) {
+    return sanitizeHealthMessage_(action.message, action.eventId);
+  }
   const messages = {
     create: '有效資料列尚無事件，等待建立。',
     update: '工作表內容或所在日期區塊已變更，等待更新事件。',
@@ -3593,57 +3642,40 @@ function getHealthIssueRows_(result) {
   return rows;
 }
 
-function getHealthStatusRows_(result) {
+function buildHealthAlertSummary_(result, maxItems) {
   const rows = getHealthIssueRows_(result);
   if (!rows.length) {
-    rows.push([new Date(), '正常', '', '', '', '', '未發現待處理變更或衝突。']);
+    return {
+      hasIssues: false,
+      issueCount: 0,
+      displayedCount: 0,
+      text: '未發現待處理變更或衝突。'
+    };
   }
-  return rows;
-}
-
-function writeHealthReportSheet_(spreadsheet, result) {
-  let sheet = spreadsheet.getSheetByName(HEALTH_REPORT_SHEET);
-  if (!sheet) sheet = spreadsheet.insertSheet(HEALTH_REPORT_SHEET);
-  const headers = [
-    '檢查時間',
-    '狀態',
-    '類型',
-    '工作表',
-    '列',
-    'EventIdHash',
-    '說明'
-  ];
-  const issues = getHealthIssueRows_(result);
-  const rows = getHealthStatusRows_(result);
-  const clearRows = Math.max(sheet.getLastRow(), rows.length + 1, 1);
-  const clearColumns = Math.max(sheet.getLastColumn(), headers.length, 1);
-  sheet.getRange(1, 1, clearRows, clearColumns).clear();
-  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-  sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
-  sheet.getRange(1, 1, 1, headers.length)
-    .setBackground(TABLE_HEADER_BACKGROUND)
-    .setFontWeight('bold')
-    .setFontFamily(MANAGED_FONT_FAMILY)
-    .setFontSize(MANAGED_FONT_SIZE);
-  sheet.getRange(1, 1, rows.length + 1, headers.length)
-    .setVerticalAlignment('top')
-    .setWrap(true)
-    .setFontFamily(MANAGED_FONT_FAMILY)
-    .setFontSize(MANAGED_FONT_SIZE);
-  sheet.setFrozenRows(1);
-  if (issues.length) {
-    sheet.showSheet();
-  } else {
-    const hasOtherVisibleSheet = spreadsheet.getSheets().some(item => {
-      return Number(item.getSheetId()) !== Number(sheet.getSheetId()) &&
-        !item.isSheetHidden();
-    });
-    if (hasOtherVisibleSheet) sheet.hideSheet();
+  const requestedLimit = Number(maxItems);
+  const limit = Number.isFinite(requestedLimit) && requestedLimit > 0
+    ? Math.floor(requestedLimit)
+    : 8;
+  const lines = rows.slice(0, limit).map(row => {
+    const sheetName = toCellText_(row[3]);
+    const rowNumber = Number(row[4]);
+    const location = [
+      sheetName,
+      rowNumber > 0 ? `第 ${rowNumber} 列` : ''
+    ].filter(Boolean).join(' ');
+    const label = `${toCellText_(row[1])}／${toCellText_(row[2])}`;
+    return `${label}${location ? `（${location}）` : ''}：` +
+      toSingleLineText_(row[6]);
+  });
+  if (rows.length > limit) {
+    lines.push(`另有 ${rows.length - limit} 項未列出；` +
+      '請先處理以上項目後重新檢查。');
   }
   return {
-    sheet,
-    hasIssues: issues.length > 0,
-    issueCount: issues.length
+    hasIssues: true,
+    issueCount: rows.length,
+    displayedCount: Math.min(rows.length, limit),
+    text: lines.join('\n')
   };
 }
 
@@ -3656,8 +3688,7 @@ function checkSyncHealth() {
       apply: false,
       changeType: 'HEALTH'
     });
-    const report = writeHealthReportSheet_(spreadsheet, result);
-    reorderManagedSheets_(spreadsheet);
+    const summary = buildHealthAlertSummary_(result, 10);
     const actionCount = result.analysis.actions.length;
     const conflictCount = result.analysis.conflicts.length;
     const queued = summarizePendingCalendarQueue_(result.pendingQueue);
@@ -3665,11 +3696,9 @@ function checkSyncHealth() {
       '同步健康檢查',
       `待處理 ${actionCount} 項；衝突 ${conflictCount} 項；` +
         `排隊 ${queued.hasWork ? 1 : 0} 批。` +
-        (
-          report.hasIssues
-            ? `\n詳細內容已寫入並顯示「${HEALTH_REPORT_SHEET}」。`
-            : `\n「${HEALTH_REPORT_SHEET}」已更新並自動隱藏。`
-        ) +
+        (summary.hasIssues
+          ? `\n\n異常摘要：\n${summary.text}`
+          : '\n未發現待處理變更或衝突。') +
         '\n本檢查只使用唯讀 Calendar API，不會修改或刪除事件。',
       SpreadsheetApp.getUi().ButtonSet.OK
     );
@@ -3734,17 +3763,14 @@ function syncPendingChanges() {
         CALENDAR_PENDING_SPREADSHEET_ID_PROPERTY
       );
     }
-    const report = writeHealthReportSheet_(spreadsheet, result);
-    reorderManagedSheets_(spreadsheet);
+    const summary = buildHealthAlertSummary_(result, 10);
     const failed = result.results.filter(item => !item.result.ok).length;
     SpreadsheetApp.getUi().alert(
       `已處理 ${result.results.length} 項；失敗 ${failed} 項；` +
       `仍有衝突 ${result.analysis.conflicts.length} 項。` +
-      (
-        report.hasIssues
-          ? `\n「${HEALTH_REPORT_SHEET}」已顯示。`
-          : `\n「${HEALTH_REPORT_SHEET}」已更新並自動隱藏。`
-      ) +
+      (summary.hasIssues
+        ? `\n\n未完成摘要：\n${summary.text}`
+        : '\n所有可安全處理項目均已完成。') +
       (
         clearedDraftNotes + clearedResolvedNotes
           ? `\n已清除 ${clearedDraftNotes + clearedResolvedNotes} 個已解決的系統 note。`
@@ -4112,6 +4138,7 @@ function processRowChange(e) {
   if (isAnnualArchiveTransactionActive_()) return;
   const sheet = e.range.getSheet();
   const sheetName = sheet.getName();
+  if (isAnnualArchiveSheet_(sheet)) return;
   const isFu = isMainTrackingSheetName_(sheetName);
   const isMonthly = isMonthlySheetName_(sheetName);
   if (!isFu && !isMonthly) return;
@@ -4526,6 +4553,26 @@ function getRepairContextKey_(context) {
   return `${Number(context.sheetId)}:${Number(context.row)}`;
 }
 
+function getUniqueCalendarRepairOwnerKey_(event, contexts) {
+  if (!event || !isSystemManagedCalendarEvent_(event)) return '';
+  const titleSlots = toCellText_(event.summary).split(/\s*\|\s*/);
+  if (titleSlots.length !== 3) return '';
+  const matches = (contexts || []).filter(context => {
+    if (
+      !context ||
+      !context.valid ||
+      toSingleLineText_(context.chartNo) !== toSingleLineText_(titleSlots[0]) ||
+      toSingleLineText_(context.patientName) !== toSingleLineText_(titleSlots[1])
+    ) {
+      return false;
+    }
+    const expected = buildCalendarResource_(context);
+    return calendarEndpointMatches_(event.start, expected.start) &&
+      calendarEndpointMatches_(event.end, expected.end);
+  });
+  return matches.length === 1 ? getRepairContextKey_(matches[0]) : '';
+}
+
 function readCalendarEventsForRepair_(calendarId, eventIds) {
   const eventsById = {};
   const missingIds = {};
@@ -4759,6 +4806,21 @@ function buildSelectedCalendarRepairPlan_(
     });
   }
 
+  const duplicateOwnerKeys = {};
+  contexts.forEach(context => {
+    const eventId = toCellText_(context.eventId);
+    if (
+      eventId &&
+      (scan.eventLocations[eventId] || []).length > 1 &&
+      !duplicateOwnerKeys[eventId]
+    ) {
+      duplicateOwnerKeys[eventId] = getUniqueCalendarRepairOwnerKey_(
+        read.eventsById[eventId],
+        contexts
+      );
+    }
+  });
+
   const items = contexts.map(context => {
     const signature = getContextCalendarBindingSignature_(context);
     const matches = Object.values(read.eventsById).filter(event => {
@@ -4805,6 +4867,15 @@ function buildSelectedCalendarRepairPlan_(
     if (matches.length === 1) {
       item.event = matches[0];
       item.proposedEventId = toCellText_(matches[0].id);
+    }
+
+    if (
+      !item.proposedEventId &&
+      currentEventId &&
+      duplicateOwnerKeys[currentEventId] === getRepairContextKey_(context)
+    ) {
+      item.event = item.currentEvent;
+      item.proposedEventId = currentEventId;
     }
 
     if (
@@ -6375,13 +6446,12 @@ function previewFuLifecycleRecoveryMigration() {
       );
     }
     const health = buildFuLifecycleMigrationHealthResult_(plan, []);
-    const report = writeHealthReportSheet_(spreadsheet, health);
-    reorderManagedSheets_(spreadsheet);
+    const summary = buildHealthAlertSummary_(health, 8);
     const counts = plan.counts;
     const message = plan.ok
       ? [
         '預覽完成；未修改 FU／月表、V2 索引或 Calendar，' +
-          '只儲存預覽指紋並更新安全健康報告。',
+          '只儲存預覽指紋。',
         `停止追蹤 ${counts.stopTracking} 筆；` +
           `重綁 ${counts.rebind} 筆；` +
           `404 重建 ${counts.recreateMissing} 筆；` +
@@ -6391,8 +6461,8 @@ function previewFuLifecycleRecoveryMigration() {
         counts.orphanDelete
           ? '執行時會再顯示候選數量並要求確認。'
           : '可執行「執行 FU 追蹤生命週期修復」。',
-        report.hasIssues
-          ? `安全摘要已寫入「${HEALTH_REPORT_SHEET}」。`
+        summary.hasIssues
+          ? `安全摘要：\n${summary.text}`
           : ''
       ].filter(Boolean).join('\n')
       : `無法建立安全預覽：${plan.message}`;
@@ -6471,8 +6541,7 @@ function executeFuLifecycleRecoveryMigration() {
       result.plan,
       result.results
     );
-    const report = writeHealthReportSheet_(spreadsheet, health);
-    reorderManagedSheets_(spreadsheet);
+    const summary = buildHealthAlertSummary_(health, 8);
     const failed = result.results.filter(item => {
       return !item.result || !item.result.ok;
     }).length;
@@ -6482,11 +6551,9 @@ function executeFuLifecycleRecoveryMigration() {
         `人工處理 ${result.plan.counts.manual} 項。\n` +
         `執行前索引備份已建立並回讀驗證（` +
         `${result.backup.partCount} 分段）。` +
-        (
-          report.hasIssues
-            ? `\n待處理安全摘要已寫入「${HEALTH_REPORT_SHEET}」。`
-            : '\n所有可安全處理項目均已完成。'
-        ),
+        (summary.hasIssues
+          ? `\n待處理安全摘要：\n${summary.text}`
+          : '\n所有可安全處理項目均已完成。'),
       SpreadsheetApp.getUi().ButtonSet.OK
     );
     return result;

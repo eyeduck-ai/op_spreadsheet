@@ -444,6 +444,10 @@ class FakeSheet {
     return this.getLastColumn();
   }
 
+  getConditionalFormatRules() { return this.conditionalRules || []; }
+
+  setConditionalFormatRules(rules) { this.conditionalRules = rules; }
+
   getRange(row, column, numRows, numColumns) {
     this.calls.getRange++;
     return new FakeRange(this, row, column, numRows, numColumns);
@@ -623,8 +627,143 @@ function makeFakeSpreadsheet(sheets, id = 'spreadsheet-test') {
   };
 }
 
+function testEightDigitDateInputOnlyInFunctions() {
+  ['20260908', 20260908, '20240229'].forEach(value => assert.ok(call('parseEightDigitDate_', value)));
+  ['20260229', '20261301', '20260931', '2026/9/8', '2026098'].forEach(value =>
+    assert.strictEqual(call('parseEightDigitDate_', value), null));
+  assert.ok(!call('processRowChange', { range: new FakeSheet('IVI', 818,
+    [['姓名', '下次回診時間'], ['甲', '20260908']]).getRange(2, 2) }));
+  assert.ok(!evaluate('processRowChange.toString()').includes('normalizeManagedDateRange_'));
+}
+
+function testRestoreDateFormatsPreservesValuesAndTimes() {
+  const date = new Date(2026, 8, 8);
+  const sheet = new FakeSheet('202609', 819, [['自訂', '時間'],
+    ['保留', date], ['保留', '0830'], ['保留', 'PM']]);
+  // Model a migrated date and unrelated time/custom formats.
+  const formats = { '2:2': 'yyyyMMdd', '3:2': '@', '4:2': '@' };
+  const originalGetRange = sheet.getRange.bind(sheet);
+  sheet.getRange = (...args) => {
+    const range = originalGetRange(...args);
+    range.getNumberFormats = () => Array.from({length: range.getNumRows()}, (_, i) =>
+      [formats[(range.getRow() + i) + ':' + range.getColumn()] || '']);
+    range.setNumberFormat = format => {
+      formats[range.getRow() + ':' + range.getColumn()] = format;
+      return range;
+    };
+    return range;
+  };
+  const before = sheet.rows.map(row => row.slice());
+  const result = call('restoreWorksheetDateFormatsInSpreadsheet_', makeFakeSpreadsheet([sheet]));
+  assert.strictEqual(result[0].restored, 1);
+  assert.strictEqual(formats['2:2'], 'yyyy/m/d ddd');
+  assert.strictEqual(formats['3:2'], '@');
+  assert.deepStrictEqual(sheet.rows, before);
+  assert.strictEqual(call('restoreWorksheetDateFormatsInSpreadsheet_', makeFakeSpreadsheet([sheet])).length, 0);
+}
+
+function testPlanMigrationMovesWholeColumnAndIsIdempotent() {
+  const sheet = new FakeSheet('202609', 821, [['自訂', 'Plan', 'IOL', 'Axis', 'CalendarEventId'],
+    ['保留', '計畫', '+20.0', '90', 'event-keep']]);
+  let moves = 0;
+  sheet.moveColumns = (range, destination) => {
+    moves++;
+    const from = range.getColumn() - 1;
+    const to = destination - 1 - (from < destination - 1 ? 1 : 0);
+    sheet.rows.forEach(row => row.splice(to, 0, row.splice(from, 1)[0]));
+  };
+  assert.strictEqual(call('moveMonthlyPlanAfterAxis_', sheet).moved, true);
+  assert.deepStrictEqual(sheet.rows, [['自訂', 'IOL', 'Axis', 'Plan', 'CalendarEventId'],
+    ['保留', '+20.0', '90', '計畫', 'event-keep']]);
+  assert.strictEqual(call('moveMonthlyPlanAfterAxis_', sheet).moved, false);
+  assert.strictEqual(moves, 1);
+  const conflict = new FakeSheet('202608', 822, [['Plan', 'Axis', 'Plan'], ['A', 'B', 'C']]);
+  assert.strictEqual(call('moveMonthlyPlanAfterAxis_', conflict).ok, false);
+  assert.deepStrictEqual(conflict.rows[1], ['A', 'B', 'C']);
+  const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
+  assert.strictEqual(headers.indexOf('Plan'), headers.indexOf('Axis') + 1);
+}
+
+function testIolListIsReadOnlyAndKeepsAllDateBlocks() {
+  const { sheet, columns, api } = makeMonthlyReorderFixture();
+  sheet.setValueAt(3, columns.IOL, 'Lens <A>');
+  sheet.setValueAt(3, columns.IOL_FINAL, '+20.0');
+  sheet.setFontLineAt(4, columns.CHART_NO, 'line-through');
+  const header = sheet.rows[1].slice();
+  header[columns.HOSPITAL - 1] = '聯醫';
+  const patient = sheet.rows[2].slice();
+  patient[columns.EVENT_ID - 1] = '';
+  patient[columns.NAME - 1] = '第三位';
+  sheet.rows.push(header, patient);
+  const before = JSON.stringify(sheet.rows);
+  const result = call('buildIolListForDate_', sheet, new Date(2026, 8, 10), false);
+  assert.strictEqual(result.count, 2);
+  assert.strictEqual(result.excluded, 1);
+  assert.ok(result.text.includes('測試甲｜Lens <A>｜+20.0'));
+  assert.ok(result.text.includes('第三位｜Lens <A>｜+20.0'));
+  assert.ok(result.text.includes('20260910'));
+  const included = call('buildIolListForDate_', sheet, new Date(2026, 8, 10), true);
+  assert.strictEqual(included.count, 3);
+  assert.ok(included.text.includes('測試乙（已取消）｜未填｜未填'));
+  assert.strictEqual(JSON.stringify(sheet.rows), before);
+  assert.strictEqual(api.counts().updateCount, 0);
+  assert.strictEqual(api.counts().insertCount, 0);
+}
+
+function testIolListReadsOnlyRequestedDateDisplayRows() {
+  const { sheet, columns } = makeMonthlyReorderFixture();
+  const header = sheet.rows[1].slice();
+  header[columns.TIME - 1] = new Date(2026, 8, 11);
+  const patient = sheet.rows[2].slice();
+  patient[columns.EVENT_ID - 1] = '';
+  sheet.rows.push(header, patient);
+  const reads = [];
+  const getRange = sheet.getRange.bind(sheet);
+  sheet.getRange = (...args) => {
+    const range = getRange(...args);
+    const display = range.getDisplayValues.bind(range);
+    range.getDisplayValues = () => { reads.push(args); return display(); };
+    return range;
+  };
+  const result = call('buildIolListForDate_', sheet, new Date(2026, 8, 10), true);
+  assert.strictEqual(result.count, 2);
+  assert.deepStrictEqual(reads, [[3, 1, 2,
+    Math.max(columns.CHART_NO, columns.NAME, columns.IOL, columns.IOL_FINAL)]]);
+  reads.length = 0;
+  const empty = call('buildIolListForDate_', sheet, new Date(2026, 8, 12), false);
+  assert.strictEqual(empty.count, 0);
+  assert.deepStrictEqual(reads, []);
+}
+
+function testEntropionCaseNormalizationPreservesOtherText() {
+  assert.strictEqual(call('normalizeEntropionCase_', 'CATA + ENTROPION OU'), 'CATA + Entropion OU');
+  assert.strictEqual(call('normalizeEntropionCase_', 'Entropion'), 'Entropion');
+  assert.strictEqual(call('normalizeEntropionCase_', 'ENTROPIONX'), 'ENTROPIONX');
+  assert.strictEqual(call('normalizeEntropionCase_', 123), 123);
+}
+
+function testPlanMigrationRepairsNativeRefErrorsAndPreservesOtherRules() {
+  const sheet = new FakeSheet('202609', 824, [['Axis', 'Plan'], ['90', 'APPLY']]);
+  const makeRule = formula => ({
+    formula, style: 'green',
+    getBooleanCondition: () => ({ getCriteriaValues: () => [formula] }),
+    getRanges: () => [sheet.getRange(43, 1, 1, 2)],
+    copy: () => ({ whenFormulaSatisfied: updated => ({ build: () => makeRule(updated) }) })
+  });
+  const custom = makeRule('=ISNUMBER(SEARCH("!",#REF!))');
+  sheet.conditionalRules = [custom, makeRule(
+    '=AND(ISNUMBER(SEARCH("APPLY",#REF!)),N("SURGERY_SYSTEM_CF_MONTH_PLAN_GREEN")=0)')];
+  const result = call('moveMonthlyPlanAfterAxis_', sheet);
+  assert.strictEqual(result.moved, false);
+  assert.strictEqual(result.repairedRules, 1);
+  assert.strictEqual(sheet.conditionalRules[0], custom);
+  assert.ok(sheet.conditionalRules[1].formula.includes('SEARCH("APPLY",$B43)'));
+  assert.strictEqual(sheet.conditionalRules[1].style, 'green');
+  assert.strictEqual(call('moveMonthlyPlanAfterAxis_', sheet).repairedRules, 0);
+}
+
 function testVersionAndModuleSplit() {
-  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.08.08');
+  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.09.12.2');
   assert.strictEqual(evaluate('typeof processRowChange'), 'function');
   assert.strictEqual(evaluate('typeof processCalendarStructureChange'), 'function');
   assert.strictEqual(evaluate('typeof createMonthlySurgerySheet'), 'function');
@@ -676,7 +815,6 @@ function testCurrentMenuHasNoCompletedMigrationOrLegacyOutput() {
     'OP-高榮',
     'OP-聯醫',
     '手術清單',
-    '水晶體清單',
     '反向同步',
     '預覽同步架構升級',
     '執行同步架構升級'
@@ -692,9 +830,12 @@ function testCurrentMenuHasNoCompletedMigrationOrLegacyOutput() {
     '月刀表 => FU',
     'FU => 月刀表',
     '建立新月刀表',
+    '水晶體清單（選刀日／複製）',
+    '調整月表 Plan 至 Axis 後方',
+    '恢復工作表原日期顯示格式',
     '選取列新增刀日',
-    '整理月刀表',
-    '整理FU日期',
+    '整理目前分頁',
+    '資料遷移與舊版修復',
     '修復選取列同步',
     '彙整舊月刀表'
   ].forEach(text => assert.ok(source.includes(text)));
@@ -732,6 +873,10 @@ function testCurrentMenuHasNoCompletedMigrationOrLegacyOutput() {
   assert.strictEqual(
     evaluate('typeof executeFuLifecycleRecoveryMigration'),
     'function'
+  );
+  assert.strictEqual(
+    evaluate('typeof removeLegacySyncHealthReportSheet'),
+    'undefined'
   );
 }
 
@@ -821,6 +966,66 @@ function testCalendarPendingQueueCoalescesWithoutClinicalText() {
   assert.strictEqual(queue.fullScan, true);
   assert.strictEqual(queue.allowMissingDeletes, true);
   assert.deepStrictEqual(plain(queue.sheets), {});
+}
+
+function testWholeMonthlyTimeNormalizationUsesBoundedBatchReads() {
+  const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
+  const time = headers.indexOf('日期／報到時間');
+  const rows = [headers];
+  for (let i = 0; i < 100; i++) {
+    const row = headers.map(() => '');
+    row[time] = 830;
+    rows.push(row);
+  }
+  const sheet = new FakeSheet('202610', 870, rows);
+  const columns = call('getRequiredMonthlyColumns_', sheet);
+  sheet.calls.getRange = 0;
+  sheet.calls.setValues = 0;
+  const result = call('normalizeExistingTimeColumn_', sheet, 'MONTHLY', columns);
+  assert.deepStrictEqual(plain(result), { normalized: 100, errors: 0 });
+  assert.ok(sheet.calls.getRange <= 5, '100 rows must use bounded batch reads');
+  assert.strictEqual(sheet.calls.setValues, 1);
+  assert.ok(sheet.rows.slice(1).every(row => row[time] === '08:30'));
+  sheet.calls.setValues = 0;
+  assert.strictEqual(call('normalizeExistingTimeColumn_', sheet, 'MONTHLY', columns).normalized, 0);
+  assert.strictEqual(sheet.calls.setValues, 0);
+}
+
+function testFuSnapshotContextDoesNotRereadSheet() {
+  const headers = plain(evaluate('CONFIG.HEADERS'));
+  const row = headers.map(header => ({ '病歷號': '001', '姓名': '測試',
+    '日期': new Date(2026, 9, 1), CalendarEventId: 'event-test' }[header] || ''));
+  const sheet = new FakeSheet('FU', 871, [headers, row]);
+  const columns = call('getRequiredFuColumns_', sheet);
+  const fresh = call('buildFuRowContext_', sheet, 2, columns);
+  sheet.calls.getRange = 0;
+  for (let i = 0; i < 100; i++) {
+    const result = call('buildFuRowContext_', sheet, 2, columns, row);
+    assert.strictEqual(result.rowHash, fresh.rowHash);
+    assert.strictEqual(result.valid, fresh.valid);
+  }
+  assert.strictEqual(sheet.calls.getRange, 0);
+}
+
+function testUnifiedSortRoutesWithoutChangingSortImplementations() {
+  const oldFu = context.sortFuByDate;
+  const oldMonthly = context.sortCurrentMonthlySheet;
+  const oldActive = context.SpreadsheetApp.getActiveSpreadsheet;
+  let name = 'FU';
+  try {
+    context.sortFuByDate = () => 'fu-sort';
+    context.sortCurrentMonthlySheet = () => 'monthly-sort';
+    context.SpreadsheetApp.getActiveSpreadsheet = () => ({
+      getActiveSheet: () => ({ getName: () => name })
+    });
+    assert.strictEqual(call('sortCurrentScheduleSheet'), 'fu-sort');
+    name = '202610';
+    assert.strictEqual(call('sortCurrentScheduleSheet'), 'monthly-sort');
+  } finally {
+    context.sortFuByDate = oldFu;
+    context.sortCurrentMonthlySheet = oldMonthly;
+    context.SpreadsheetApp.getActiveSpreadsheet = oldActive;
+  }
 }
 
 function withTriggerRuntimeMocks(options, callback) {
@@ -2597,7 +2802,7 @@ function testMonthlyDiagnosisSummaryFormulaDefinition() {
     },
     {
       label: 'Plasty',
-      keywords: ['Dermatochalasis', 'Ptosis', 'Dacryocystitis']
+      keywords: ['Dermatochalasis', 'Ptosis', 'Dacryocystitis', 'Entropion']
     }
   ]);
   const categories = plain(call('getMonthlyDiagnosisSummaryCategories_'));
@@ -2612,7 +2817,7 @@ function testMonthlyDiagnosisSummaryFormulaDefinition() {
       '(VH|ERM|SUBLUXATION|DISLOCATION|RRD|TRD|SUBLUXATED IOL|RD)' +
       '([^A-Z0-9]|$)',
     '(^|[^A-Z0-9])' +
-      '(DERMATOCHALASIS|PTOSIS|DACRYOCYSTITIS)' +
+      '(DERMATOCHALASIS|PTOSIS|DACRYOCYSTITIS|ENTROPION)' +
       '([^A-Z0-9]|$)'
   ]);
   const cataPattern = new RegExp(patterns[0], 'i');
@@ -2628,6 +2833,8 @@ function testMonthlyDiagnosisSummaryFormulaDefinition() {
   assert.ok(retinaPattern.test('IOL dislocation'));
   assert.strictEqual(retinaPattern.test('Dermatochalasis'), false);
   assert.ok(plastyPattern.test('Acute dacryocystitis'));
+  assert.ok(plastyPattern.test('entropion'));
+  assert.ok(evaluate('CONFIG.MONTHLY_DIAGNOSIS_OPTIONS').includes('Entropion'));
   assert.ok(cataPattern.test('Cataract + ptosis'));
   assert.ok(plastyPattern.test('Cataract + ptosis'));
   const formula = call('buildMonthlyDiagnosisSummaryFormula_', {
@@ -2636,8 +2843,8 @@ function testMonthlyDiagnosisSummaryFormulaDefinition() {
   });
   assert.ok(formula.startsWith('=LET('));
   assert.ok(formula.includes('SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V2'));
-  assert.ok(formula.includes('TO_TEXT(IFERROR($AE$2:$AE,""))'));
-  assert.ok(formula.includes('TO_TEXT(IFERROR($AB$2:$AB,""))'));
+  assert.ok(formula.includes('TO_TEXT(IFERROR(INDEX($AE:$AE,2):INDEX($AE:$AE,ROWS($AE:$AE)),""))'));
+  assert.ok(formula.includes('TO_TEXT(IFERROR(INDEX($AB:$AB,2):INDEX($AB:$AB,ROWS($AB:$AB)),""))'));
   assert.strictEqual(formula.includes('$G$2:$G'), false);
   assert.strictEqual(formula.includes('$H$2:$H'), false);
   assert.ok(formula.includes('IF(sideValues="OU",2'));
@@ -3386,6 +3593,7 @@ function testMonthlyClinicalIdentifiersDefaultToPlainText() {
   assert.deepStrictEqual(
     plain(evaluate('MONTHLY_TEXT_KEYS')),
     [
+      'TEL',
       'IOL',
       'IOL_TARGET',
       'IOL_FINAL',
@@ -3406,12 +3614,13 @@ function testMonthlyClinicalIdentifiersDefaultToPlainText() {
   assert.strictEqual(sheet.calls.numberFormatRangeLists.length, 1);
   const textFormat = sheet.calls.numberFormatRangeLists[0];
   assert.strictEqual(textFormat.format, '@');
-  assert.strictEqual(textFormat.addresses.length, 8);
+  assert.strictEqual(textFormat.addresses.length, 9);
   [
+    'E2',
+    'K2',
     'L2',
     'M2',
     'N2',
-    'O2',
     'R2',
     'S2',
     'T2',
@@ -3845,7 +4054,7 @@ function testCalendarErrorsUseVisibleIdentityCell() {
 }
 
 function testHealthRowsRedactIdsAndSeparateFailures() {
-  const conflictRows = call('getHealthStatusRows_', {
+  const conflictRows = call('getHealthIssueRows_', {
     analysis: {
       actions: [],
       conflicts: [{
@@ -3860,7 +4069,7 @@ function testHealthRowsRedactIdsAndSeparateFailures() {
   assert.strictEqual(conflictRows[0][1], '衝突');
   assert.strictEqual(conflictRows[0][6].includes('event-secret'), false);
 
-  const failureRows = call('getHealthStatusRows_', {
+  const failureRows = call('getHealthIssueRows_', {
     analysis: {
       actions: [{
         type: 'update',
@@ -3882,11 +4091,12 @@ function testHealthRowsRedactIdsAndSeparateFailures() {
   assert.strictEqual(failureRows[0][1], '失敗');
   assert.strictEqual(failureRows[0][2], 'update_failed');
 
-  const healthyRows = call('getHealthStatusRows_', {
+  const healthySummary = call('buildHealthAlertSummary_', {
     analysis: { actions: [], conflicts: [] },
     results: []
   });
-  assert.strictEqual(healthyRows[0][1], '正常');
+  assert.strictEqual(healthySummary.hasIssues, false);
+  assert.ok(healthySummary.text.includes('未發現'));
 
   const appliedAction = {
     type: 'calendar_drift',
@@ -3898,7 +4108,7 @@ function testHealthRowsRedactIdsAndSeparateFailures() {
     eventId: 'event-orphan',
     previous: { sheetName: 'Calendar', row: '' }
   };
-  const mixedRows = call('getHealthStatusRows_', {
+  const mixedRows = call('getHealthIssueRows_', {
     analysis: {
       actions: [appliedAction, pendingAction],
       conflicts: []
@@ -3912,10 +4122,26 @@ function testHealthRowsRedactIdsAndSeparateFailures() {
   assert.strictEqual(mixedRows[0][1], '待處理');
   assert.strictEqual(mixedRows[0][2], 'calendar_orphan');
   assert.ok(mixedRows[0][6].includes('等待確認刪除'));
+
+  const conflictSummary = call('buildHealthAlertSummary_', {
+    analysis: {
+      actions: [],
+      conflicts: [{
+        type: 'duplicate_event_id',
+        eventId: 'event-secret',
+        context: { sheetName: 'FU', row: 2 },
+        message: 'CalendarEventId event-secret 出現在多列。'
+      }]
+    },
+    results: []
+  }, 10);
+  assert.strictEqual(conflictSummary.hasIssues, true);
+  assert.ok(conflictSummary.text.includes('FU 第 2 列'));
+  assert.strictEqual(conflictSummary.text.includes('event-secret'), false);
 }
 
 function testHealthRowsExposePendingQueueWithoutClinicalData() {
-  const rows = call('getHealthStatusRows_', {
+  const rows = call('getHealthIssueRows_', {
     analysis: { actions: [], conflicts: [] },
     results: [],
     pendingQueue: {
@@ -3934,19 +4160,29 @@ function testHealthRowsExposePendingQueueWithoutClinicalData() {
   assert.strictEqual(rows[0][6].includes('虛構病人'), false);
 }
 
-function testHealthReportVisibilityAndCompletedUpgradeRemoval() {
+function testHealthReportIsRetired() {
   const calendarSource = sourceByFile['calendar_sync.js'];
+  const deployedSource = files.map(file => sourceByFile[file]).join('\n');
   [
     'SYNC_ARCHITECTURE_UPGRADE',
     'previewSyncArchitectureUpgrade',
     'runSyncArchitectureUpgrade',
     'backupLegacySyncProperties_'
   ].forEach(text => assert.strictEqual(calendarSource.includes(text), false));
-  assert.ok(calendarSource.includes('sheet.showSheet()'));
-  assert.ok(calendarSource.includes('sheet.hideSheet()'));
-  assert.ok(calendarSource.includes('已更新並自動隱藏'));
+  assert.strictEqual(deployedSource.includes('writeHealthReportSheet_'), false);
+  assert.strictEqual(calendarSource.includes('sheet.showSheet()'), false);
+  assert.strictEqual(calendarSource.includes('sheet.hideSheet()'), false);
+  assert.strictEqual(deployedSource.includes('同步健康報告'), false);
+  assert.strictEqual(
+    evaluate('typeof inspectLegacyHealthReportSheet_'),
+    'undefined'
+  );
+  assert.strictEqual(
+    evaluate('typeof removeLegacySyncHealthReportSheet'),
+    'undefined'
+  );
+  assert.strictEqual(evaluate('typeof buildHealthAlertSummary_'), 'function');
 }
-
 function testRegistryStoresRawIdButNoClinicalPlaintext() {
   const entry = call('toRegistryEntry_', registryContext());
   assert.strictEqual(entry.eventId, 'event-1');
@@ -4066,6 +4302,61 @@ function liveCalendarContext(overrides = {}) {
     timeInfo: call('resolveCalendarTime_', '08:00'),
     ...overrides
   };
+}
+
+function testCalendarRepairOwnerRequiresUniqueIdentityAndSchedule() {
+  const owner = liveCalendarContext({
+    eventId: 'event-duplicate',
+    sheetId: 50,
+    row: 30,
+    chartNo: 'X001',
+    patientName: '測試姓名',
+    condition: '最新診斷',
+    date: new Date(2026, 7, 13),
+    timeInfo: call('resolveCalendarTime_', '12:00')
+  });
+  const event = plain(call('buildCalendarResource_', owner));
+  event.id = 'event-duplicate';
+  event.summary = 'X001 | 測試姓名 | 舊診斷';
+
+  assert.strictEqual(
+    call('getUniqueCalendarRepairOwnerKey_', event, [owner]),
+    '50:30'
+  );
+
+  const sameIdentityAndSchedule = {
+    ...owner,
+    row: 33,
+    condition: '另一診斷'
+  };
+  assert.strictEqual(
+    call(
+      'getUniqueCalendarRepairOwnerKey_',
+      event,
+      [owner, sameIdentityAndSchedule]
+    ),
+    ''
+  );
+
+  const wrongSchedule = {
+    ...owner,
+    row: 34,
+    timeInfo: call('resolveCalendarTime_', '12:30')
+  };
+  assert.strictEqual(
+    call('getUniqueCalendarRepairOwnerKey_', event, [wrongSchedule]),
+    ''
+  );
+
+  const wrongIdentity = {
+    ...owner,
+    row: 35,
+    chartNo: 'X002'
+  };
+  assert.strictEqual(
+    call('getUniqueCalendarRepairOwnerKey_', event, [wrongIdentity]),
+    ''
+  );
 }
 
 function testLiveCalendarAuditFindsColorDriftMissingAndOrphans() {
@@ -4203,6 +4494,138 @@ function testCalendarLifecycleCreateAndVerify() {
     sheet.valueAt(2, headers.indexOf('CalendarEventId') + 1),
     'created-1'
   );
+}
+
+function makeMonthlyReorderFixture() {
+  clearScriptProperties();
+  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
+  // Deliberately reorder columns to exercise header-based lookup.
+  const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS')).reverse();
+  const makeRow = fields => headers.map(header => fields[header] || '');
+  const sheet = new FakeSheet('202609', 909, [
+    headers,
+    makeRow({ '日期／報到時間': new Date(2026, 8, 10), '醫院': '高榮', '病歷號': '◆ 刀日' }),
+    makeRow({ '病歷號': 'TEST-A', '姓名': '測試甲', CalendarEventId: 'event-a' }),
+    makeRow({ '病歷號': 'TEST-B', '姓名': '測試乙', CalendarEventId: 'event-b' })
+  ]);
+  const spreadsheet = makeFakeSpreadsheet([sheet]);
+  const columns = call('getRequiredMonthlyColumns_', sheet);
+  const scan = call('buildCurrentCalendarScan_', spreadsheet);
+  call('writeCalendarRegistryStore_', scan);
+  const api = installCalendarMock({ initialEvents: scan.contexts.map(item => ({
+    ...plain(call('buildCalendarResource_', item)), id: item.eventId
+  })) });
+  return { sheet, spreadsheet, columns, scan, api };
+}
+
+function testMonthlyMoveDuringCalendarUpdateDoesNotCopyEventId() {
+  const { sheet, columns, scan, api } = makeMonthlyReorderFixture();
+  const originalUpdate = context.Calendar.Events.update;
+  context.Calendar.Events.update = (...args) => {
+    const result = originalUpdate(...args);
+    [sheet.rows[2], sheet.rows[3]] = [sheet.rows[3], sheet.rows[2]];
+    sheet.setNoteAt(3, columns.CHART_NO, '另一列的人工註記');
+    call('setSystemNote_', sheet.getRange(3, columns.CHART_NO),
+      evaluate('CALENDAR_SYNC_NOTE_PREFIX'), '另一列仍待重試');
+    return result;
+  };
+  try {
+    const result = call('syncManagedContext_', scan.contexts[0], scan.eventLocations);
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(sheet.valueAt(3, columns.EVENT_ID), 'event-b');
+    assert.strictEqual(sheet.valueAt(4, columns.EVENT_ID), 'event-a');
+    assert.ok(sheet.noteAt(3, columns.CHART_NO).includes('另一列仍待重試'));
+    assert.strictEqual(api.counts().insertCount, 0);
+  } finally {
+    context.Calendar.Events.update = originalUpdate;
+  }
+}
+
+function testMonthlyReorderClearsStaleNotesWithoutCalendarCalls() {
+  const { sheet, spreadsheet, columns, api } = makeMonthlyReorderFixture();
+  [sheet.rows[2], sheet.rows[3]] = [sheet.rows[3], sheet.rows[2]];
+  sheet.setNoteAt(4, columns.CHART_NO, '人工備註保留');
+  call('setSystemNote_', sheet.getRange(4, columns.CHART_NO),
+    evaluate('CALENDAR_CONFLICT_NOTE_PREFIX'), '舊重複警告');
+  call('setSystemNote_', sheet.getRange(3, columns.CHART_NO),
+    evaluate('CALENDAR_SYNC_NOTE_PREFIX'), '舊同步警告');
+  call('reconcileCalendarRegistry_', spreadsheet, { apply: false, changeType: 'HEALTH' });
+  assert.ok(sheet.noteAt(4, columns.CHART_NO).includes('舊重複警告'));
+  const result = call('reconcileCalendarRegistry_', spreadsheet,
+    { apply: true, changeType: 'OTHER' });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(sheet.noteAt(4, columns.CHART_NO), '人工備註保留');
+  assert.strictEqual(sheet.noteAt(3, columns.CHART_NO), '');
+  assert.strictEqual(api.counts().updateCount, 0);
+  assert.strictEqual(api.counts().insertCount, 0);
+  assert.strictEqual(api.counts().removeCount, 0);
+  assert.strictEqual(call('readCalendarRegistryStore_').entries
+    .find(entry => entry.eventId === 'event-a').row, 4);
+}
+
+function testMonthlyReorderKeepsActualDuplicateDiagnostics() {
+  const { sheet, spreadsheet, columns, api } = makeMonthlyReorderFixture();
+  sheet.rows[3][columns.EVENT_ID - 1] = 'event-a';
+  call('reconcileCalendarRegistry_', spreadsheet, { apply: false, changeType: 'OTHER' });
+  assert.throws(() => call('reconcileCalendarRegistry_', spreadsheet,
+    { apply: true, changeType: 'OTHER' }), /重複/);
+  [3, 4].forEach(row => assert.ok(sheet.noteAt(row, columns.CHART_NO).includes('重複')));
+  assert.strictEqual(api.counts().updateCount, 0);
+}
+
+function testMonthlyDateChangesDuringSyncRemainPendingUntilRetried() {
+  const { sheet, spreadsheet, columns, api } = makeMonthlyReorderFixture();
+  const originalUpdate = context.Calendar.Events.update;
+  context.Calendar.Events.update = (...args) => {
+    const result = originalUpdate(...args);
+    // Move this patient under a new date while the request is in flight.
+    const nextHeader = sheet.rows[1].slice();
+    nextHeader[columns.TIME - 1] = new Date(2026, 8, 17);
+    const moved = sheet.rows.splice(2, 1)[0];
+    sheet.rows.push(nextHeader, moved);
+    return result;
+  };
+  try {
+    const result = call('syncManagedRowsAt_', spreadsheet, sheet, [3]);
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.results[0].result.status, 'row_changed_during_sync');
+    const pending = call('readCalendarRegistryStore_').entries
+      .find(entry => entry.eventId === 'event-a');
+    assert.strictEqual(pending.pendingSync, true);
+    assert.strictEqual(pending.pendingError, 'row_changed_during_sync');
+    assert.strictEqual(sheet.valueAt(5, columns.EVENT_ID), 'event-a');
+    assert.strictEqual(sheet.valueAt(3, columns.EVENT_ID), 'event-b');
+  } finally {
+    context.Calendar.Events.update = originalUpdate;
+  }
+  const retried = call('reconcileCalendarRegistry_', spreadsheet,
+    { apply: true, changeType: 'OTHER' });
+  assert.strictEqual(retried.ok, true);
+  assert.strictEqual(api.events['event-a'].start.date, '2026-09-17');
+  assert.strictEqual(api.events['event-b'].start.date, '2026-09-10');
+  assert.strictEqual(api.counts().insertCount, 0);
+  assert.strictEqual(call('readCalendarRegistryStore_').entries
+    .find(entry => entry.eventId === 'event-a').pendingSync, false);
+}
+
+function testMonthlyReorderDoesNotClearFailedPendingSync() {
+  const { sheet, spreadsheet, columns, scan } = makeMonthlyReorderFixture();
+  call('writeCalendarRegistryStore_', scan, [{
+    ...call('toRegistryEntry_', scan.contexts[0]),
+    pendingSync: true, pendingError: 'update_failed'
+  }]);
+  const originalUpdate = context.Calendar.Events.update;
+  context.Calendar.Events.update = () => { throw new Error('503 temporary failure'); };
+  try {
+    const result = call('reconcileCalendarRegistry_', spreadsheet,
+      { apply: true, changeType: 'OTHER' });
+    assert.strictEqual(result.ok, false);
+    assert.ok(sheet.noteAt(3, columns.CHART_NO).includes('更新失敗'));
+    assert.strictEqual(call('readCalendarRegistryStore_').entries
+      .find(entry => entry.eventId === 'event-a').pendingSync, true);
+  } finally {
+    context.Calendar.Events.update = originalUpdate;
+  }
 }
 
 function testCalendarLifecycle404Recreates() {
@@ -5276,11 +5699,21 @@ function testClaspIncludesAllRuntimeModules() {
 
 const tests = [
   testVersionAndModuleSplit,
+  testEightDigitDateInputOnlyInFunctions,
+  testRestoreDateFormatsPreservesValuesAndTimes,
+  testPlanMigrationMovesWholeColumnAndIsIdempotent,
+  testIolListIsReadOnlyAndKeepsAllDateBlocks,
+  testIolListReadsOnlyRequestedDateDisplayRows,
+  testEntropionCaseNormalizationPreservesOtherText,
+  testPlanMigrationRepairsNativeRefErrorsAndPreservesOtherRules,
   testOnlyCalendarEventIdIsCanonicalSystemField,
   testCurrentMenuHasNoCompletedMigrationOrLegacyOutput,
   testMonthlySheetNameRecognition,
   testTimeNormalizationVariants,
   testMultiRowPasteNormalizesEveryMonthlyTimeCell,
+  testWholeMonthlyTimeNormalizationUsesBoundedBatchReads,
+  testFuSnapshotContextDoesNotRereadSheet,
+  testUnifiedSortRoutesWithoutChangingSortImplementations,
   testCalendarPendingQueueCoalescesWithoutClinicalText,
   testFuNoDateDraftSkipsSyncAndClearsLegacyBusyNote,
   testIncompleteFuLifecycleSkipsOrDeletesOwnEvent,
@@ -5369,11 +5802,17 @@ const tests = [
   testCalendarErrorsUseVisibleIdentityCell,
   testHealthRowsRedactIdsAndSeparateFailures,
   testHealthRowsExposePendingQueueWithoutClinicalData,
-  testHealthReportVisibilityAndCompletedUpgradeRemoval,
+  testHealthReportIsRetired,
   testRegistryStoresRawIdButNoClinicalPlaintext,
+  testCalendarRepairOwnerRequiresUniqueIdentityAndSchedule,
   testLiveCalendarAuditFindsColorDriftMissingAndOrphans,
   testLiveCalendarAuditFailsClosedAndOrphanDeleteNeedsConfirmation,
   testCalendarLifecycleCreateAndVerify,
+  testMonthlyMoveDuringCalendarUpdateDoesNotCopyEventId,
+  testMonthlyReorderClearsStaleNotesWithoutCalendarCalls,
+  testMonthlyReorderKeepsActualDuplicateDiagnostics,
+  testMonthlyDateChangesDuringSyncRemainPendingUntilRetried,
+  testMonthlyReorderDoesNotClearFailedPendingSync,
   testCalendarLifecycle404Recreates,
   testCalendarLifecycleDelete404ClearsId,
   testRegistryChunkRoundTrip,
