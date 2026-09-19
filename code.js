@@ -9,7 +9,7 @@
  * - annual_archive.js：私人備份與永久年度封存
  */
 const CONFIG = {
-  VERSION: '2026.09.12.2',
+  VERSION: '2026.09.19',
   CALENDAR_ID: 'YOUR_CALENDAR_ID_HERE',
   SHEET_ALL: 'All',
   SHEET_FU: 'FU',
@@ -202,9 +202,6 @@ const LEGACY_MONTHLY_TIME_HEADERS = ['時間'];
 const MONTHLY_DATE_HEADER_MARKER = '◆ 刀日';
 const MONTHLY_DIAGNOSIS_SUMMARY_FORMULA_MARKER =
   'SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V2';
-const LEGACY_MONTHLY_DIAGNOSIS_SUMMARY_FORMULA_MARKERS = [
-  'SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V1'
-];
 const MONTHLY_DIAGNOSIS_SUMMARY_NOTE_PREFIX = '系統月表診斷統計：';
 const HOSPITAL_KAOH = '高榮';
 const HOSPITAL_UNION = '聯醫';
@@ -257,11 +254,6 @@ const ANNUAL_ARCHIVE_ROW_TYPE_HEADER = 'ArchiveRowType';
 const ANNUAL_ARCHIVE_TRANSACTION_PROPERTY =
   'ANNUAL_SURGERY_ARCHIVE_TRANSACTION_V1';
 const LEGACY_ARCHIVED_MONTHS_PROPERTY = 'ARCHIVED_MONTHLY_SHEETS_V1';
-const FU_LIFECYCLE_RECOVERY_PREVIEW_PROPERTY =
-  'FU_LIFECYCLE_RECOVERY_PREVIEW_V1';
-const FU_LIFECYCLE_RECOVERY_BACKUP_PREFIX =
-  'FU_LIFECYCLE_RECOVERY_REGISTRY_BACKUP_V1';
-const FU_LIFECYCLE_RECOVERY_MIGRATION_VERSION = 2;
 
 function toCellText_(value) {
   return value === null || value === undefined ? '' : String(value).trim();
@@ -619,12 +611,6 @@ function showVersionInfo() {
 
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
-  const migrations = ui.createMenu('資料遷移與舊版修復')
-    .addItem('調整月表 Plan 至 Axis 後方', 'migrateMonthlyPlanOrder')
-    .addItem('恢復工作表原日期顯示格式', 'restoreWorksheetDateFormats')
-    .addItem('統一 Entropion 大小寫', 'migrateEntropionCase')
-    .addItem('預覽 FU 追蹤生命週期修復', 'previewFuLifecycleRecoveryMigration')
-    .addItem('執行 FU 追蹤生命週期修復', 'executeFuLifecycleRecoveryMigration');
   const maintenance = ui.createMenu('維護工具')
     .addItem('設定日曆', 'promptAndSaveCalendarId')
     .addItem('安裝／修復系統', 'installOrRepairSystem')
@@ -632,15 +618,10 @@ function onOpen() {
       '套用所有 FU／月表建議欄寬',
       'applyAllRecommendedColumnWidths'
     )
-    .addItem(
-      '啟用／修復月表診斷統計表頭',
-      'migrateMonthlyDiagnosisSummaryHeaders'
-    )
     .addSeparator()
     .addItem('檢查同步健康', 'checkSyncHealth')
     .addItem('同步待處理變更', 'syncPendingChanges')
     .addSeparator()
-    .addSubMenu(migrations)
     .addItem(`版本：${CONFIG.VERSION}`, 'showVersionInfo');
 
   ui.createMenu('手術排程系統')

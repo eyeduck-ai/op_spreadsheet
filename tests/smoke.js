@@ -636,54 +636,6 @@ function testEightDigitDateInputOnlyInFunctions() {
   assert.ok(!evaluate('processRowChange.toString()').includes('normalizeManagedDateRange_'));
 }
 
-function testRestoreDateFormatsPreservesValuesAndTimes() {
-  const date = new Date(2026, 8, 8);
-  const sheet = new FakeSheet('202609', 819, [['自訂', '時間'],
-    ['保留', date], ['保留', '0830'], ['保留', 'PM']]);
-  // Model a migrated date and unrelated time/custom formats.
-  const formats = { '2:2': 'yyyyMMdd', '3:2': '@', '4:2': '@' };
-  const originalGetRange = sheet.getRange.bind(sheet);
-  sheet.getRange = (...args) => {
-    const range = originalGetRange(...args);
-    range.getNumberFormats = () => Array.from({length: range.getNumRows()}, (_, i) =>
-      [formats[(range.getRow() + i) + ':' + range.getColumn()] || '']);
-    range.setNumberFormat = format => {
-      formats[range.getRow() + ':' + range.getColumn()] = format;
-      return range;
-    };
-    return range;
-  };
-  const before = sheet.rows.map(row => row.slice());
-  const result = call('restoreWorksheetDateFormatsInSpreadsheet_', makeFakeSpreadsheet([sheet]));
-  assert.strictEqual(result[0].restored, 1);
-  assert.strictEqual(formats['2:2'], 'yyyy/m/d ddd');
-  assert.strictEqual(formats['3:2'], '@');
-  assert.deepStrictEqual(sheet.rows, before);
-  assert.strictEqual(call('restoreWorksheetDateFormatsInSpreadsheet_', makeFakeSpreadsheet([sheet])).length, 0);
-}
-
-function testPlanMigrationMovesWholeColumnAndIsIdempotent() {
-  const sheet = new FakeSheet('202609', 821, [['自訂', 'Plan', 'IOL', 'Axis', 'CalendarEventId'],
-    ['保留', '計畫', '+20.0', '90', 'event-keep']]);
-  let moves = 0;
-  sheet.moveColumns = (range, destination) => {
-    moves++;
-    const from = range.getColumn() - 1;
-    const to = destination - 1 - (from < destination - 1 ? 1 : 0);
-    sheet.rows.forEach(row => row.splice(to, 0, row.splice(from, 1)[0]));
-  };
-  assert.strictEqual(call('moveMonthlyPlanAfterAxis_', sheet).moved, true);
-  assert.deepStrictEqual(sheet.rows, [['自訂', 'IOL', 'Axis', 'Plan', 'CalendarEventId'],
-    ['保留', '+20.0', '90', '計畫', 'event-keep']]);
-  assert.strictEqual(call('moveMonthlyPlanAfterAxis_', sheet).moved, false);
-  assert.strictEqual(moves, 1);
-  const conflict = new FakeSheet('202608', 822, [['Plan', 'Axis', 'Plan'], ['A', 'B', 'C']]);
-  assert.strictEqual(call('moveMonthlyPlanAfterAxis_', conflict).ok, false);
-  assert.deepStrictEqual(conflict.rows[1], ['A', 'B', 'C']);
-  const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
-  assert.strictEqual(headers.indexOf('Plan'), headers.indexOf('Axis') + 1);
-}
-
 function testIolListIsReadOnlyAndKeepsAllDateBlocks() {
   const { sheet, columns, api } = makeMonthlyReorderFixture();
   sheet.setValueAt(3, columns.IOL, 'Lens <A>');
@@ -735,41 +687,14 @@ function testIolListReadsOnlyRequestedDateDisplayRows() {
   assert.deepStrictEqual(reads, []);
 }
 
-function testEntropionCaseNormalizationPreservesOtherText() {
-  assert.strictEqual(call('normalizeEntropionCase_', 'CATA + ENTROPION OU'), 'CATA + Entropion OU');
-  assert.strictEqual(call('normalizeEntropionCase_', 'Entropion'), 'Entropion');
-  assert.strictEqual(call('normalizeEntropionCase_', 'ENTROPIONX'), 'ENTROPIONX');
-  assert.strictEqual(call('normalizeEntropionCase_', 123), 123);
-}
-
-function testPlanMigrationRepairsNativeRefErrorsAndPreservesOtherRules() {
-  const sheet = new FakeSheet('202609', 824, [['Axis', 'Plan'], ['90', 'APPLY']]);
-  const makeRule = formula => ({
-    formula, style: 'green',
-    getBooleanCondition: () => ({ getCriteriaValues: () => [formula] }),
-    getRanges: () => [sheet.getRange(43, 1, 1, 2)],
-    copy: () => ({ whenFormulaSatisfied: updated => ({ build: () => makeRule(updated) }) })
-  });
-  const custom = makeRule('=ISNUMBER(SEARCH("!",#REF!))');
-  sheet.conditionalRules = [custom, makeRule(
-    '=AND(ISNUMBER(SEARCH("APPLY",#REF!)),N("SURGERY_SYSTEM_CF_MONTH_PLAN_GREEN")=0)')];
-  const result = call('moveMonthlyPlanAfterAxis_', sheet);
-  assert.strictEqual(result.moved, false);
-  assert.strictEqual(result.repairedRules, 1);
-  assert.strictEqual(sheet.conditionalRules[0], custom);
-  assert.ok(sheet.conditionalRules[1].formula.includes('SEARCH("APPLY",$B43)'));
-  assert.strictEqual(sheet.conditionalRules[1].style, 'green');
-  assert.strictEqual(call('moveMonthlyPlanAfterAxis_', sheet).repairedRules, 0);
-}
-
 function testVersionAndModuleSplit() {
-  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.09.12.2');
+  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.09.19');
   assert.strictEqual(evaluate('typeof processRowChange'), 'function');
   assert.strictEqual(evaluate('typeof processCalendarStructureChange'), 'function');
   assert.strictEqual(evaluate('typeof createMonthlySurgerySheet'), 'function');
   assert.strictEqual(
     evaluate('typeof migrateMonthlyDiagnosisSummaryHeaders'),
-    'function'
+    'undefined'
   );
   assert.strictEqual(evaluate('typeof rebuildCalendarRegistry_'), 'function');
   assert.ok(sourceByFile['code.js'].includes('sheet_model.js'));
@@ -823,19 +748,13 @@ function testCurrentMenuHasNoCompletedMigrationOrLegacyOutput() {
     '安裝／修復系統',
     '檢查同步健康',
     '同步待處理變更',
-    '預覽 FU 追蹤生命週期修復',
-    '執行 FU 追蹤生命週期修復',
     '套用所有 FU／月表建議欄寬',
-    '啟用／修復月表診斷統計表頭',
     '月刀表 => FU',
     'FU => 月刀表',
     '建立新月刀表',
     '水晶體清單（選刀日／複製）',
-    '調整月表 Plan 至 Axis 後方',
-    '恢復工作表原日期顯示格式',
     '選取列新增刀日',
     '整理目前分頁',
-    '資料遷移與舊版修復',
     '修復選取列同步',
     '彙整舊月刀表'
   ].forEach(text => assert.ok(source.includes(text)));
@@ -855,6 +774,13 @@ function testCurrentMenuHasNoCompletedMigrationOrLegacyOutput() {
     '執行 FU 移除時間欄',
     '預覽月份日期標題升級',
     '執行月份日期標題升級',
+    '預覽 FU 追蹤生命週期修復',
+    '執行 FU 追蹤生命週期修復',
+    '調整月表 Plan 至 Axis 後方',
+    '恢復工作表原日期顯示格式',
+    '統一 Entropion 大小寫',
+    '啟用／修復月表診斷統計表頭',
+    '資料遷移與舊版修復',
     '預覽舊備份分頁與空白列清理',
     '執行舊備份分頁與空白列清理'
   ].forEach(text => assert.strictEqual(source.includes(text), false));
@@ -868,12 +794,15 @@ function testCurrentMenuHasNoCompletedMigrationOrLegacyOutput() {
   );
   assert.strictEqual(
     evaluate('typeof previewFuLifecycleRecoveryMigration'),
-    'function'
+    'undefined'
   );
   assert.strictEqual(
     evaluate('typeof executeFuLifecycleRecoveryMigration'),
-    'function'
+    'undefined'
   );
+  assert.strictEqual(evaluate('typeof migrateMonthlyPlanOrder'), 'undefined');
+  assert.strictEqual(evaluate('typeof restoreWorksheetDateFormats'), 'undefined');
+  assert.strictEqual(evaluate('typeof migrateEntropionCase'), 'undefined');
   assert.strictEqual(
     evaluate('typeof removeLegacySyncHealthReportSheet'),
     'undefined'
@@ -2805,8 +2734,7 @@ function testMonthlyDiagnosisSummaryFormulaDefinition() {
       keywords: ['Dermatochalasis', 'Ptosis', 'Dacryocystitis', 'Entropion']
     }
   ]);
-  const categories = plain(call('getMonthlyDiagnosisSummaryCategories_'));
-  assert.deepStrictEqual(categories, ['CATA', 'Retina', 'Plasty']);
+  const categories = definitions.map(definition => definition.label);
   const patterns = definitions.map(definition => call(
     'buildMonthlyDiagnosisSummaryPattern_',
     definition.keywords
@@ -2905,7 +2833,7 @@ function testMonthlyDiagnosisSummaryHeadersStayCanonical() {
   errorSheet.setFormulaAt(
     1,
     diagnosisColumn,
-    '=T(N("SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V1"))&"診斷"'
+    '=T(N("SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V2"))&"診斷"'
   );
   const errorInfo = call('getMonthlyColumnInfo_', errorSheet);
   assert.strictEqual(errorInfo.columns.DIAGNOSIS, diagnosisColumn);
@@ -2934,7 +2862,7 @@ function testMonthlyDiagnosisSummaryHeadersStayCanonical() {
   );
 }
 
-function testMonthlyDiagnosisSummaryMigrationIsSafeAndIdempotent() {
+function testMonthlyDiagnosisSummaryCreationAndManagedRefresh() {
   const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
   const columns = monthlyColumns();
   const diagnosisColumn = columns.DIAGNOSIS;
@@ -2943,117 +2871,61 @@ function testMonthlyDiagnosisSummaryMigrationIsSafeAndIdempotent() {
   dataRow[columns.DIAGNOSIS - 1] = 'CATA + ERM';
   dataRow[columns.CHART_NO - 1] = 'SAFE-001';
 
-  const plainSheet = new FakeSheet('202608', 2610, [
+  const sheet = new FakeSheet('202608', 2610, [
     headers.slice(),
     dataRow.slice()
   ]);
+  const originalData = plain(sheet.rows.slice(1));
   const passive = call(
     'ensureMonthlyDiagnosisSummaryHeader_',
-    plainSheet,
+    sheet,
     columns,
     { enable: false }
   );
   assert.strictEqual(passive.status, 'plain');
-  assert.strictEqual(plainSheet.formulaAt(1, diagnosisColumn), '');
+  assert.strictEqual(sheet.formulaAt(1, diagnosisColumn), '');
 
   const expectedFormula = call(
     'buildMonthlyDiagnosisSummaryFormula_',
     columns
   );
-  assert.ok(expectedFormula.includes(
-    'SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V2'
-  ));
-  assert.strictEqual(call(
-    'isManagedMonthlyDiagnosisSummaryFormula_',
-    '=T(N("SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V1"))&"診斷"'
-  ), true);
-  const currentSheet = new FakeSheet('202609', 2611, [headers.slice()]);
-  currentSheet.setFormulaAt(1, diagnosisColumn, expectedFormula);
+  const enabled = call(
+    'ensureMonthlyDiagnosisSummaryHeader_',
+    sheet,
+    columns,
+    { enable: true }
+  );
+  assert.strictEqual(enabled.status, 'enabled');
+  assert.strictEqual(sheet.formulaAt(1, diagnosisColumn), expectedFormula);
+  assert.deepStrictEqual(plain(sheet.rows.slice(1)), originalData);
 
-  const staleSheet = new FakeSheet('202610', 2612, [headers.slice()]);
+  const staleSheet = new FakeSheet('202609', 2611, [headers.slice()]);
   staleSheet.setFormulaAt(
     1,
     diagnosisColumn,
-    '=T(N("SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V1"))&"診斷"'
+    '=T(N("SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V2"))&"診斷"'
   );
-
-  const customSheet = new FakeSheet('202611', 2613, [
-    headers.slice(),
-    dataRow.slice()
-  ]);
-  const customFormula = '="人工診斷摘要"';
-  customSheet.setFormulaAt(1, diagnosisColumn, customFormula);
-
-  const spreadsheet = makeFakeSpreadsheet([
-    plainSheet,
-    currentSheet,
+  const refreshed = call(
+    'ensureMonthlyDiagnosisSummaryHeader_',
     staleSheet,
-    customSheet,
-    new FakeSheet('備註', 2614, [['不處理']])
-  ], 'diagnosis-summary-migration');
-  const originalData = plain(plainSheet.rows.slice(1));
-  const plan = call(
-    'buildMonthlyDiagnosisSummaryMigrationPlan_',
-    spreadsheet
+    columns
   );
-  assert.deepStrictEqual(plain(plan.counts), {
-    enable: 1,
-    refresh: 1,
-    enabled: 0,
-    refreshed: 0,
-    unchanged: 1,
-    manual: 1
-  });
-  const previewText = call(
-    'buildMonthlyDiagnosisSummaryMigrationPreviewText_',
-    plan
-  );
-  assert.ok(previewText.includes('病人資料列複製：0'));
-  assert.ok(previewText.includes('病人資料列移除：0'));
-  assert.ok(previewText.includes('202611：診斷表頭已有非系統公式'));
-  const result = call('applyMonthlyDiagnosisSummaryMigrationPlan_', plan);
-  assert.deepStrictEqual(plain(result.counts), {
-    enable: 0,
-    refresh: 0,
-    enabled: 1,
-    refreshed: 1,
-    unchanged: 1,
-    manual: 1
-  });
-  assert.strictEqual(result.dataRowsCopied, 0);
-  assert.strictEqual(result.dataRowsRemoved, 0);
-  assert.strictEqual(result.calendarTouched, false);
-  const resultText = call(
-    'buildMonthlyDiagnosisSummaryMigrationResultText_',
-    result
-  );
-  assert.ok(resultText.includes('Calendar 變更：0'));
-  assert.strictEqual(
-    plainSheet.formulaAt(1, diagnosisColumn),
-    expectedFormula
-  );
+  assert.strictEqual(refreshed.status, 'refreshed');
   assert.strictEqual(
     staleSheet.formulaAt(1, diagnosisColumn),
     expectedFormula
   );
-  assert.strictEqual(customSheet.formulaAt(1, diagnosisColumn), customFormula);
-  assert.deepStrictEqual(plain(plainSheet.rows.slice(1)), originalData);
-  assert.deepStrictEqual(plain(customSheet.rows.slice(1)), originalData);
 
-  const setFormulaCalls = plainSheet.calls.setFormulas;
-  const secondPlan = call(
-    'buildMonthlyDiagnosisSummaryMigrationPlan_',
-    spreadsheet
+  const customSheet = new FakeSheet('202610', 2612, [headers.slice()]);
+  const customFormula = '="人工診斷摘要"';
+  customSheet.setFormulaAt(1, diagnosisColumn, customFormula);
+  const conflict = call(
+    'ensureMonthlyDiagnosisSummaryHeader_',
+    customSheet,
+    columns
   );
-  assert.strictEqual(secondPlan.counts.unchanged, 3);
-  assert.strictEqual(secondPlan.counts.manual, 1);
-  const secondResult = call(
-    'applyMonthlyDiagnosisSummaryMigrationPlan_',
-    secondPlan
-  );
-  assert.strictEqual(secondResult.counts.unchanged, 3);
-  assert.strictEqual(secondResult.counts.manual, 1);
-  assert.strictEqual(plainSheet.calls.setFormulas, setFormulaCalls);
+  assert.strictEqual(conflict.status, 'conflict');
+  assert.strictEqual(customSheet.formulaAt(1, diagnosisColumn), customFormula);
 
   const workflowSource = sourceByFile['workflows.js'];
   const createBody = workflowSource.slice(
@@ -5193,83 +5065,6 @@ function testInstallPreflightIgnoresUniqueFuStoppedTrackingConflict() {
   );
 }
 
-function testFuStopTrackingContextAllowsNonBindingChanges() {
-  const fixture = makeFuLifecycleFixture({ sheetId: 6206 });
-  const item = {
-    action: 'stop_tracking',
-    sheetId: fixture.sheet.getSheetId(),
-    row: 2,
-    rowHash: 'stale-non-binding-row-hash',
-    bindingHash: fixture.context.bindingHash
-  };
-  const recovered = call(
-    'getFuLifecycleMigrationContext_',
-    fixture.spreadsheet,
-    item
-  );
-  assert.ok(recovered);
-  assert.strictEqual(recovered.row, 2);
-  assert.strictEqual(
-    call(
-      'getFuLifecycleMigrationContext_',
-      fixture.spreadsheet,
-      { ...item, action: 'rebind' }
-    ),
-    null
-  );
-
-  const stillBound = makeFuLifecycleFixture({
-    sheetId: 6207,
-    eventId: 'same-preview-event'
-  });
-  const stillBoundItem = {
-    action: 'stop_tracking',
-    sheetId: stillBound.sheet.getSheetId(),
-    row: 2,
-    rowHash: 'stale-non-binding-row-hash',
-    bindingHash: stillBound.context.bindingHash,
-    eventId: 'same-preview-event'
-  };
-  assert.ok(call(
-    'getFuLifecycleMigrationContext_',
-    stillBound.spreadsheet,
-    stillBoundItem
-  ));
-  assert.ok(call(
-    'getFuLifecycleMigrationContext_',
-    stillBound.spreadsheet,
-    {
-      ...stillBoundItem,
-      bindingHash: 'event-binding-does-not-match-stale-row'
-    }
-  ));
-  assert.strictEqual(
-    call(
-      'getFuLifecycleMigrationContext_',
-      stillBound.spreadsheet,
-      { ...stillBoundItem, eventId: 'different-event' }
-    ),
-    null
-  );
-
-  const zeroSheetId = makeFuLifecycleFixture({
-    sheetId: 0,
-    eventId: 'zero-sheet-event'
-  });
-  assert.ok(call(
-    'getFuLifecycleMigrationContext_',
-    zeroSheetId.spreadsheet,
-    {
-      action: 'stop_tracking',
-      sheetId: 0,
-      row: 2,
-      rowHash: zeroSheetId.context.rowHash,
-      bindingHash: zeroSheetId.context.bindingHash,
-      eventId: 'zero-sheet-event'
-    }
-  ));
-}
-
 function testFuAmbiguousBindingNeverCallsCalendar() {
   clearScriptProperties();
   scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
@@ -5333,348 +5128,6 @@ function testRegistryRoundTripIncludesBindingAndResolutionFingerprint() {
   assert.strictEqual(Object.hasOwn(loaded.entries[0], 'patientName'), false);
 }
 
-function testFuLifecycleMigrationPreviewAndApplyStopTracking() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  const fixture = makeFuLifecycleFixture({ sheetId: 6301 });
-  seedFuLifecycleRegistry(fixture, [
-    makeFuRegistryEntry(fixture, 'migration-event', { bindingHash: '' }),
-    registryEntry({
-      eventId: 'unrelated-monthly-event',
-      sheetId: 9999,
-      sheetName: '202607',
-      kind: 'MONTHLY',
-      row: 5,
-      rowHash: 'unrelated-monthly-row',
-      bindingHash: 'unrelated-monthly-binding'
-    })
-  ]);
-  const api = installCalendarMock({
-    initialEvents: [{
-      id: 'migration-event',
-      summary: 'LIFE-001 |  | 追蹤',
-      description: 'Plan: legacy migration',
-      colorId: '8',
-      start: { date: '2026-07-01' },
-      end: { date: '2026-07-02' }
-    }]
-  });
-  const preview = call(
-    'buildFuLifecycleRecoveryMigrationPlan_',
-    fixture.spreadsheet
-  );
-  assert.strictEqual(preview.ok, true);
-  assert.strictEqual(preview.counts.stopTracking, 1);
-  assert.strictEqual(preview.items[0].action, 'stop_tracking');
-  assert.strictEqual(JSON.stringify(preview).includes('LIFE-001'), false);
-  const result = call(
-    'applyFuLifecycleRecoveryMigrationPlan_',
-    fixture.spreadsheet,
-    preview,
-    { confirmedOrphanIds: [] }
-  );
-  assert.strictEqual(result.ok, true);
-  assert.strictEqual(api.counts().removeCount, 1);
-  assert.strictEqual(api.events['migration-event'], undefined);
-  assert.strictEqual(fixture.sheet.valueAt(2, fixture.columns.CHART_NO), 'LIFE-001');
-  const remaining = call('readCalendarRegistryStore_').entries;
-  assert.deepStrictEqual(
-    plain(remaining.map(entry => entry.eventId)),
-    ['unrelated-monthly-event']
-  );
-  assert.ok(result.backup.partCount >= 1);
-  assert.ok(scriptPropertyStore[result.backup.manifestKey]);
-}
-
-function testFuLifecycleMigrationRepairsTwoVerifiedDuplicateGroups() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const makeRow = values => {
-    const row = Array(headers.length).fill('');
-    Object.entries(values).forEach(([header, value]) => {
-      row[headers.indexOf(header)] = value;
-    });
-    return row;
-  };
-  const rows = [
-    headers,
-    makeRow({
-      病歷號: 'DUP-A',
-      姓名: '虛構甲',
-      Condition: '追蹤甲',
-      日期: new Date(2026, 7, 28),
-      CalendarEventId: 'keep-a'
-    }),
-    makeRow({
-      病歷號: 'DUP-B',
-      姓名: '虛構乙',
-      Condition: '追蹤乙',
-      日期: new Date(2026, 9, 12),
-      CalendarEventId: 'keep-b'
-    }),
-    makeRow({
-      病歷號: 'HISTORY-ONLY',
-      姓名: '特殊案例保留',
-      Condition: '不再追蹤',
-      CalendarEventId: 'stale-b'
-    })
-  ];
-  const sheet = new FakeSheet('FU', 6401, rows);
-  const spreadsheet = makeFakeSpreadsheet(
-    [sheet],
-    'fu-duplicate-lifecycle-test'
-  );
-  const scan = call('buildCurrentCalendarScan_', spreadsheet);
-  const keepAContext = scan.contexts.find(item => item.eventId === 'keep-a');
-  const keepBContext = scan.contexts.find(item => item.eventId === 'keep-b');
-  const staleContext = scan.contexts.find(item => item.eventId === 'stale-b');
-  call('writeCalendarRegistryStore_', scan, []);
-
-  const keepA = {
-    id: 'keep-a',
-    ...plain(call('buildCalendarResource_', keepAContext))
-  };
-  const keepB = {
-    id: 'keep-b',
-    ...plain(call('buildCalendarResource_', keepBContext))
-  };
-  const api = installCalendarMock({
-    initialEvents: [
-      keepA,
-      keepB,
-      {
-        ...keepA,
-        id: 'orphan-a',
-        description: ''
-      },
-      {
-        ...keepB,
-        id: 'stale-b',
-        description: 'Plan: 舊資料略有差異'
-      }
-    ]
-  });
-  const preview = call(
-    'buildFuLifecycleRecoveryMigrationPlan_',
-    spreadsheet
-  );
-  assert.strictEqual(preview.ok, true);
-  assert.strictEqual(preview.counts.stopTracking, 1);
-  assert.strictEqual(preview.counts.orphanDelete, 1);
-  assert.strictEqual(preview.counts.manual, 0);
-  assert.strictEqual(preview.counts.actionable, 2);
-  const stop = preview.items.find(item => item.eventId === 'stale-b');
-  const orphan = preview.items.find(item => item.eventId === 'orphan-a');
-  assert.strictEqual(stop.action, 'stop_tracking');
-  assert.strictEqual(stop.row, staleContext.row);
-  assert.ok(stop.duplicateGroupHash);
-  assert.strictEqual(orphan.action, 'orphan_delete');
-  assert.strictEqual(orphan.reason, 'fu_duplicate_without_data_source');
-  assert.ok(orphan.duplicateGroupHash);
-  assert.strictEqual(JSON.stringify(preview).includes('虛構甲'), false);
-
-  const before = sheet.rows[staleContext.row - 1].slice();
-  const result = call(
-    'applyFuLifecycleRecoveryMigrationPlan_',
-    spreadsheet,
-    preview,
-    { confirmedOrphanIds: ['orphan-a'] }
-  );
-  assert.strictEqual(result.ok, true);
-  assert.strictEqual(api.counts().removeCount, 2);
-  assert.ok(api.events['keep-a']);
-  assert.ok(api.events['keep-b']);
-  assert.strictEqual(api.events['orphan-a'], undefined);
-  assert.strictEqual(api.events['stale-b'], undefined);
-  const eventIdColumn = headers.indexOf('CalendarEventId');
-  const after = sheet.rows[staleContext.row - 1].slice();
-  assert.strictEqual(after[eventIdColumn], '');
-  before.forEach((value, index) => {
-    if (index !== eventIdColumn) assert.strictEqual(after[index], value);
-  });
-  assert.deepStrictEqual(
-    plain(call('readCalendarRegistryStore_').entries.map(entry => {
-      return entry.eventId;
-    }).sort()),
-    ['keep-a', 'keep-b']
-  );
-}
-
-function testFuLifecycleMigrationIgnoresCancelledMonthlyGrayEvent() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  const fixture = makeFuLifecycleFixture({ sheetId: 6402 });
-  seedFuLifecycleRegistry(fixture, []);
-  installCalendarMock({
-    initialEvents: [{
-      id: 'cancelled-monthly',
-      summary: 'LIFE-001 |  | 追蹤',
-      description: 'Plan: 月表取消',
-      colorId: '8',
-      start: { date: '2026-07-01' },
-      end: { date: '2026-07-02' },
-      extendedProperties: {
-        private: {
-          surgerySyncKind: 'MONTHLY',
-          surgerySyncState: 'CANCELLED'
-        }
-      }
-    }]
-  });
-  const preview = call(
-    'buildFuLifecycleRecoveryMigrationPlan_',
-    fixture.spreadsheet
-  );
-  assert.strictEqual(preview.ok, true);
-  assert.strictEqual(preview.items.length, 0);
-  assert.strictEqual(preview.counts.orphanDelete, 0);
-  assert.strictEqual(
-    call(
-      'isFuLifecycleMigrationManagedEvent_',
-      context.Calendar.Events.get('calendar@example.test', 'cancelled-monthly'),
-      true
-    ),
-    false
-  );
-}
-
-function testFuLifecycleMigrationRecreatesValid404Event() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  const fixture = makeFuLifecycleFixture({
-    sheetId: 6304,
-    date: new Date(2026, 7, 20),
-    eventId: 'missing-valid-event'
-  });
-  seedFuLifecycleRegistry(fixture, [
-    makeFuRegistryEntry(fixture, 'missing-valid-event', {
-      rowHash: fixture.context.rowHash,
-      bindingHash: fixture.context.bindingHash
-    })
-  ]);
-  const api = installCalendarMock();
-  const preview = call(
-    'buildFuLifecycleRecoveryMigrationPlan_',
-    fixture.spreadsheet
-  );
-  assert.strictEqual(preview.ok, true);
-  assert.strictEqual(preview.counts.recreateMissing, 1);
-  const result = call(
-    'applyFuLifecycleRecoveryMigrationPlan_',
-    fixture.spreadsheet,
-    preview,
-    { confirmedOrphanIds: [] }
-  );
-  assert.strictEqual(result.ok, true);
-  assert.strictEqual(api.counts().updateCount, 1);
-  assert.strictEqual(api.counts().insertCount, 1);
-  assert.strictEqual(
-    fixture.sheet.valueAt(2, fixture.columns.EVENT_ID),
-    'created-1'
-  );
-  const ids = call('readCalendarRegistryStore_').entries.map(entry => {
-    return entry.eventId;
-  });
-  assert.deepStrictEqual(plain(ids), ['created-1']);
-}
-
-function testFuLifecycleMigrationPlansRebind404OrphanAndManual() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  const fixture = makeFuLifecycleFixture({
-    sheetId: 6302,
-    date: new Date(2026, 7, 20)
-  });
-  seedFuLifecycleRegistry(fixture, [
-    makeFuRegistryEntry(fixture, 'event-missing', {
-      row: 80,
-      bindingHash: 'unmatched-old-binding'
-    }),
-    makeFuRegistryEntry(fixture, 'event-read-fails', {
-      row: 81,
-      bindingHash: 'unmatched-error-binding'
-    })
-  ]);
-  installCalendarMock({
-    initialEvents: [
-      {
-        id: 'event-rebind',
-        summary: 'LIFE-001 |  | 追蹤',
-        description: 'Plan: rebind',
-        colorId: '8',
-        start: { date: '2026-08-20' },
-        end: { date: '2026-08-21' }
-      },
-      {
-        id: 'event-orphan',
-        summary: 'ORPHAN |  | 追蹤',
-        description: 'Plan: orphan',
-        colorId: '8',
-        start: { date: '2026-08-01' },
-        end: { date: '2026-08-02' }
-      }
-    ],
-    getErrorIds: ['event-read-fails']
-  });
-  const preview = call(
-    'buildFuLifecycleRecoveryMigrationPlan_',
-    fixture.spreadsheet
-  );
-  assert.strictEqual(preview.ok, true);
-  assert.strictEqual(preview.counts.rebind, 1);
-  assert.strictEqual(preview.counts.removeMissing, 1);
-  assert.strictEqual(preview.counts.orphanDelete, 1);
-  assert.strictEqual(preview.counts.manual, 1);
-  const originalFingerprint = preview.fingerprint;
-  fixture.sheet.setValueAt(2, fixture.columns.COND, '追蹤已變更');
-  const changed = call(
-    'buildFuLifecycleRecoveryMigrationPlan_',
-    fixture.spreadsheet
-  );
-  assert.notStrictEqual(changed.fingerprint, originalFingerprint);
-}
-
-function testFuLifecycleMigrationAmbiguityIsFailClosed() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  const fixture = makeFuLifecycleFixture({
-    sheetId: 6303,
-    date: new Date(2026, 7, 20),
-    eventId: 'ambiguous-keeper'
-  });
-  seedFuLifecycleRegistry(fixture, [
-    makeFuRegistryEntry(fixture, 'ambiguous-keeper', {
-      rowHash: fixture.context.rowHash,
-      bindingHash: fixture.context.bindingHash
-    })
-  ]);
-  const makeEvent = id => ({
-    id,
-    summary: 'LIFE-001 |  | 追蹤',
-    description: 'Plan: ambiguous',
-    colorId: '8',
-    start: { date: '2026-08-20' },
-    end: { date: '2026-08-21' }
-  });
-  const api = installCalendarMock({
-    initialEvents: [
-      makeEvent('ambiguous-keeper'),
-      makeEvent('ambiguous-a'),
-      makeEvent('ambiguous-b')
-    ]
-  });
-  const preview = call(
-    'buildFuLifecycleRecoveryMigrationPlan_',
-    fixture.spreadsheet
-  );
-  assert.strictEqual(preview.ok, true);
-  assert.strictEqual(preview.counts.manual, 3);
-  assert.strictEqual(preview.counts.stopTracking, 0);
-  assert.strictEqual(preview.counts.orphanDelete, 0);
-  assert.strictEqual(api.counts().removeCount, 0);
-}
-
 function testHtmlUsesCollapsedAdvancedAreaAndArchiveLanguage() {
   const fuHtml = fs.readFileSync(path.join(root, 'fu_to_monthly.html'), 'utf8');
   const rollupHtml = fs.readFileSync(path.join(root, 'monthly_rollup.html'), 'utf8');
@@ -5700,12 +5153,8 @@ function testClaspIncludesAllRuntimeModules() {
 const tests = [
   testVersionAndModuleSplit,
   testEightDigitDateInputOnlyInFunctions,
-  testRestoreDateFormatsPreservesValuesAndTimes,
-  testPlanMigrationMovesWholeColumnAndIsIdempotent,
   testIolListIsReadOnlyAndKeepsAllDateBlocks,
   testIolListReadsOnlyRequestedDateDisplayRows,
-  testEntropionCaseNormalizationPreservesOtherText,
-  testPlanMigrationRepairsNativeRefErrorsAndPreservesOtherRules,
   testOnlyCalendarEventIdIsCanonicalSystemField,
   testCurrentMenuHasNoCompletedMigrationOrLegacyOutput,
   testMonthlySheetNameRecognition,
@@ -5755,7 +5204,7 @@ const tests = [
   testDuplicateHeadersAreDiagnosed,
   testMonthlyDiagnosisSummaryFormulaDefinition,
   testMonthlyDiagnosisSummaryHeadersStayCanonical,
-  testMonthlyDiagnosisSummaryMigrationIsSafeAndIdempotent,
+  testMonthlyDiagnosisSummaryCreationAndManagedRefresh,
   testAnnualArchiveCanonicalizesDiagnosisSummaryHeader,
   testFuNameOnlyRowIsValid,
   testMonthlyNameOnlyRowIsValid,
@@ -5826,15 +5275,8 @@ const tests = [
   testFuDateAndIdClearUsesUniqueBindingAndDeletesEvent,
   testFuRecoveredDeleteFailureStillStopsTracking,
   testInstallPreflightIgnoresUniqueFuStoppedTrackingConflict,
-  testFuStopTrackingContextAllowsNonBindingChanges,
   testFuAmbiguousBindingNeverCallsCalendar,
   testRegistryRoundTripIncludesBindingAndResolutionFingerprint,
-  testFuLifecycleMigrationPreviewAndApplyStopTracking,
-  testFuLifecycleMigrationRepairsTwoVerifiedDuplicateGroups,
-  testFuLifecycleMigrationIgnoresCancelledMonthlyGrayEvent,
-  testFuLifecycleMigrationRecreatesValid404Event,
-  testFuLifecycleMigrationPlansRebind404OrphanAndManual,
-  testFuLifecycleMigrationAmbiguityIsFailClosed,
   testHtmlUsesCollapsedAdvancedAreaAndArchiveLanguage,
   testClaspIncludesAllRuntimeModules
 ];
