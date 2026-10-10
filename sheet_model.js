@@ -25,32 +25,6 @@ const MONTHLY_TEXT_KEYS = [
   'ENERGY_TIME',
   'ENERGY_PERCENT'
 ];
-const FU_CALENDAR_KEYS = [
-  'CHART_NO',
-  'NAME',
-  'TEL',
-  'HOSPITAL',
-  'COND',
-  'DATE',
-  'PLAN'
-];
-const MONTHLY_CALENDAR_KEYS = [
-  'TIME',
-  'HOSPITAL',
-  'CHART_NO',
-  'NAME',
-  'TEL',
-  'GA',
-  'SIDE',
-  'DIAGNOSIS',
-  'GRADE',
-  'PROCEDURE',
-  'PLAN',
-  'IOL',
-  'IOL_TARGET',
-  'IOL_FINAL',
-  'AXIS'
-];
 
 const FU_COLUMN_WIDTHS = {
   CHART_NO: 76,
@@ -62,7 +36,8 @@ const FU_COLUMN_WIDTHS = {
   DATE: 96,
   PLAN: 250,
   MEMO: 250,
-  EVENT_ID: 120
+  EVENT_ID: 120,
+  SYNC_ID: 120
 };
 
 const MONTHLY_ROW_TYPES = Object.freeze({
@@ -94,7 +69,8 @@ const MONTHLY_COLUMN_WIDTHS = {
   ENERGY_TIME: 90,
   ENERGY_PERCENT: 72,
   REFRACTION: 180,
-  EVENT_ID: 120
+  EVENT_ID: 120,
+  SYNC_ID: 120
 };
 
 function getSheetHeaderValues_(sheet) {
@@ -522,7 +498,7 @@ function ensureManagedHeaders_(sheet, kind) {
   if (info.missingKeys.length) {
     throw new Error(`無法補齊欄位：${info.missingKeys.join('、')}`);
   }
-  hideAndProtectSystemColumns_(sheet, info.columns, ['EVENT_ID']);
+  hideAndProtectSystemColumns_(sheet, info.columns, ['EVENT_ID', 'SYNC_ID']);
   return info.columns;
 }
 
@@ -534,12 +510,29 @@ function hideAndProtectSystemColumns_(sheet, columns, fieldKeys) {
     const description = `SURGERY_SYSTEM_COLUMN:${key}`;
     const existing = sheet.getProtections(SpreadsheetApp.ProtectionType.RANGE)
       .find(item => item.getDescription() === description);
+    if (existing && key === 'SYNC_ID') {
+      if (typeof existing.setRange === 'function') {
+        existing.setRange(sheet.getRange(1, column, sheet.getMaxRows(), 1));
+      }
+      if (typeof existing.setWarningOnly === 'function') existing.setWarningOnly(false);
+      // Preserve owner-granted service-account and collaborator permissions.
+    }
     if (!existing) {
       const protection = sheet.getRange(1, column, sheet.getMaxRows(), 1)
         .protect()
         .setDescription(description);
       if (typeof protection.setWarningOnly === 'function') {
-        protection.setWarningOnly(true);
+        protection.setWarningOnly(key !== 'SYNC_ID');
+        if (key === 'SYNC_ID' && typeof protection.getEditors === 'function' &&
+            typeof protection.removeEditors === 'function') {
+          const owner = typeof Session.getEffectiveUser === 'function' ? Session.getEffectiveUser() : null;
+          if (owner && typeof protection.addEditor === 'function') protection.addEditor(owner);
+          protection.removeEditors(protection.getEditors().filter(editor =>
+            !owner || String(editor.getEmail()) !== String(owner.getEmail())));
+          if (typeof protection.canDomainEdit === 'function' && protection.canDomainEdit()) {
+            protection.setDomainEdit(false);
+          }
+        }
       }
     }
   });
@@ -608,7 +601,7 @@ function looksLikeTimeInput_(value) {
   return /^\d{3,4}$/.test(raw) || /^\d{1,2}:\d{2}$/.test(raw);
 }
 
-function resolveCalendarTime_(value) {
+function resolveScheduleTime_(value) {
   const raw = getRawTimeText_(value);
   if (!raw) {
     return { parsedTime: null, timeNote: '', errorMessage: '' };
@@ -799,7 +792,7 @@ function getMonthlyHeaderMarkerState_(rowValues, columns) {
 function hasMonthlyPatientContent_(rowValues, columns) {
   if (toCellText_(getRowFieldValue_(rowValues, columns, 'EVENT_ID'))) return true;
   return CONFIG.MONTHLY_FIELD_KEYS.some(key => {
-    if (key === 'HOSPITAL' || key === 'EVENT_ID') return false;
+    if (key === 'HOSPITAL' || key === 'EVENT_ID' || key === 'SYNC_ID') return false;
     return Boolean(toCellText_(getRowFieldValue_(rowValues, columns, key)));
   });
 }
@@ -1008,16 +1001,7 @@ function getMonthlyStructureIssues_(sheet, scan) {
       });
     }
   });
-  result.blocks.forEach(block => {
-    if (formatMonthKey_(block.date) === sheet.getName()) return;
-    issues.push({
-      severity: 'conflict',
-      type: 'monthly_cross_month_header',
-      row: block.row,
-      eventId: '',
-      message: `日期 ${block.dateKey} 不屬於 ${sheet.getName()}。`
-    });
-  });
+  // Actual date headers remain authoritative after cross-month rescheduling.
   return issues;
 }
 
@@ -1283,7 +1267,7 @@ function applyFuConditionalFormats_(sheet, columns, lastColumn) {
     2,
     maxRows,
     lastColumn,
-    [columns.EVENT_ID]
+    [columns.EVENT_ID, columns.SYNC_ID]
   );
   const planLetter = columnToLetter_(columns.PLAN);
   const planReference = `$${planLetter}2`;
@@ -1337,14 +1321,14 @@ function applyMonthlyConditionalFormats_(sheet, columns, lastColumn) {
     2,
     maxRows,
     lastColumn,
-    [columns.EVENT_ID]
+    [columns.EVENT_ID, columns.SYNC_ID]
   );
   const planRanges = buildVisibleRangesExcludingColumns_(
     sheet,
     2,
     maxRows,
     lastColumn,
-    [columns.GA, columns.SIDE, columns.EVENT_ID]
+    [columns.GA, columns.SIDE, columns.EVENT_ID, columns.SYNC_ID]
   );
   const planLetter = columnToLetter_(columns.PLAN);
   const gaLetter = columnToLetter_(columns.GA);
@@ -1923,7 +1907,7 @@ function normalizeEditedTimes_(event, sheet, kind, columns) {
       }
     }
 
-    const info = resolveCalendarTime_(value);
+    const info = resolveScheduleTime_(value);
     const note = buildSystemNoteText_(
       originalNotes[index][0],
       TIME_ERROR_NOTE_PREFIX,
@@ -2009,6 +1993,7 @@ function appendMonthlyBlock_(sheet, date, hospital, columns, options) {
     .setNumberFormat('yyyy/m/d ddd');
   sheet.getRange(row, cols.HOSPITAL).setValue(normalizedHospital);
   sheet.getRange(row, cols.CHART_NO).setValue(MONTHLY_DATE_HEADER_MARKER);
+  if (cols.SYNC_ID) sheet.getRange(row, cols.SYNC_ID).setValue(newScheduleSyncId_());
   applyManagedRowFormat_(sheet, row, 'MONTHLY', cols);
   ensureMonthlyHeaderPresentation_(sheet, row, cols);
   const blankRows = Array.from(
@@ -2055,7 +2040,7 @@ function ensureDefaultMonthlyBlocks_(sheet, columns) {
 }
 
 function getMonthlyTimeSortKey_(value, originalIndex) {
-  const info = resolveCalendarTime_(value);
+  const info = resolveScheduleTime_(value);
   if (info.errorMessage) {
     return { group: 1, minutes: 0, text: getRawTimeText_(value), originalIndex };
   }
@@ -2424,9 +2409,6 @@ function validateMonthlyNativeSortScan_(sheet, scan, expectedBlockCount) {
     );
   }
   scan.blocks.forEach((block, blockIndex) => {
-    if (formatMonthKey_(block.date) !== sheet.getName()) {
-      throw new Error(`排序後第 ${block.row} 列日期不屬於 ${sheet.getName()}。`);
-    }
     if (block.blankRows.length < MONTHLY_TEMPLATE_BLANK_ROWS) {
       throw new Error(
         `排序後第 ${block.row} 列刀日只有 ${block.blankRows.length} 列空白輸入列。`
@@ -2500,13 +2482,6 @@ function rebuildMonthlySheetSorted_(sheet, options) {
       scan.orphans.map(item => item.row).join('、')
     );
   }
-  scan.blocks.forEach(block => {
-    if (formatMonthKey_(block.date) !== sheet.getName()) {
-      throw new Error(
-        `${sheet.getName()} 第 ${block.row} 列日期 ${block.dateKey} 不屬於該月份。`
-      );
-    }
-  });
   if (!scan.blocks.length) {
     return {
       ok: true,
@@ -2558,24 +2533,12 @@ function rebuildMonthlySheetSorted_(sheet, options) {
         columns
       );
     }
-    const normalizedSheetScan = normalizedHeaderHospitals
-      ? buildMonthlySheetCalendarScanFromBlockScan_(
-        sheet,
-        columns,
-        scan
-      )
-      : null;
     return {
       ok: true,
       blockCount: scan.blocks.length,
       patientCount: plan.patientCount,
       generatedBlankRows: insertedRows,
       changed: false,
-      registryRefreshRequired: Boolean(normalizedHeaderHospitals),
-      sheetScan:
-        normalizedSheetScan ||
-        settings.precomputedCalendarScan ||
-        null,
       strategy: normalizedHeaderHospitals
         ? 'normalized_header'
         : 'precomputed_noop'
@@ -2636,14 +2599,6 @@ function rebuildMonthlySheetSorted_(sheet, options) {
     patientCount: plan.patientCount,
     generatedBlankRows: plan.generatedFinalRows.length,
     changed: true,
-    registryRefreshRequired: true,
-    sheetScan: verifiedScan
-      ? buildMonthlySheetCalendarScanFromBlockScan_(
-        sheet,
-        columns,
-        verifiedScan
-      )
-      : null,
     strategy: 'native_range_sort'
   };
 }
@@ -2721,10 +2676,11 @@ function insertPatientAtBlockEnd_(
     : currentBlock.row;
   const targetRow = lastPatientRow + 1;
   let nextHeaderRow = nextBlock ? nextBlock.row : 0;
-  if (nextHeaderRow && targetRow >= nextHeaderRow) {
-    sheet.insertRowBefore(nextHeaderRow);
-    nextHeaderRow++;
-  } else if (!nextHeaderRow && targetRow > sheet.getMaxRows()) {
+  // Always insert a complete new patient row; manual blank rows remain available.
+  if (targetRow <= sheet.getMaxRows()) {
+    sheet.insertRowBefore(targetRow);
+    if (nextHeaderRow) nextHeaderRow++;
+  } else {
     const currentMaxRows = sheet.getMaxRows();
     sheet.insertRowsAfter(currentMaxRows, targetRow - currentMaxRows);
   }
@@ -2734,6 +2690,7 @@ function insertPatientAtBlockEnd_(
   Object.keys(valuesByKey || {}).forEach(key => {
     setRowFieldValue_(rowValues, columns, key, valuesByKey[key]);
   });
+  setRowFieldValue_(rowValues, columns, 'SYNC_ID', newScheduleSyncId_());
   sheet.getRange(targetRow, 1, 1, lastColumn).setValues([rowValues]);
   applyManagedRowFormat_(sheet, targetRow, 'MONTHLY', columns);
 

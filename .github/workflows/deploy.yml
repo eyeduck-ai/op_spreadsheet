@@ -25,11 +25,14 @@ jobs:
         run: |
           node --check code.js
           node --check sheet_model.js
-          node --check calendar_sync.js
+          node --check schedule_integrity.js
+          node --check calendar_handover.js
           node --check workflows.js
           node --check annual_archive.js
           node --check tests/smoke.js
           node tests/smoke.js
+          node --check tests/sheet_contract.js
+          node tests/sheet_contract.js
 
       - name: Setup clasp credentials
         env:

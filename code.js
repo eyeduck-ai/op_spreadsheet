@@ -4,13 +4,12 @@
  * 模組分工：
  * - code.js：入口、選單、設定與共用工具
  * - sheet_model.js：欄位模型、格式、日期區塊與時間正規化
- * - calendar_sync.js：Calendar 生命週期與 CALENDAR_ROW_REGISTRY_V2
+ * - schedule_integrity.js：排程識別、重複綁定檢查與人工輸入格式
  * - workflows.js：FU／月表快照、月份模板與排序
  * - annual_archive.js：私人備份與永久年度封存
  */
 const CONFIG = {
-  VERSION: '2026.09.19',
-  CALENDAR_ID: 'YOUR_CALENDAR_ID_HERE',
+  VERSION: '2026.10.11',
   SHEET_ALL: 'All',
   SHEET_FU: 'FU',
   LEGACY_SHEET_OP: 'OP',
@@ -25,9 +24,10 @@ const CONFIG = {
     'DATE',
     'PLAN',
     'MEMO',
-    'EVENT_ID'
+    'EVENT_ID',
+    'SYNC_ID'
   ],
-  SYSTEM_FIELD_KEYS: ['EVENT_ID'],
+  SYSTEM_FIELD_KEYS: ['EVENT_ID', 'SYNC_ID'],
   FIELD_HEADERS: {
     CHART_NO: '病歷號',
     NAME: '姓名',
@@ -38,7 +38,8 @@ const CONFIG = {
     DATE: '日期',
     PLAN: 'Plan',
     MEMO: '心得',
-    EVENT_ID: 'CalendarEventId'
+    EVENT_ID: 'CalendarEventId',
+    SYNC_ID: 'ScheduleSyncId'
   },
   HEADERS: [
     '病歷號',
@@ -50,7 +51,8 @@ const CONFIG = {
     '日期',
     'Plan',
     '心得',
-    'CalendarEventId'
+    'CalendarEventId',
+    'ScheduleSyncId'
   ],
   MONTHLY_FIELD_KEYS: [
     'TIME',
@@ -74,9 +76,10 @@ const CONFIG = {
     'ENERGY_TIME',
     'ENERGY_PERCENT',
     'REFRACTION',
-    'EVENT_ID'
+    'EVENT_ID',
+    'SYNC_ID'
   ],
-  MONTHLY_SYSTEM_FIELD_KEYS: ['EVENT_ID'],
+  MONTHLY_SYSTEM_FIELD_KEYS: ['EVENT_ID', 'SYNC_ID'],
   MONTHLY_FIELD_HEADERS: {
     TIME: '日期／報到時間',
     HOSPITAL: '醫院',
@@ -99,7 +102,8 @@ const CONFIG = {
     ENERGY_TIME: 'Energy Time',
     ENERGY_PERCENT: 'Energy %',
     REFRACTION: '屈光數據',
-    EVENT_ID: 'CalendarEventId'
+    EVENT_ID: 'CalendarEventId',
+    SYNC_ID: 'ScheduleSyncId'
   },
   MONTHLY_HEADERS: [
     '日期／報到時間',
@@ -124,7 +128,8 @@ const CONFIG = {
     'Energy Time',
     'Energy %',
     '屈光數據',
-    'CalendarEventId'
+    'CalendarEventId',
+    'ScheduleSyncId'
   ],
   HOSPITAL_OPTIONS: ['高榮', '聯醫'],
   FU_TAG_OPTIONS: [
@@ -186,14 +191,7 @@ const CONFIG = {
   ],
   PLAN_RED_KEYWORDS: ['!'],
   PLAN_YELLOW_KEYWORDS: ['#'],
-  PLAN_GREEN_KEYWORDS: ['APPLY'],
-  COLORS: {
-    MONTHLY_TIMED: '10',
-    MONTHLY_UNDECIDED: '2',
-    MONTHLY_GA: '4',
-    MONTHLY_CANCELLED: '8',
-    FU: '8'
-  }
+  PLAN_GREEN_KEYWORDS: ['APPLY']
 };
 
 const CALENDAR_ID_PROPERTY = 'CALENDAR_ID';
@@ -217,25 +215,7 @@ const PLAN_YELLOW_BACKGROUND = '#FFF2CC';
 const SIDE_OD_BACKGROUND = '#D9EAD3';
 const SIDE_OU_BACKGROUND = '#D9D2E9';
 const TIME_ERROR_NOTE_PREFIX = '系統時間檢查：';
-const CALENDAR_SYNC_NOTE_PREFIX = '系統日曆同步：';
-const CALENDAR_CONFLICT_NOTE_PREFIX = '系統同步衝突：';
 const MONTHLY_STRUCTURE_NOTE_PREFIX = '系統刀日結構：';
-const CALENDAR_TITLE_SEPARATOR = '|';
-const CALENDAR_PRIVATE_KIND_KEY = 'surgerySyncKind';
-const CALENDAR_PRIVATE_STATE_KEY = 'surgerySyncState';
-const CALENDAR_PRIVATE_MONTHLY_KIND = 'MONTHLY';
-const CALENDAR_PRIVATE_CANCELLED_STATE = 'CANCELLED';
-const CALENDAR_ON_EDIT_HANDLER = 'processRowChange';
-const CALENDAR_ON_CHANGE_HANDLER = 'processCalendarStructureChange';
-const CALENDAR_PENDING_RETRY_HANDLER = 'retryPendingCalendarSync';
-const CALENDAR_TRIGGER_LOCK_WAIT_MS = 750;
-const CALENDAR_PENDING_RETRY_DELAY_MS = 60 * 1000;
-const CALENDAR_PENDING_RETRY_LOCK_WAIT_MS = 20 * 1000;
-const CALENDAR_PENDING_QUEUE_PROPERTY = 'CALENDAR_SYNC_PENDING_V3';
-const CALENDAR_PENDING_SPREADSHEET_ID_PROPERTY =
-  'CALENDAR_SYNC_PENDING_SPREADSHEET_ID_V1';
-const CALENDAR_PENDING_QUEUE_VERSION = 1;
-const CALENDAR_PENDING_QUEUE_MAX_ROWS = 500;
 const LEGACY_TRIGGER_HANDLERS = [
   'processMonthlyStructureChange',
   'processCalendarChange',
@@ -390,7 +370,7 @@ function createPerformancePhaseTimer_(action) {
   };
 }
 
-function withCalendarSyncLock_(callback) {
+function withSheetOperationLock_(callback) {
   const lock = LockService.getDocumentLock() || LockService.getScriptLock();
   if (!lock.tryLock(20000)) {
     throw new Error('目前有另一個同步作業正在執行，請稍後再試。');
@@ -402,84 +382,18 @@ function withCalendarSyncLock_(callback) {
   }
 }
 
-function tryWithCalendarSyncLock_(callback, waitMs) {
-  const lock = LockService.getDocumentLock() || LockService.getScriptLock();
-  if (!lock.tryLock(
-    waitMs === undefined ? CALENDAR_TRIGGER_LOCK_WAIT_MS : waitMs
-  )) {
-    return { acquired: false, value: null };
-  }
-  try {
-    return { acquired: true, value: callback() };
-  } finally {
-    lock.releaseLock();
-  }
-}
+
 
 function getConfiguredCalendarId_() {
-  const propertyValue = PropertiesService.getScriptProperties()
-    .getProperty(CALENDAR_ID_PROPERTY);
-  const configured = toCellText_(propertyValue) || toCellText_(CONFIG.CALENDAR_ID);
-  return configured === 'YOUR_CALENDAR_ID_HERE' ? '' : configured;
+  return toCellText_(PropertiesService.getScriptProperties().getProperty(CALENDAR_ID_PROPERTY));
 }
 
-function isCalendarAdvancedServiceAvailable_() {
-  return typeof Calendar !== 'undefined' &&
-    Calendar.Events &&
-    typeof Calendar.Events.get === 'function' &&
-    typeof Calendar.Events.insert === 'function' &&
-    typeof Calendar.Events.update === 'function' &&
-    typeof Calendar.Events.remove === 'function';
-}
 
-function validateCalendarAccess_(calendarId) {
-  if (!isCalendarAdvancedServiceAvailable_()) {
-    throw new Error('Calendar Advanced Service 尚未啟用。');
-  }
-  try {
-    if (
-      Calendar.Calendars &&
-      typeof Calendar.Calendars.get === 'function'
-    ) {
-      Calendar.Calendars.get(calendarId);
-    } else if (typeof Calendar.Events.list === 'function') {
-      Calendar.Events.list(calendarId, {
-        maxResults: 1,
-        singleEvents: true
-      });
-    } else {
-      throw new Error('目前的 Calendar Advanced Service 無法執行唯讀驗證。');
-    }
-  } catch (err) {
-    throw new Error(
-      `無法讀取指定 Calendar；原設定未變更：${err.message || err}`
-    );
-  }
-  return true;
-}
+
+
 
 function promptAndSaveCalendarId() {
-  return runMenuAction_('設定日曆', () => {
-    const ui = SpreadsheetApp.getUi();
-    const current = getConfiguredCalendarId_();
-    const response = ui.prompt(
-      '設定日曆',
-      (current ? `目前 Calendar ID：${current}\n` : '') +
-        '請輸入要同步的 Google Calendar ID：',
-      ui.ButtonSet.OK_CANCEL
-    );
-    if (response.getSelectedButton() !== ui.Button.OK) {
-      return { ok: false, cancelled: true };
-    }
-    const value = toCellText_(response.getResponseText());
-    if (!value) throw new Error('Calendar ID 不可空白。');
-    validateCalendarAccess_(value);
-    PropertiesService.getScriptProperties()
-      .setProperty(CALENDAR_ID_PROPERTY, value);
-    installOrRepairTriggers_(false);
-    ui.alert('Calendar ID 已儲存；既有資料不會被自動批次重寫。');
-    return { ok: true, calendarId: value };
-  });
+  return externalCalendarMenu_(); // Legacy menu entry: no Calendar access.
 }
 
 function deleteTriggersByHandler_(handlerName) {
@@ -495,37 +409,15 @@ function deleteTriggersByHandler_(handlerName) {
 
 function installOrRepairTriggers_(showAlert) {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  [
-    CALENDAR_ON_EDIT_HANDLER,
-    CALENDAR_ON_CHANGE_HANDLER,
-    CALENDAR_PENDING_RETRY_HANDLER
-  ].concat(LEGACY_TRIGGER_HANDLERS).forEach(deleteTriggersByHandler_);
-
-  ScriptApp.newTrigger(CALENDAR_ON_EDIT_HANDLER)
-    .forSpreadsheet(spreadsheet)
-    .onEdit()
-    .create();
-  ScriptApp.newTrigger(CALENDAR_ON_CHANGE_HANDLER)
-    .forSpreadsheet(spreadsheet)
-    .onChange()
-    .create();
-  if (pendingCalendarQueueHasWork_(readPendingCalendarQueue_())) {
-    ensurePendingCalendarRetryScheduled_(spreadsheet);
-  }
-
-  const result = {
-    ok: true,
-    onEdit: CALENDAR_ON_EDIT_HANDLER,
-    onChange: CALENDAR_ON_CHANGE_HANDLER,
-    pendingRetry: CALENDAR_PENDING_RETRY_HANDLER
-  };
-  if (showAlert) {
-    SpreadsheetApp.getUi().alert(
-      '已安裝／修復各一個 onEdit 與 onChange 自動同步觸發器；' +
-        '有待處理資料時會建立一次性的延遲重試。'
-    );
-  }
-  return result;
+  ['processScheduleEdit', 'processRowChange', 'processCalendarStructureChange',
+    'retryPendingCalendarSync'].concat(LEGACY_TRIGGER_HANDLERS).forEach(deleteTriggersByHandler_);
+  ScriptApp.newTrigger('processScheduleEdit').forSpreadsheet(spreadsheet).onEdit().create();
+  const properties = PropertiesService.getScriptProperties();
+  Object.keys(properties.getProperties()).filter(key =>
+    /^CALENDAR_ROW_REGISTRY_V2(?:_|$)/.test(key) || /^CALENDAR_SYNC_PENDING/.test(key)
+  ).forEach(key => properties.deleteProperty(key));
+  if (showAlert) SpreadsheetApp.getUi().alert('已修復 onEdit 格式處理並清除舊日曆索引／重試設定。');
+  return { ok: true, onEdit: 'processScheduleEdit', onChange: '', pendingRetry: '' };
 }
 
 function installOrRepairSystem() {
@@ -538,7 +430,7 @@ function setup() {
     assertNoLegacyOpOnly_(spreadsheet);
     assertNoLegacyArchiveState_();
     assertNoActiveAnnualArchiveTransaction_();
-    assertCalendarRegistrySafeToRebuild_(
+    assertScheduleIntegrity_(
       spreadsheet,
       '安裝／修復',
       { allowRepairableStructureActions: true }
@@ -550,25 +442,25 @@ function setup() {
       { normalizeTimes: false }
     );
     installOrRepairTriggers_(false);
-    const registryResult = rebuildCalendarRegistry_(spreadsheet, {
+    const identityResult = assertScheduleIntegrity_(spreadsheet, {
       allowConflicts: false
     });
     reorderManagedSheets_(spreadsheet);
     onOpen();
 
     const message = [
-      '已完成格式、驗證、觸發器、V2 同步索引及分頁順序修復。',
+      '已完成格式、驗證、觸發器、排程識別及分頁順序修復。',
       '本動作沒有新增、更新或刪除 Calendar 事件。',
       `FU：${fuResult.message}`,
       `月份表：${monthlyResult.message}`,
-      `索引：${registryResult.eventCount} 個 CalendarEventId。`
+      `綁定：${identityResult.eventCount} 個 CalendarEventId。`
     ].join('\n');
     SpreadsheetApp.getUi().alert('安裝／修復完成', message, SpreadsheetApp.getUi().ButtonSet.OK);
     return {
       ok: true,
       fuResult,
       monthlyResult,
-      registryResult,
+      identityResult,
       message
     };
   });
@@ -604,23 +496,24 @@ function isMonthlySheetName_(sheetName) {
 function showVersionInfo() {
   SpreadsheetApp.getUi().alert(
     `手術排程系統版本：${CONFIG.VERSION}\n` +
-      '系統欄：CalendarEventId\n' +
-      '同步索引：CALENDAR_ROW_REGISTRY_V2'
+      '系統欄：CalendarEventId、ScheduleSyncId\n' +
+      '日曆由指定 Windows 主機同步；GAS 只處理刀表。'
   );
 }
 
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   const maintenance = ui.createMenu('維護工具')
-    .addItem('設定日曆', 'promptAndSaveCalendarId')
+    .addItem('遷移固定排程識別欄', 'migrateScheduleSyncIds')
+    .addItem('交由本系統同步日曆', 'handoverCalendarToApplication')
+    .addItem('顯示日曆交接狀態', 'showCalendarHandover')
     .addItem('安裝／修復系統', 'installOrRepairSystem')
     .addItem(
       '套用所有 FU／月表建議欄寬',
       'applyAllRecommendedColumnWidths'
     )
     .addSeparator()
-    .addItem('檢查同步健康', 'checkSyncHealth')
-    .addItem('同步待處理變更', 'syncPendingChanges')
+    .addItem('檢查排程識別欄', 'checkScheduleSyncIds')
     .addSeparator()
     .addItem(`版本：${CONFIG.VERSION}`, 'showVersionInfo');
 
@@ -629,7 +522,6 @@ function onOpen() {
     .addItem('選取列新增刀日', 'insertSurgeryDateAtSelection')
     .addItem('整理目前分頁', 'sortCurrentScheduleSheet')
     .addItem('水晶體清單（選刀日／複製）', 'showIolListDialog')
-    .addItem('修復選取列同步', 'repairSelectedCalendarRows')
     .addSeparator()
     .addItem('月刀表 => FU', 'addSelectedMonthlyRowToFu')
     .addItem('FU => 月刀表', 'showFuToMonthlyDialog')

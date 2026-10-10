@@ -67,6 +67,7 @@ function getAnnualArchiveHeaderInfo_(sheet) {
     columns,
     lastColumn,
     eventColumn: columns[CONFIG.MONTHLY_FIELD_HEADERS.EVENT_ID],
+    syncColumn: columns[CONFIG.MONTHLY_FIELD_HEADERS.SYNC_ID],
     sourceMonthColumn: columns[ANNUAL_ARCHIVE_SOURCE_MONTH_HEADER],
     rowTypeColumn: columns[ANNUAL_ARCHIVE_ROW_TYPE_HEADER]
   };
@@ -107,6 +108,7 @@ function scanAnnualArchiveStructure_(sheet) {
       return column !== info.sourceMonthColumn &&
         column !== info.rowTypeColumn &&
         column !== info.eventColumn &&
+        column !== info.syncColumn &&
         toCellText_(value);
     });
     if (!sourceMonth && !rowType && !hasVisibleContent) return;
@@ -576,6 +578,7 @@ function protectAnnualArchiveSheet_(sheet) {
   const info = getAnnualArchiveHeaderInfo_(sheet);
   const systemColumns = [
     info.eventColumn,
+    info.syncColumn,
     info.sourceMonthColumn,
     info.rowTypeColumn
   ].sort((left, right) => left - right);
@@ -907,23 +910,9 @@ function fingerprintEventIdSet_(eventIds) {
 }
 
 function assertArchiveSyncHealthy_(spreadsheet) {
-  const baseline = readCalendarRegistryStore_();
-  if (!baseline.ok) {
-    throw new Error('同步索引尚未建立或已損壞；請先執行「安裝／修復系統」。');
-  }
-  const health = reconcileCalendarRegistry_(spreadsheet, {
-    apply: false,
-    changeType: 'ARCHIVE_PREFLIGHT'
-  });
-  const pending = health.analysis.actions.length;
-  const conflicts = health.analysis.conflicts.length;
-  if (pending || conflicts || health.scan.duplicateIds.length) {
-    throw new Error(
-      `封存前同步檢查未通過：待處理 ${pending}、衝突 ${conflicts}。` +
-      '請先完成同步健康處理。'
-    );
-  }
-  return health;
+  const identities = scanScheduleIdentities_(spreadsheet);
+  if (identities.conflicts.length) throw new Error(identities.conflicts.join('\n'));
+  return assertScheduleIntegrity_(spreadsheet);
 }
 
 function getArchiveSourceSections_(spreadsheet, monthNames) {
@@ -1185,7 +1174,7 @@ function finalizeAnnualArchiveTransaction_(spreadsheet, transaction) {
       throw new Error(`${month} 來源分頁仍存在。`);
     }
   });
-  const scan = buildCurrentCalendarScan_(spreadsheet);
+  const scan = scanScheduleEventBindings_(spreadsheet);
   if (scan.duplicateIds.length) {
     throw new Error(
       `封存後 CalendarEventId 重複：${scan.duplicateIds.join('、')}。`
@@ -1197,7 +1186,7 @@ function finalizeAnnualArchiveTransaction_(spreadsheet, transaction) {
   if (currentFingerprint !== transaction.allEventIdFingerprint) {
     throw new Error('封存前後 CalendarEventId 集合不一致。');
   }
-  const registry = rebuildCalendarRegistry_(spreadsheet, {
+  const bindings = assertScheduleIntegrity_(spreadsheet, {
     allowConflicts: false
   });
   reorderManagedSheets_(spreadsheet);
@@ -1207,7 +1196,7 @@ function finalizeAnnualArchiveTransaction_(spreadsheet, transaction) {
     months: transaction.months,
     backupName: transaction.backupName,
     backupFileId: transaction.backupFileId,
-    eventCount: registry.eventCount,
+    eventCount: bindings.eventCount,
     patientCount: transaction.patientCount,
     blockCount: transaction.blockCount,
     message:
@@ -1403,7 +1392,7 @@ function showMonthlyRollupDialog() {
       if (response !== SpreadsheetApp.getUi().Button.OK) {
         return { ok: false, cancelled: true };
       }
-      const result = withCalendarSyncLock_(() => {
+      const result = withSheetOperationLock_(() => {
         return continueAnnualArchiveTransaction_(spreadsheet, pending);
       });
       SpreadsheetApp.getUi().alert(result.message);
@@ -1424,7 +1413,7 @@ function showMonthlyRollupDialog() {
 }
 
 function submitMonthlyRollupRequest(payload) {
-  return withCalendarSyncLock_(() => {
+  return withSheetOperationLock_(() => {
     const request = payload || {};
     const token = toCellText_(request.operationId);
     if (!token) throw new Error('永久封存 request token 遺失，請重新開啟視窗。');

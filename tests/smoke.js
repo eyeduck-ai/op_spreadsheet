@@ -10,9 +10,10 @@ const root = path.resolve(__dirname, '..');
 const files = [
   'code.js',
   'sheet_model.js',
-  'calendar_sync.js',
+  'schedule_integrity.js',
   'workflows.js',
-  'annual_archive.js'
+  'annual_archive.js',
+  'calendar_handover.js'
 ];
 const sourceByFile = Object.fromEntries(
   files.map(file => [
@@ -68,7 +69,7 @@ const context = {
       }
       return `${year}-${month}-${day}`;
     },
-    getUuid: () => 'test-request-token'
+    getUuid: () => crypto.randomUUID()
   },
   Session: {
     getScriptTimeZone: () => 'Asia/Taipei'
@@ -637,7 +638,7 @@ function testEightDigitDateInputOnlyInFunctions() {
 }
 
 function testIolListIsReadOnlyAndKeepsAllDateBlocks() {
-  const { sheet, columns, api } = makeMonthlyReorderFixture();
+  const { sheet, columns } = makeMonthlyReorderFixture();
   sheet.setValueAt(3, columns.IOL, 'Lens <A>');
   sheet.setValueAt(3, columns.IOL_FINAL, '+20.0');
   sheet.setFontLineAt(4, columns.CHART_NO, 'line-through');
@@ -658,8 +659,6 @@ function testIolListIsReadOnlyAndKeepsAllDateBlocks() {
   assert.strictEqual(included.count, 3);
   assert.ok(included.text.includes('測試乙（已取消）｜未填｜未填'));
   assert.strictEqual(JSON.stringify(sheet.rows), before);
-  assert.strictEqual(api.counts().updateCount, 0);
-  assert.strictEqual(api.counts().insertCount, 0);
 }
 
 function testIolListReadsOnlyRequestedDateDisplayRows() {
@@ -688,7 +687,7 @@ function testIolListReadsOnlyRequestedDateDisplayRows() {
 }
 
 function testVersionAndModuleSplit() {
-  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.09.19');
+  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.11');
   assert.strictEqual(evaluate('typeof processRowChange'), 'function');
   assert.strictEqual(evaluate('typeof processCalendarStructureChange'), 'function');
   assert.strictEqual(evaluate('typeof createMonthlySurgerySheet'), 'function');
@@ -696,17 +695,17 @@ function testVersionAndModuleSplit() {
     evaluate('typeof migrateMonthlyDiagnosisSummaryHeaders'),
     'undefined'
   );
-  assert.strictEqual(evaluate('typeof rebuildCalendarRegistry_'), 'function');
+  assert.strictEqual(evaluate('typeof assertScheduleIntegrity_'), 'function');
   assert.ok(sourceByFile['code.js'].includes('sheet_model.js'));
-  assert.ok(sourceByFile['code.js'].includes('calendar_sync.js'));
+  assert.ok(sourceByFile['code.js'].includes('schedule_integrity.js'));
   assert.ok(sourceByFile['code.js'].includes('workflows.js'));
 }
 
 function testOnlyCalendarEventIdIsCanonicalSystemField() {
-  assert.deepStrictEqual(plain(evaluate('CONFIG.SYSTEM_FIELD_KEYS')), ['EVENT_ID']);
+  assert.deepStrictEqual(plain(evaluate('CONFIG.SYSTEM_FIELD_KEYS')), ['EVENT_ID', 'SYNC_ID']);
   assert.deepStrictEqual(
     plain(evaluate('CONFIG.MONTHLY_SYSTEM_FIELD_KEYS')),
-    ['EVENT_ID']
+    ['EVENT_ID', 'SYNC_ID']
   );
   assert.strictEqual(
     evaluate('CONFIG.FIELD_HEADERS.EVENT_ID'),
@@ -746,8 +745,8 @@ function testCurrentMenuHasNoCompletedMigrationOrLegacyOutput() {
   ].forEach(text => assert.strictEqual(source.includes(text), false));
   [
     '安裝／修復系統',
-    '檢查同步健康',
-    '同步待處理變更',
+    '遷移固定排程識別欄',
+    '檢查排程識別欄',
     '套用所有 FU／月表建議欄寬',
     '月刀表 => FU',
     'FU => 月刀表',
@@ -755,7 +754,6 @@ function testCurrentMenuHasNoCompletedMigrationOrLegacyOutput() {
     '水晶體清單（選刀日／複製）',
     '選取列新增刀日',
     '整理目前分頁',
-    '修復選取列同步',
     '彙整舊月刀表'
   ].forEach(text => assert.ok(source.includes(text)));
   [
@@ -827,10 +825,10 @@ function testTimeNormalizationVariants() {
     call('parseTimeInput_', new Date(1899, 11, 30, 8, 30)).text,
     '08:30'
   );
-  assert.strictEqual(call('resolveCalendarTime_', '').parsedTime, null);
-  assert.strictEqual(call('resolveCalendarTime_', 'PM').timeNote, 'PM');
-  assert.ok(call('resolveCalendarTime_', '2460').errorMessage.includes('時間範圍錯誤'));
-  assert.ok(call('resolveCalendarTime_', '25:00').errorMessage.includes('時間範圍錯誤'));
+  assert.strictEqual(call('resolveScheduleTime_', '').parsedTime, null);
+  assert.strictEqual(call('resolveScheduleTime_', 'PM').timeNote, 'PM');
+  assert.ok(call('resolveScheduleTime_', '2460').errorMessage.includes('時間範圍錯誤'));
+  assert.ok(call('resolveScheduleTime_', '25:00').errorMessage.includes('時間範圍錯誤'));
 }
 
 function testMultiRowPasteNormalizesEveryMonthlyTimeCell() {
@@ -862,40 +860,6 @@ function testMultiRowPasteNormalizesEveryMonthlyTimeCell() {
   assert.ok(sheet.calls.getRange <= 5);
 }
 
-function testCalendarPendingQueueCoalescesWithoutClinicalText() {
-  const queue = call('emptyPendingCalendarQueue_');
-  call('mergePendingCalendarRequest_', queue, {
-    sheetId: 88,
-    rows: [9, 4, 9],
-    reason: 'EDIT'
-  });
-  call('mergePendingCalendarRequest_', queue, {
-    sheetId: 88,
-    rows: [5, 4],
-    reason: '虛構病人資料'
-  });
-  assert.deepStrictEqual(plain(queue.sheets['88']), [4, 5, 9]);
-  assert.deepStrictEqual(plain(queue.reasons), ['EDIT', 'UNSPECIFIED']);
-  assert.strictEqual(JSON.stringify(queue).includes('虛構病人資料'), false);
-  assert.deepStrictEqual(
-    plain(call('summarizePendingCalendarQueue_', queue)),
-    {
-      hasWork: true,
-      fullScan: false,
-      sheetCount: 1,
-      rowCount: 3
-    }
-  );
-
-  call('mergePendingCalendarRequest_', queue, {
-    fullScan: true,
-    allowMissingDeletes: true,
-    reason: 'CHANGE_REMOVE_ROW'
-  });
-  assert.strictEqual(queue.fullScan, true);
-  assert.strictEqual(queue.allowMissingDeletes, true);
-  assert.deepStrictEqual(plain(queue.sheets), {});
-}
 
 function testWholeMonthlyTimeNormalizationUsesBoundedBatchReads() {
   const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
@@ -920,21 +884,6 @@ function testWholeMonthlyTimeNormalizationUsesBoundedBatchReads() {
   assert.strictEqual(sheet.calls.setValues, 0);
 }
 
-function testFuSnapshotContextDoesNotRereadSheet() {
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const row = headers.map(header => ({ '病歷號': '001', '姓名': '測試',
-    '日期': new Date(2026, 9, 1), CalendarEventId: 'event-test' }[header] || ''));
-  const sheet = new FakeSheet('FU', 871, [headers, row]);
-  const columns = call('getRequiredFuColumns_', sheet);
-  const fresh = call('buildFuRowContext_', sheet, 2, columns);
-  sheet.calls.getRange = 0;
-  for (let i = 0; i < 100; i++) {
-    const result = call('buildFuRowContext_', sheet, 2, columns, row);
-    assert.strictEqual(result.rowHash, fresh.rowHash);
-    assert.strictEqual(result.valid, fresh.valid);
-  }
-  assert.strictEqual(sheet.calls.getRange, 0);
-}
 
 function testUnifiedSortRoutesWithoutChangingSortImplementations() {
   const oldFu = context.sortFuByDate;
@@ -957,260 +906,6 @@ function testUnifiedSortRoutesWithoutChangingSortImplementations() {
   }
 }
 
-function withTriggerRuntimeMocks(options, callback) {
-  const settings = options || {};
-  const previousScriptApp = context.ScriptApp;
-  const previousLockService = context.LockService;
-  const triggers = [];
-  const createdDelays = [];
-  const makeLock = acquired => ({
-    tryLock: () => acquired,
-    releaseLock: () => {}
-  });
-  context.LockService = {
-    getDocumentLock: () => makeLock(
-      settings.documentLockAcquired !== false
-    ),
-    getScriptLock: () => makeLock(
-      settings.scriptLockAcquired !== false
-    )
-  };
-  context.ScriptApp = {
-    getProjectTriggers: () => triggers.slice(),
-    deleteTrigger: trigger => {
-      const index = triggers.indexOf(trigger);
-      if (index >= 0) triggers.splice(index, 1);
-    },
-    newTrigger: handler => {
-      let delay = 0;
-      const builder = {
-        timeBased: () => builder,
-        after: value => {
-          delay = value;
-          return builder;
-        },
-        create: () => {
-          const trigger = {
-            getHandlerFunction: () => handler
-          };
-          triggers.push(trigger);
-          createdDelays.push(delay);
-          return trigger;
-        }
-      };
-      return builder;
-    }
-  };
-  try {
-    return callback({ triggers, createdDelays });
-  } finally {
-    if (previousScriptApp === undefined) delete context.ScriptApp;
-    else context.ScriptApp = previousScriptApp;
-    if (previousLockService === undefined) delete context.LockService;
-    else context.LockService = previousLockService;
-  }
-}
-
-function testFuNoDateDraftSkipsSyncAndClearsLegacyBusyNote() {
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const draft = Array(headers.length).fill('');
-  draft[headers.indexOf('病歷號')] = 'X-DRAFT';
-  const active = Array(headers.length).fill('');
-  active[headers.indexOf('姓名')] = '測試姓名';
-  active[headers.indexOf('日期')] = new Date(2026, 7, 10);
-  const sheet = new FakeSheet('FU', 70, [headers, draft, active]);
-  const columns = call('getRequiredFuColumns_', sheet);
-  const noteCell = sheet.getRange(2, columns.CHART_NO);
-  noteCell.setNote('人工註記');
-  call(
-    'setSystemNote_',
-    noteCell,
-    evaluate('CALENDAR_SYNC_NOTE_PREFIX'),
-    '自動同步忙碌，已排入重試。'
-  );
-
-  const filtered = call(
-    'filterFuTriggerRowsForCalendar_',
-    sheet,
-    [2, 3],
-    columns
-  );
-  assert.deepStrictEqual(plain(filtered.rows), [3]);
-  assert.deepStrictEqual(plain(filtered.skippedRows), [2]);
-  assert.strictEqual(noteCell.getNote(), '人工註記');
-}
-
-function testIncompleteFuLifecycleSkipsOrDeletesOwnEvent() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  const api = installCalendarMock({
-    initialEvents: [{
-      id: 'event-to-delete',
-      summary: 'X001 |  | 追蹤',
-      description: '',
-      start: { date: '2026-08-10' },
-      end: { date: '2026-08-11' }
-    }]
-  });
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const draft = Array(headers.length).fill('');
-  draft[headers.indexOf('病歷號')] = 'X-DRAFT';
-  const existing = Array(headers.length).fill('');
-  existing[headers.indexOf('病歷號')] = 'X001';
-  existing[headers.indexOf('CalendarEventId')] = 'event-to-delete';
-  const sheet = new FakeSheet('FU', 71, [headers, draft, existing]);
-  const columns = call('getRequiredFuColumns_', sheet);
-
-  const skipped = call(
-    'syncManagedContext_',
-    call('buildFuRowContext_', sheet, 2, columns),
-    {}
-  );
-  assert.strictEqual(skipped.ok, true);
-  assert.strictEqual(skipped.status, 'skipped_incomplete_draft');
-  assert.strictEqual(api.counts().insertCount, 0);
-  assert.strictEqual(api.counts().removeCount, 0);
-
-  const deleted = call(
-    'syncManagedContext_',
-    call('buildFuRowContext_', sheet, 3, columns),
-    {}
-  );
-  assert.strictEqual(deleted.ok, true);
-  assert.strictEqual(deleted.status, 'deleted');
-  assert.strictEqual(api.counts().removeCount, 1);
-  assert.strictEqual(
-    sheet.valueAt(3, headers.indexOf('CalendarEventId') + 1),
-    ''
-  );
-  assert.deepStrictEqual(
-    plain(call(
-      'getRegistryRetentionForSync_',
-      { eventId: 'event-to-delete' },
-      deleted
-    ).allowedRemovedEventIds),
-    ['event-to-delete']
-  );
-}
-
-function testBusyTriggerQueuesOnceWithoutWritingBusyNote() {
-  clearScriptProperties();
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const row = Array(headers.length).fill('');
-  row[headers.indexOf('姓名')] = '測試姓名';
-  row[headers.indexOf('日期')] = new Date(2026, 7, 10);
-  const sheet = new FakeSheet('FU', 72, [headers, row]);
-  const spreadsheet = {
-    getId: () => 'spreadsheet-test'
-  };
-
-  withTriggerRuntimeMocks(
-    { documentLockAcquired: false },
-    runtime => {
-      let callbackCount = 0;
-      const first = call(
-        'runTriggerCalendarWork_',
-        spreadsheet,
-        { sheetId: 72, rows: [2], reason: 'EDIT' },
-        () => {
-          callbackCount++;
-          return { ok: true };
-        },
-        { sheet, rows: [2] }
-      );
-      const second = call(
-        'runTriggerCalendarWork_',
-        spreadsheet,
-        { sheetId: 72, rows: [2, 2], reason: 'EDIT' },
-        () => {
-          callbackCount++;
-          return { ok: true };
-        },
-        { sheet, rows: [2] }
-      );
-      assert.strictEqual(first.reason, 'calendar_sync_busy');
-      assert.strictEqual(second.reason, 'calendar_sync_busy');
-      assert.strictEqual(callbackCount, 0);
-      assert.deepStrictEqual(
-        plain(call('readPendingCalendarQueue_').sheets['72']),
-        [2]
-      );
-      assert.strictEqual(runtime.triggers.length, 1);
-      assert.strictEqual(
-        runtime.createdDelays[0],
-        evaluate('CALENDAR_PENDING_RETRY_DELAY_MS')
-      );
-      assert.strictEqual(sheet.getRange(2, 2).getNote(), '');
-    }
-  );
-}
-
-function testPendingRetryWorkerDrainsQueueOnce() {
-  clearScriptProperties();
-  const previousOpenById = context.SpreadsheetApp.openById;
-  const previousApply = context.applyPendingCalendarQueue_;
-  const spreadsheet = { getId: () => 'spreadsheet-test' };
-  context.SpreadsheetApp.openById = () => spreadsheet;
-  try {
-    withTriggerRuntimeMocks({}, runtime => {
-      call('enqueuePendingCalendarSync_', {
-        fullScan: true,
-        reason: 'CHANGE_INSERT_ROW'
-      });
-      call('ensurePendingCalendarRetryScheduled_', spreadsheet);
-      assert.strictEqual(runtime.triggers.length, 1);
-      context.applyPendingCalendarQueue_ = () => ({
-        ok: true,
-        empty: false,
-        results: []
-      });
-      const result = call('retryPendingCalendarSync');
-      assert.strictEqual(result.ok, true);
-      assert.strictEqual(runtime.triggers.length, 0);
-      assert.strictEqual(
-        call(
-          'pendingCalendarQueueHasWork_',
-          call('readPendingCalendarQueue_')
-        ),
-        false
-      );
-      assert.strictEqual(
-        scriptPropertyStore.CALENDAR_SYNC_PENDING_SPREADSHEET_ID_V1,
-        undefined
-      );
-    });
-  } finally {
-    context.applyPendingCalendarQueue_ = previousApply;
-    if (previousOpenById === undefined) {
-      delete context.SpreadsheetApp.openById;
-    } else {
-      context.SpreadsheetApp.openById = previousOpenById;
-    }
-  }
-}
-
-function testOnEditNormalizesBeforeShortLockAndAvoidsFullReconcile() {
-  const source = sourceByFile['calendar_sync.js'];
-  const body = source.slice(
-    source.indexOf('function processRowChange'),
-    source.indexOf('function processCalendarStructureChange')
-  );
-  assert.ok(
-    body.indexOf('normalizeEditedTimes_') <
-      body.indexOf('runTriggerCalendarWork_')
-  );
-  assert.strictEqual(body.includes('reconcileCalendarRegistry_'), false);
-  assert.strictEqual(body.includes('listConfiguredCalendarEvents_'), false);
-  assert.ok(body.includes('applyTouchedManagedRowsFormatBatch_'));
-  assert.strictEqual(body.includes('applyManagedRowsFormatBatch_'), false);
-  assert.ok(body.includes('headerPresentationTouched'));
-  assert.ok(body.includes('wrapTouched'));
-  assert.ok(source.includes("changeType === 'EDIT'"));
-  assert.ok(source.includes("status: 'handled_by_on_edit'"));
-  assert.ok(source.includes('.timeBased()'));
-  assert.ok(source.includes('.after(CALENDAR_PENDING_RETRY_DELAY_MS)'));
-  assert.strictEqual(source.includes('自動同步忙碌'), false);
-}
 
 function testFullDateDoesNotCollideWithTime() {
   assert.strictEqual(
@@ -1424,54 +1119,6 @@ function testDuplicateMonthlyBlocksAreIndependentAndSupported() {
   );
 }
 
-function testOnEditScopesCalendarRowsToTouchedPatientOrHeaderBlock() {
-  const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
-  const columns = monthlyColumns();
-  const marker = evaluate('MONTHLY_DATE_HEADER_MARKER');
-  const header1 = Array(headers.length).fill('');
-  header1[columns.TIME - 1] = new Date(2026, 7, 10);
-  header1[columns.HOSPITAL - 1] = '高榮';
-  header1[columns.CHART_NO - 1] = marker;
-  const patient1 = Array(headers.length).fill('');
-  patient1[columns.TIME - 1] = '08:00';
-  patient1[columns.CHART_NO - 1] = 'TEST-201';
-  const patient2 = Array(headers.length).fill('');
-  patient2[columns.TIME - 1] = '09:00';
-  patient2[columns.NAME - 1] = '虛構病人甲';
-  const header2 = Array(headers.length).fill('');
-  header2[columns.TIME - 1] = new Date(2026, 7, 24);
-  header2[columns.HOSPITAL - 1] = '高榮';
-  header2[columns.CHART_NO - 1] = marker;
-  const patient3 = Array(headers.length).fill('');
-  patient3[columns.TIME - 1] = '10:00';
-  patient3[columns.NAME - 1] = '虛構病人乙';
-  const sheet = new FakeSheet('202608', 202614, [
-    headers,
-    header1,
-    patient1,
-    patient2,
-    header2,
-    patient3
-  ]);
-
-  const patientRows = call(
-    'getAffectedRowsForEdit_',
-    { range: sheet.getRange(4, columns.TIME, 1, 1) },
-    sheet,
-    'MONTHLY',
-    columns
-  );
-  assert.deepStrictEqual(plain(patientRows), [4]);
-
-  const headerRows = call(
-    'getAffectedRowsForEdit_',
-    { range: sheet.getRange(2, columns.HOSPITAL, 1, 1) },
-    sheet,
-    'MONTHLY',
-    columns
-  );
-  assert.deepStrictEqual(plain(headerRows), [3, 4]);
-}
 
 function testSurgeryDateInsertionPreviewSplitsOnlyRowsBelowSelection() {
   const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
@@ -1505,7 +1152,7 @@ function testSurgeryDateInsertionPreviewSplitsOnlyRowsBelowSelection() {
     new Date(2026, 7, 17)
   );
   assert.deepStrictEqual(plain(preview.affectedRows), [4]);
-  assert.deepStrictEqual(plain(preview.calendarRows), [4]);
+  assert.deepStrictEqual(plain(preview.patientRows), [4]);
   assert.deepStrictEqual(plain(preview.duplicateRows), []);
   const beforeHeader = call(
     'buildSurgeryDateInsertionPreview_',
@@ -1564,159 +1211,6 @@ function testBlockRefRequiresExactHeaderRowAndIdentity() {
   );
 }
 
-function testPerformanceFastPathsAvoidGlobalRegistryRebuilds() {
-  const workflows = sourceByFile['workflows.js'];
-  const fuSort = workflows.slice(
-    workflows.indexOf('function rebuildFuSheetSorted_'),
-    workflows.indexOf('function getSelectedManagedRow_')
-  );
-  assert.ok(fuSort.includes('sortRowsWithTemporaryKeys_'));
-  assert.strictEqual(fuSort.includes('writeRowSnapshot_'), false);
-  assert.strictEqual(fuSort.includes('applyFuFormatting_'), false);
-  assert.strictEqual(fuSort.includes('reconcileCalendarRegistry_'), false);
-  const monthlySort = sourceByFile['sheet_model.js'].slice(
-    sourceByFile['sheet_model.js'].indexOf(
-      'function rebuildMonthlySheetSorted_'
-    ),
-    sourceByFile['sheet_model.js'].indexOf(
-      'function findOrCreateMonthlyBlock_'
-    )
-  );
-  assert.ok(monthlySort.includes('sortRowsWithTemporaryKeys_'));
-  assert.strictEqual(monthlySort.includes('writeRowSnapshot_'), false);
-  assert.strictEqual(monthlySort.includes('applyMonthlyFormatting_'), false);
-  const reorderPreflight = sourceByFile['calendar_sync.js'].slice(
-    sourceByFile['calendar_sync.js'].indexOf(
-      'function assertManagedSheetRegistrySafeForReorder_'
-    ),
-    sourceByFile['calendar_sync.js'].indexOf(
-      'function buildCurrentCalendarScan_'
-    )
-  );
-  assert.strictEqual(
-    reorderPreflight.includes('reconcileCalendarRegistry_'),
-    false
-  );
-  assert.strictEqual(
-    reorderPreflight.includes('listConfiguredCalendarEvents_'),
-    false
-  );
-  assert.strictEqual(
-    reorderPreflight.includes('buildGlobalEventIdLocationsLightweight_'),
-    false
-  );
-  assert.ok(reorderPreflight.includes('buildManagedSheetFastState_'));
-  assert.ok(reorderPreflight.includes('fastFingerprint'));
-  const registryWrite = sourceByFile['calendar_sync.js'].slice(
-    sourceByFile['calendar_sync.js'].indexOf(
-      'function writeCalendarRegistryStore_'
-    ),
-    sourceByFile['calendar_sync.js'].indexOf(
-      'function readCalendarRegistryStore_'
-    )
-  );
-  assert.ok(registryWrite.includes('properties.setProperties('));
-  assert.strictEqual(
-    registryWrite.includes('properties.setProperty(chunk.key'),
-    false
-  );
-  assert.strictEqual(
-    evaluate('typeof assertRegistrySafeIgnoringMonthlyStructure_'),
-    'undefined'
-  );
-  const syncRows = sourceByFile['calendar_sync.js'].slice(
-    sourceByFile['calendar_sync.js'].indexOf(
-      'function syncManagedRowsAt_'
-    ),
-    sourceByFile['calendar_sync.js'].indexOf(
-      'function getRepairSeedRows_'
-    )
-  );
-  assert.ok(syncRows.includes('globalIdScan: globalIds'));
-  assert.ok(syncRows.includes('settings.sheetScan ||'));
-  const monthlyToFu = workflows.slice(
-    workflows.indexOf('function addSelectedMonthlyRowToFu'),
-    workflows.indexOf('function parseConditionSuggestion_')
-  );
-  assert.strictEqual(monthlyToFu.includes('rebuildCalendarRegistry_'), false);
-  const createMonth = workflows.slice(
-    workflows.indexOf('function createMonthlySurgerySheet'),
-    workflows.indexOf('function buildSurgeryDateInsertionPreview_')
-  );
-  assert.strictEqual(createMonth.includes('rebuildCalendarRegistry_'), false);
-  const duplicateScan = workflows.slice(
-    workflows.indexOf('function findMonthlyDuplicateCandidates_'),
-    workflows.indexOf('function locateCachedMonthlySchedule_')
-  );
-  assert.strictEqual(duplicateScan.includes('getActiveMonthlySheets_'), false);
-  const dialogBuilder = workflows.slice(
-    workflows.indexOf('function buildFuToMonthlyDialogData_'),
-    workflows.indexOf('function getFuToMonthlyBlockOptions')
-  );
-  assert.strictEqual(dialogBuilder.includes('getMonthlyBlockOptions_'), false);
-  assert.strictEqual(dialogBuilder.includes('scanMonthlyBlocks_'), false);
-  assert.strictEqual(
-    evaluate('typeof getFuToMonthlyBlockOptions'),
-    'function'
-  );
-  const fuToMonthlySubmit = workflows.slice(
-    workflows.indexOf('function submitFuToMonthlySchedule'),
-    workflows.length
-  );
-  assert.strictEqual(
-    fuToMonthlySubmit.includes('getMonthlyContextAtRow_'),
-    false
-  );
-  assert.strictEqual(
-    fuToMonthlySubmit.includes('syncManagedRowAt_'),
-    false
-  );
-  assert.ok(fuToMonthlySubmit.includes('syncPreparedManagedContextAt_'));
-  const insertPatient = sourceByFile['sheet_model.js'].slice(
-    sourceByFile['sheet_model.js'].indexOf(
-      'function insertPatientAtBlockEnd_'
-    ),
-    sourceByFile['sheet_model.js'].indexOf(
-      'function getMonthlyBlockOptions_'
-    )
-  );
-  assert.strictEqual(
-    (insertPatient.match(/scanMonthlyBlocks_/g) || []).length,
-    1
-  );
-  assert.strictEqual(insertPatient.includes('const refreshed ='), false);
-  const rowFormat = sourceByFile['sheet_model.js'].slice(
-    sourceByFile['sheet_model.js'].indexOf('function applyManagedRowFormat_'),
-    sourceByFile['sheet_model.js'].indexOf(
-      'function initializeMainTrackingSheet_'
-    )
-  );
-  assert.ok(rowFormat.includes('getRangeList'));
-  assert.ok(sourceByFile['calendar_sync.js'].includes(
-    'function refreshCalendarRegistryForSheet_'
-  ));
-  const defaultBlocks = sourceByFile['sheet_model.js'].slice(
-    sourceByFile['sheet_model.js'].indexOf(
-      'function ensureDefaultMonthlyBlocks_'
-    ),
-    sourceByFile['sheet_model.js'].indexOf(
-      'function getMonthlyTimeSortKey_'
-    )
-  );
-  assert.strictEqual(
-    (defaultBlocks.match(/scanMonthlyBlocks_/g) || []).length,
-    1
-  );
-  assert.ok(defaultBlocks.includes('{ skipExistingCheck: true, scan }'));
-  assert.strictEqual(
-    evaluate('typeof previewFuRemoveTimeMigration'),
-    'undefined'
-  );
-  assert.strictEqual(
-    evaluate('typeof executeMonthlyDateHeaderUpgrade'),
-    'undefined'
-  );
-}
 
 function testFuNativeSortUsesOneSortAndPreservesNotes() {
   const headers = plain(evaluate('CONFIG.HEADERS'));
@@ -1773,7 +1267,7 @@ function testFuNativeSortSkipsAlreadySortedRows() {
     makeRow('較晚', new Date(2026, 7, 20), 'event-late'),
     makeRow('無日期', '', '')
   ]);
-  const fastState = call('buildManagedSheetFastState_', sheet);
+  const fastState = { values: sheet.getRange(2, 1, sheet.getLastRow() - 1, headers.length).getValues(), columns };
   const rangeCallsBefore = sheet.calls.getRange;
   const result = call(
     'rebuildFuSheetSorted_',
@@ -1785,7 +1279,7 @@ function testFuNativeSortSkipsAlreadySortedRows() {
   );
   assert.strictEqual(result.changed, false);
   assert.strictEqual(result.strategy, 'precomputed_noop');
-  assert.strictEqual(result.sheetScan, null);
+  assert.ok(!result.sheetScan);
   assert.strictEqual(sheet.calls.getRange, rangeCallsBefore);
   assert.strictEqual(sheet.calls.getFormulas, 0);
   assert.strictEqual(sheet.calls.getNotes, 0);
@@ -1911,7 +1405,7 @@ function testMonthlyNativeSortSkipsAlreadySortedSheet() {
   ]);
   const result = call('rebuildMonthlySheetSorted_', sheet);
   assert.strictEqual(result.changed, false);
-  assert.strictEqual(result.sheetScan, null);
+  assert.ok(!result.sheetScan);
   assert.strictEqual(result.strategy, 'precomputed_noop');
   assert.strictEqual(sheet.calls.getFormulas, 0);
   assert.strictEqual(sheet.calls.getNotes, 0);
@@ -1990,7 +1484,8 @@ function testManagedRowFormattingUsesRangeListsAndLeavesCustomColumnAlone() {
     'Plan',
     'TEL',
     '醫院',
-    '心得'
+    '心得',
+    'ScheduleSyncId'
   ];
   const sheet = new FakeSheet('FU', 2050, [
     headers,
@@ -2044,303 +1539,6 @@ function testTouchedRowFormattingOnlyChangesEditedStandardColumns() {
   );
 }
 
-function testLightweightEventIndexAndSingleSheetRegistryRefresh() {
-  Object.keys(scriptPropertyStore).forEach(key => {
-    if (
-      key === 'CALENDAR_ROW_REGISTRY_V2_INDEX' ||
-      key.startsWith('CALENDAR_ROW_REGISTRY_V2_')
-    ) {
-      delete scriptPropertyStore[key];
-    }
-  });
-  const fuHeaders = plain(evaluate('CONFIG.HEADERS'));
-  const fuRow = Array(fuHeaders.length).fill('');
-  fuRow[fuHeaders.indexOf('病歷號')] = 'TEST-FU';
-  fuRow[fuHeaders.indexOf('日期')] = new Date(2026, 7, 20);
-  fuRow[fuHeaders.indexOf('CalendarEventId')] = 'event-fu';
-  const fu = new FakeSheet('FU', 3101, [fuHeaders, fuRow]);
-
-  const monthHeaders = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
-  const columns = monthlyColumns();
-  const header = Array(monthHeaders.length).fill('');
-  header[columns.TIME - 1] = new Date(2026, 7, 24);
-  header[columns.HOSPITAL - 1] = '高榮';
-  header[columns.CHART_NO - 1] = evaluate('MONTHLY_DATE_HEADER_MARKER');
-  const patient = Array(monthHeaders.length).fill('');
-  patient[columns.TIME - 1] = '08:00';
-  patient[columns.NAME - 1] = '虛構病人';
-  patient[columns.EVENT_ID - 1] = 'event-month';
-  const month = new FakeSheet('202608', 3102, [
-    monthHeaders,
-    header,
-    patient
-  ]);
-  const spreadsheet = {
-    getSheets: () => [fu, month],
-    getSheetByName: name => (
-      name === 'FU' ? fu : name === '202608' ? month : null
-    )
-  };
-  const scan = call('buildCurrentCalendarScan_', spreadsheet);
-  call('writeCalendarRegistryStore_', scan, []);
-  const refreshed = call(
-    'refreshCalendarRegistryForSheet_',
-    spreadsheet,
-    month
-  );
-  assert.strictEqual(refreshed.eventCount, 2);
-  assert.strictEqual(refreshed.sheetEventCount, 1);
-  call(
-    'refreshCalendarRegistryForSheet_',
-    spreadsheet,
-    month,
-    {
-      retainEventIds: ['event-month'],
-      pendingSyncByEventId: { 'event-month': 'update_failed' }
-    }
-  );
-  const pendingRegistry = call('readCalendarRegistryStore_');
-  assert.ok(
-    pendingRegistry.index.sheets.every(item => item.fastFingerprint),
-    '單表索引刷新應保留其他表的 fastFingerprint'
-  );
-  const pendingEntry = pendingRegistry.entries.find(entry => {
-    return entry.eventId === 'event-month';
-  });
-  assert.strictEqual(pendingEntry.pendingSync, true);
-  assert.strictEqual(pendingEntry.pendingError, 'update_failed');
-  fu.setValueAt(
-    2,
-    fuHeaders.indexOf('CalendarEventId') + 1,
-    'event-month'
-  );
-  const duplicate = call(
-    'buildGlobalEventIdLocationsLightweight_',
-    spreadsheet
-  );
-  assert.deepStrictEqual(plain(duplicate.duplicateIds), ['event-month']);
-  Object.keys(scriptPropertyStore).forEach(key => {
-    if (
-      key === 'CALENDAR_ROW_REGISTRY_V2_INDEX' ||
-      key.startsWith('CALENDAR_ROW_REGISTRY_V2_')
-    ) {
-      delete scriptPropertyStore[key];
-    }
-  });
-}
-
-function testSingleSheetSyncUsesVerifiedRegistryBeforeGlobalScan() {
-  clearScriptProperties();
-  const fuHeaders = plain(evaluate('CONFIG.HEADERS'));
-  const fuRow = Array(fuHeaders.length).fill('');
-  fuRow[fuHeaders.indexOf('姓名')] = '虛構追蹤';
-  fuRow[fuHeaders.indexOf('日期')] = new Date(2026, 7, 20);
-  fuRow[fuHeaders.indexOf('CalendarEventId')] = 'event-fu-fast';
-  const fu = new FakeSheet('FU', 3201, [fuHeaders, fuRow]);
-
-  const monthHeaders = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
-  const columns = monthlyColumns();
-  const header = Array(monthHeaders.length).fill('');
-  header[columns.TIME - 1] = new Date(2026, 7, 24);
-  header[columns.HOSPITAL - 1] = '高榮';
-  header[columns.CHART_NO - 1] = evaluate('MONTHLY_DATE_HEADER_MARKER');
-  const patient = Array(monthHeaders.length).fill('');
-  patient[columns.TIME - 1] = '08:00';
-  patient[columns.NAME - 1] = '虛構手術';
-  patient[columns.EVENT_ID - 1] = 'event-month-fast';
-  const month = new FakeSheet('202608', 3202, [
-    monthHeaders,
-    header,
-    patient
-  ]);
-  let getSheetsCalls = 0;
-  const spreadsheet = {
-    getSheets: () => {
-      getSheetsCalls++;
-      return [fu, month];
-    },
-    getSheetByName: name => (
-      name === 'FU' ? fu : name === '202608' ? month : null
-    )
-  };
-  const fullScan = call('buildCurrentCalendarScan_', spreadsheet);
-  call('writeCalendarRegistryStore_', fullScan, []);
-  const monthScan = call('buildManagedSheetCalendarScan_', month);
-  getSheetsCalls = 0;
-  const resolved = call(
-    'resolveGlobalEventIdLocationsForSync_',
-    spreadsheet,
-    month,
-    monthScan
-  );
-  assert.strictEqual(resolved.source, 'registry_v2');
-  assert.strictEqual(getSheetsCalls, 0);
-  assert.deepStrictEqual(
-    Object.keys(plain(resolved.eventLocations)).sort(),
-    ['event-fu-fast', 'event-month-fast']
-  );
-
-  month.setValueAt(3, columns.EVENT_ID, 'event-not-in-registry');
-  const changedScan = call('buildManagedSheetCalendarScan_', month);
-  const fallback = call(
-    'resolveGlobalEventIdLocationsForSync_',
-    spreadsheet,
-    month,
-    changedScan
-  );
-  assert.strictEqual(fallback.source, 'live_sheet_scan');
-  assert.ok(getSheetsCalls > 0);
-  clearScriptProperties();
-}
-
-function testArchiveEventIdsArePersistedInRegistry() {
-  clearScriptProperties();
-  const scan = registryScan([
-    registryContext({ eventId: 'event-active', sheetId: 41 })
-  ], [{
-    sheetId: 41,
-    sheetName: '202608',
-    kind: 'MONTHLY',
-    archived: false,
-    fastFingerprint: 'fast-active'
-  }]);
-  scan.archiveLocations = [{
-    eventId: 'event-archive',
-    sheetId: 42,
-    sheetName: '刀表封存_2026',
-    row: 9,
-    kind: 'ARCHIVE',
-    archived: true,
-    sourceMonth: '202604'
-  }];
-  call('writeCalendarRegistryStore_', scan, []);
-  const loaded = call('readCalendarRegistryStore_');
-  const archived = loaded.entries.find(entry => {
-    return entry.eventId === 'event-archive';
-  });
-  assert.ok(archived);
-  assert.strictEqual(archived.archived, true);
-  assert.strictEqual(archived.kind, 'ARCHIVE');
-  assert.strictEqual(archived.sourceMonth, '202604');
-  assert.strictEqual(loaded.index.eventCount, 2);
-  clearScriptProperties();
-}
-
-function testReorderPreflightIsLocalAndDetectsUnsyncedRowHash() {
-  Object.keys(scriptPropertyStore)
-    .filter(key => key.includes('CALENDAR_ROW_REGISTRY_V2'))
-    .forEach(key => delete scriptPropertyStore[key]);
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const row = Array(headers.length).fill('');
-  row[headers.indexOf('姓名')] = '測試姓名';
-  row[headers.indexOf('日期')] = new Date(2026, 7, 20);
-  row[headers.indexOf('Condition')] = '穩定內容';
-  row[headers.indexOf('CalendarEventId')] = 'event-stable';
-  const fu = new FakeSheet('FU', 3150, [headers, row]);
-  const spreadsheet = {
-    getSheets: () => [fu],
-    getSheetByName: name => name === 'FU' ? fu : null
-  };
-  call(
-    'writeCalendarRegistryStore_',
-    call('buildCurrentCalendarScan_', spreadsheet),
-    []
-  );
-  const safe = call(
-    'assertManagedSheetRegistrySafeForReorder_',
-    spreadsheet,
-    fu,
-    '測試排序'
-  );
-  assert.strictEqual(safe.ok, true);
-  assert.strictEqual(safe.usedFastFingerprint, true);
-  assert.strictEqual(safe.sheetScan, null);
-  assert.ok(safe.fastState.fastFingerprint);
-  assert.strictEqual(safe.globalIdScan.duplicateIds.length, 0);
-  fu.setValueAt(2, headers.indexOf('Condition') + 1, '尚未同步的新內容');
-  assert.throws(
-    () => call(
-      'assertManagedSheetRegistrySafeForReorder_',
-      spreadsheet,
-      fu,
-      '測試排序'
-    ),
-    /同步差異/
-  );
-  Object.keys(scriptPropertyStore)
-    .filter(key => key.includes('CALENDAR_ROW_REGISTRY_V2'))
-    .forEach(key => delete scriptPropertyStore[key]);
-}
-
-function testFastFingerprintMetadataFallsBackSafely() {
-  Object.keys(scriptPropertyStore)
-    .filter(key => key.includes('CALENDAR_ROW_REGISTRY_V2'))
-    .forEach(key => delete scriptPropertyStore[key]);
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const row = Array(headers.length).fill('');
-  row[headers.indexOf('姓名')] = '虛構病人';
-  row[headers.indexOf('日期')] = new Date(2026, 7, 20);
-  row[headers.indexOf('Condition')] = '虛構追蹤';
-  row[headers.indexOf('CalendarEventId')] = 'event-fast';
-  const fu = new FakeSheet('FU', 3160, [headers, row]);
-  const spreadsheet = {
-    getSheets: () => [fu],
-    getSheetByName: name => name === 'FU' ? fu : null
-  };
-  const scan = call('buildCurrentCalendarScan_', spreadsheet);
-  const index = call('writeCalendarRegistryStore_', scan, []);
-  assert.ok(index.sheets[0].fastFingerprint);
-  assert.strictEqual(
-    JSON.stringify(index).includes('虛構病人'),
-    false
-  );
-
-  const first = call(
-    'assertManagedSheetRegistrySafeForReorder_',
-    spreadsheet,
-    fu,
-    '快速排序'
-  );
-  assert.strictEqual(first.usedFastFingerprint, true);
-  assert.strictEqual(first.sheetScan, null);
-
-  const storedIndex = JSON.parse(
-    scriptPropertyStore.CALENDAR_ROW_REGISTRY_V2_INDEX
-  );
-  delete storedIndex.sheets[0].fastFingerprint;
-  scriptPropertyStore.CALENDAR_ROW_REGISTRY_V2_INDEX =
-    JSON.stringify(storedIndex);
-  const fallback = call(
-    'assertManagedSheetRegistrySafeForReorder_',
-    spreadsheet,
-    fu,
-    '舊索引排序'
-  );
-  assert.strictEqual(fallback.usedFastFingerprint, false);
-  assert.strictEqual(fallback.sheetScan.contexts.length, 1);
-
-  call(
-    'writeCalendarRegistryStore_',
-    scan,
-    [{
-      ...plain(call('toRegistryEntry_', scan.contexts[0])),
-      pendingSync: true,
-      pendingError: 'test_pending'
-    }]
-  );
-  assert.throws(
-    () => call(
-      'assertManagedSheetRegistrySafeForReorder_',
-      spreadsheet,
-      fu,
-      '待重試排序'
-    ),
-    /待重試 1/
-  );
-  Object.keys(scriptPropertyStore)
-    .filter(key => key.includes('CALENDAR_ROW_REGISTRY_V2'))
-    .forEach(key => delete scriptPropertyStore[key]);
-}
 
 function testDefaultMonthlyDates() {
   assert.deepStrictEqual(
@@ -2361,96 +1559,6 @@ function testDefaultMonthlyDates() {
   assert.strictEqual(call('getDefaultMonthlyDates_', '202701').length, 4);
 }
 
-function testCalendarTitlePreservesSlots() {
-  assert.strictEqual(
-    call('buildCalendarTitle_', 'X001', '', 'CATA OS'),
-    'X001 |  | CATA OS'
-  );
-  assert.strictEqual(
-    call('buildCalendarTitle_', '', '測試姓名', ''),
-    ' | 測試姓名 | '
-  );
-}
-
-function testRepairBindingSignatureIgnoresOnlyTrailingSurgeryDate() {
-  const fromSheet = call(
-    'buildCalendarBindingSignature_',
-    'TEST-301',
-    '虛構姓名',
-    'CATA OS s/p Phaco-IOL OS 20260813'
-  );
-  const fromCalendar = call(
-    'getEventCalendarBindingSignature_',
-    {
-      summary:
-        'TEST-301 | 虛構姓名 | CATA OS s/p Phaco-IOL OS 20260810'
-    }
-  );
-  assert.strictEqual(fromSheet, fromCalendar);
-  assert.notStrictEqual(
-    fromSheet,
-    call(
-      'buildCalendarBindingSignature_',
-      'TEST-301',
-      '虛構姓名',
-      'ERM OS s/p VT OS 20260813'
-    )
-  );
-  assert.strictEqual(
-    call(
-      'getEventCalendarBindingSignature_',
-      { summary: 'invalid title without three slots' }
-    ),
-    ''
-  );
-}
-
-function testRepairEventFingerprintIgnoresApiObjectKeyOrder() {
-  const first = {
-    id: 'event-test',
-    summary: 'TEST-302 | 虛構姓名 | CATA OS',
-    description: '醫院: 高榮',
-    colorId: '10',
-    start: {
-      dateTime: '2026-08-13T12:00:00+08:00',
-      timeZone: 'Asia/Taipei'
-    },
-    end: {
-      dateTime: '2026-08-13T12:30:00+08:00',
-      timeZone: 'Asia/Taipei'
-    }
-  };
-  const reordered = {
-    colorId: '10',
-    description: '醫院: 高榮',
-    summary: 'TEST-302 | 虛構姓名 | CATA OS',
-    id: 'event-test',
-    start: {
-      timeZone: 'Asia/Taipei',
-      dateTime: '2026-08-13T12:00:00+08:00'
-    },
-    end: {
-      timeZone: 'Asia/Taipei',
-      dateTime: '2026-08-13T12:30:00+08:00'
-    }
-  };
-  assert.strictEqual(
-    call('getRepairEventFingerprint_', first),
-    call('getRepairEventFingerprint_', reordered)
-  );
-  assert.notStrictEqual(
-    call('getRepairEventFingerprint_', first),
-    call('getRepairEventFingerprint_', {
-      ...first,
-      extendedProperties: {
-        private: {
-          surgerySyncKind: 'MONTHLY',
-          surgerySyncState: 'CANCELLED'
-        }
-      }
-    })
-  );
-}
 
 function testMonthlyConditionComposition() {
   const date = new Date(2026, 7, 10);
@@ -2489,181 +1597,6 @@ function testMonthlyConditionComposition() {
   assert.strictEqual((composite.match(/\bOU\b/g) || []).length, 0);
 }
 
-function testCalendarResourceTimedAndAllDay() {
-  const base = {
-    kind: 'MONTHLY',
-    chartNo: 'X001',
-    patientName: '測試姓名',
-    condition: 'CATA OS',
-    hospital: '高榮',
-    tel: '',
-    plan: '',
-    ga: '',
-    date: new Date(2026, 7, 10),
-    timeInfo: call('resolveCalendarTime_', '08:00')
-  };
-  const timed = call('buildCalendarResource_', base);
-  assert.ok(timed.start.dateTime.includes('08:00:00'));
-  assert.ok(timed.end.dateTime.includes('08:30:00'));
-  assert.strictEqual(timed.summary, 'X001 | 測試姓名 | CATA OS');
-  assert.strictEqual(timed.colorId, '10');
-
-  const ga = call('buildCalendarResource_', {
-    ...base,
-    ga: 'GA'
-  });
-  assert.strictEqual(ga.start.date, '2026-08-10');
-  assert.strictEqual(ga.end.date, '2026-08-11');
-  assert.ok(ga.description.includes('原報到時間: 08:00'));
-  assert.strictEqual(ga.colorId, '4');
-
-  const textTime = call('buildCalendarResource_', {
-    ...base,
-    timeInfo: call('resolveCalendarTime_', 'PM')
-  });
-  assert.strictEqual(textTime.start.date, '2026-08-10');
-  assert.ok(textTime.description.includes('Time note: PM'));
-  assert.strictEqual(textTime.colorId, '2');
-
-  ['0800', 800, 830, '8:00'].forEach(value => {
-    const normalized = call('buildCalendarResource_', {
-      ...base,
-      timeInfo: call('resolveCalendarTime_', value)
-    });
-    assert.strictEqual(normalized.colorId, '10');
-  });
-
-  const fu = call('buildCalendarResource_', {
-    ...base,
-    kind: 'FU'
-  });
-  assert.strictEqual(fu.colorId, '8');
-  assert.strictEqual(fu.start.date, '2026-08-10');
-  assert.strictEqual(fu.start.dateTime, undefined);
-  const fuAllDay = call('buildCalendarResource_', {
-    ...base,
-    kind: 'FU',
-    timeInfo: call('resolveCalendarTime_', '')
-  });
-  assert.strictEqual(fuAllDay.colorId, '8');
-
-  assert.strictEqual(
-    call(
-      'calendarEventMatchesResource_',
-      { ...timed, colorId: '2' },
-      timed
-    ),
-    false
-  );
-}
-
-function testMonthlyStrikethroughControlsCancellationColorAndMarker() {
-  const standardHeaders = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
-  const headers = ['自訂欄'].concat(standardHeaders.slice().reverse());
-  const sheet = new FakeSheet('202608', 2026081, [
-    headers,
-    Array(headers.length).fill(''),
-    Array(headers.length).fill('')
-  ]);
-  const columns = call('getRequiredMonthlyColumns_', sheet);
-  sheet.setValueAt(2, columns.TIME, new Date(2026, 7, 28));
-  sheet.setValueAt(2, columns.HOSPITAL, '高榮');
-  sheet.setValueAt(
-    2,
-    columns.CHART_NO,
-    evaluate('MONTHLY_DATE_HEADER_MARKER')
-  );
-  sheet.setValueAt(3, columns.TIME, '08:00');
-  sheet.setValueAt(3, columns.CHART_NO, 'CANCEL-001');
-  sheet.setValueAt(3, columns.NAME, '虛構取消個案');
-  sheet.setValueAt(3, columns.DIAGNOSIS, 'CATA');
-  sheet.setValueAt(3, columns.IOL_TARGET, '+20.0');
-  sheet.setValueAt(3, columns.EVENT_ID, 'cancel-event');
-
-  const normalScan = call('buildManagedSheetCalendarScan_', sheet);
-  const normal = normalScan.contexts.find(item => item.row === 3);
-  assert.ok(normal);
-  assert.strictEqual(normal.cancelled, false);
-  assert.strictEqual(call('getCalendarColorId_', normal), '10');
-  assert.strictEqual(
-    call('buildCalendarResource_', normal).extendedProperties,
-    undefined
-  );
-
-  sheet.setFontLineAt(3, columns.CHART_NO, 'line-through');
-  const cancelledScan = call('buildManagedSheetCalendarScan_', sheet);
-  const cancelled = cancelledScan.contexts.find(item => item.row === 3);
-  const cancelledResource = call('buildCalendarResource_', cancelled);
-  assert.strictEqual(cancelled.cancelled, true);
-  assert.strictEqual(cancelledResource.colorId, '8');
-  assert.deepStrictEqual(
-    plain(cancelledResource.extendedProperties.private),
-    {
-      surgerySyncKind: 'MONTHLY',
-      surgerySyncState: 'CANCELLED'
-    }
-  );
-  assert.strictEqual(cancelled.bindingHash, normal.bindingHash);
-  assert.notStrictEqual(cancelled.rowHash, normal.rowHash);
-  assert.notStrictEqual(
-    cancelledScan.fastFingerprint,
-    normalScan.fastFingerprint
-  );
-  assert.strictEqual(
-    call('calendarEventMatchesResource_', cancelledResource, cancelledResource),
-    true
-  );
-  assert.strictEqual(
-    call(
-      'calendarEventMatchesResource_',
-      { ...cancelledResource, extendedProperties: undefined },
-      cancelledResource
-    ),
-    false
-  );
-
-  sheet.setValueAt(3, columns.GA, 'GA');
-  const cancelledGa = call('buildManagedSheetCalendarScan_', sheet)
-    .contexts.find(item => item.row === 3);
-  assert.strictEqual(call('getCalendarColorId_', cancelledGa), '8');
-
-  sheet.setFontLineAt(3, columns.CHART_NO, 'none');
-  const restored = call('buildManagedSheetCalendarScan_', sheet)
-    .contexts.find(item => item.row === 3);
-  const restoredResource = call('buildCalendarResource_', restored);
-  assert.strictEqual(restored.cancelled, false);
-  assert.strictEqual(restoredResource.colorId, '4');
-  assert.strictEqual(restoredResource.extendedProperties, undefined);
-  assert.ok(sheet.calls.getFontLines >= 4);
-}
-
-function testFuIgnoresStrikethroughAndFormatQueuesCalendarScanOnly() {
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const row = Array(headers.length).fill('');
-  row[headers.indexOf('病歷號')] = 'FU-STRIKE';
-  row[headers.indexOf('日期')] = new Date(2026, 7, 28);
-  row[headers.indexOf('Condition')] = '追蹤';
-  const sheet = new FakeSheet('FU', 2026082, [headers, row]);
-  const columns = call('getRequiredFuColumns_', sheet);
-  sheet.setFontLineAt(2, columns.CHART_NO, 'line-through');
-  const scan = call('buildManagedSheetCalendarScan_', sheet);
-  assert.strictEqual(scan.contexts.length, 1);
-  assert.strictEqual(scan.contexts[0].cancelled, undefined);
-  assert.strictEqual(sheet.calls.getFontLines, 0);
-  assert.strictEqual(
-    call('buildCalendarResource_', scan.contexts[0]).colorId,
-    '8'
-  );
-
-  const source = sourceByFile['calendar_sync.js'];
-  const body = source.slice(
-    source.indexOf('function processCalendarStructureChange'),
-    source.indexOf('function buildCalendarSyncRuntime_')
-  );
-  assert.ok(body.includes('fullScan: true'));
-  assert.ok(body.includes('reason: `CHANGE_${changeType}`'));
-  assert.strictEqual(body.includes('setNumberFormat'), false);
-}
 
 function testArbitraryHeaderOrderUsesNames() {
   const headers = [
@@ -2677,7 +1610,8 @@ function testArbitraryHeaderOrderUsesNames() {
     'Plan',
     'TEL',
     '醫院',
-    '心得'
+    '心得',
+    'ScheduleSyncId'
   ];
   const sheet = new FakeSheet('FU', 1, [headers]);
   const info = call('getFuColumnInfo_', sheet);
@@ -2805,6 +1739,10 @@ function testMonthlyDiagnosisSummaryFormulaDefinition() {
   });
 }
 
+function columnToLetterForTest(column) {
+  return call('columnToLetter_', column);
+}
+
 function testMonthlyDiagnosisSummaryHeadersStayCanonical() {
   const standardHeaders = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
   const diagnosisColumn = standardHeaders.indexOf('診斷') + 1;
@@ -2823,7 +1761,7 @@ function testMonthlyDiagnosisSummaryHeadersStayCanonical() {
     duplicateInfo.duplicateMessages.some(message => {
       return message.includes('診斷') &&
         message.includes('H') &&
-        message.includes('X');
+        message.includes(columnToLetterForTest(standardHeaders.length + 1));
     })
   );
 
@@ -2981,20 +1919,6 @@ function testAnnualArchiveCanonicalizesDiagnosisSummaryHeader() {
   );
 }
 
-function testFuNameOnlyRowIsValid() {
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const row = Array(headers.length).fill('');
-  row[headers.indexOf('姓名')] = '測試姓名';
-  row[headers.indexOf('Condition')] = '追蹤';
-  row[headers.indexOf('日期')] = new Date(2026, 7, 10);
-  const sheet = new FakeSheet('FU', 101, [headers, row]);
-  const columns = call('getRequiredFuColumns_', sheet);
-  const built = call('buildFuRowContext_', sheet, 2, columns);
-  assert.strictEqual(built.valid, true);
-  assert.strictEqual(built.chartNo, '');
-  assert.strictEqual(built.patientName, '測試姓名');
-  assert.strictEqual(built.timeInfo.parsedTime, null);
-}
 
 function monthlyColumns() {
   const result = {};
@@ -3006,313 +1930,6 @@ function monthlyColumns() {
   return result;
 }
 
-function testMonthlyNameOnlyRowIsValid() {
-  const columns = monthlyColumns();
-  const values = Array(23).fill('');
-  values[columns.TIME - 1] = '0830';
-  values[columns.NAME - 1] = '測試姓名';
-  values[columns.DIAGNOSIS - 1] = 'CATA';
-  const sheet = new FakeSheet('202608', 202608, [
-    plain(evaluate('CONFIG.MONTHLY_HEADERS')),
-    values
-  ]);
-  const patient = { row: 2, values };
-  const block = {
-    date: new Date(2026, 7, 10),
-    dateKey: '2026-08-10',
-    hospital: '高榮',
-    blockKey: '2026-08-10|高榮'
-  };
-  const built = call(
-    'buildMonthlyRowContext_',
-    sheet,
-    patient,
-    block,
-    columns,
-    false
-  );
-  assert.strictEqual(built.valid, true);
-  assert.strictEqual(built.chartNo, '');
-  assert.strictEqual(built.patientName, '測試姓名');
-}
-
-function registryContext(overrides = {}) {
-  return {
-    eventId: 'event-1',
-    sheetId: 1,
-    sheetName: '202608',
-    kind: 'MONTHLY',
-    archived: false,
-    row: 5,
-    blockKey: '2026-08-10|高榮',
-    rowHash: 'row-hash-1',
-    bindingHash: 'binding-hash-1',
-    valid: true,
-    invalidReason: '',
-    ...overrides
-  };
-}
-
-function registryEntry(overrides = {}) {
-  return {
-    eventId: 'event-1',
-    sheetId: 1,
-    sheetName: '202608',
-    kind: 'MONTHLY',
-    archived: false,
-    row: 3,
-    blockKey: '2026-08-10|高榮',
-    rowHash: 'row-hash-1',
-    bindingHash: 'binding-hash-1',
-    valid: true,
-    invalidReason: '',
-    pendingDelete: false,
-    pendingResolution: false,
-    ...overrides
-  };
-}
-
-function registryScan(contexts, sheetRecords) {
-  const eventLocations = {};
-  contexts.forEach(item => {
-    if (!item.eventId) return;
-    if (!eventLocations[item.eventId]) eventLocations[item.eventId] = [];
-    eventLocations[item.eventId].push(item);
-  });
-  return {
-    contexts,
-    sheetRecords: sheetRecords || [
-      { sheetId: 1, sheetName: '202608', kind: 'MONTHLY', archived: false }
-    ],
-    eventLocations,
-    duplicateIds: Object.keys(eventLocations)
-      .filter(id => eventLocations[id].length > 1)
-  };
-}
-
-function analyze(baseline, contexts, options = {}, sheetRecords) {
-  return call(
-    'analyzeRegistryDifferences_',
-    baseline,
-    registryScan(contexts, sheetRecords),
-    options
-  );
-}
-
-function testRegistrySameBlockRowReorderNeedsNoApi() {
-  const result = analyze(
-    [registryEntry()],
-    [registryContext({ row: 20 })],
-    { changeType: 'OTHER' }
-  );
-  assert.strictEqual(result.actions.length, 0);
-  assert.strictEqual(result.conflicts.length, 0);
-}
-
-function testRegistryMoveUpdatesExistingEvent() {
-  const result = analyze(
-    [registryEntry()],
-    [registryContext({ blockKey: '2026-08-24|高榮' })],
-    { changeType: 'OTHER' }
-  );
-  assert.deepStrictEqual(plain(result.actions.map(item => item.type)), ['update']);
-  assert.strictEqual(result.actions[0].placementChanged, true);
-}
-
-function testRegistryPendingSyncForcesRetryWithoutContentChange() {
-  const result = analyze(
-    [registryEntry({ pendingSync: true, pendingError: 'update_failed' })],
-    [registryContext()],
-    { changeType: 'OTHER' }
-  );
-  assert.deepStrictEqual(
-    plain(result.actions.map(item => item.type)),
-    ['update']
-  );
-  assert.strictEqual(result.actions[0].pendingSync, true);
-}
-
-function testRegistryCrossMonthMoveUpdatesExistingEvent() {
-  const result = analyze(
-    [registryEntry()],
-    [
-      registryContext({
-        sheetId: 2,
-        sheetName: '202609',
-        blockKey: '2026-09-14|高榮'
-      })
-    ],
-    { changeType: 'OTHER' },
-    [
-      { sheetId: 1, sheetName: '202608', kind: 'MONTHLY', archived: false },
-      { sheetId: 2, sheetName: '202609', kind: 'MONTHLY', archived: false }
-    ]
-  );
-  assert.deepStrictEqual(plain(result.actions.map(item => item.type)), ['update']);
-}
-
-function testRegistryMissingIdNewRowCreatesEvent() {
-  const result = analyze(
-    [],
-    [registryContext({ eventId: '' })],
-    { changeType: 'EDIT' }
-  );
-  assert.deepStrictEqual(plain(result.actions.map(item => item.type)), ['create']);
-}
-
-function testRegistryManualIdClearIsConflictNotDuplicateCreate() {
-  const result = analyze(
-    [registryEntry()],
-    [registryContext({ eventId: '' })],
-    { changeType: 'EDIT' }
-  );
-  assert.strictEqual(result.actions.length, 0);
-  assert.ok(
-    result.conflicts.some(item => item.type === 'event_id_removed_or_partial_move')
-  );
-}
-
-function testRegistryNativeRowDeleteDeletesEvent() {
-  const result = analyze(
-    [registryEntry()],
-    [],
-    { changeType: 'REMOVE_ROW' }
-  );
-  assert.deepStrictEqual(
-    plain(result.actions.map(item => item.type)),
-    ['delete_missing']
-  );
-}
-
-function testRegistryAmbiguousMissingRowWaitsForConfirmation() {
-  const result = analyze(
-    [registryEntry()],
-    [],
-    { changeType: 'OTHER' }
-  );
-  assert.strictEqual(result.actions.length, 0);
-  assert.ok(result.conflicts.some(item => item.type === 'missing_registry_row'));
-}
-
-function testRegistryWholeSheetDeletionNeverDeletesEvents() {
-  const result = analyze(
-    [registryEntry()],
-    [],
-    { changeType: 'REMOVE_GRID', allowMissingDeletes: true },
-    []
-  );
-  assert.strictEqual(result.actions.length, 0);
-  assert.strictEqual(result.ignoredRemovedSheets.length, 1);
-}
-
-function testRegistryHeaderDeletionDoesNotBatchReschedule() {
-  const result = analyze(
-    [registryEntry()],
-    [registryContext({ blockKey: '2026-08-24|高榮' })],
-    { changeType: 'REMOVE_ROW' }
-  );
-  assert.strictEqual(result.actions.length, 0);
-  assert.ok(
-    result.conflicts.some(item => item.type === 'possible_date_header_deleted')
-  );
-}
-
-function testRegistryDuplicateEventIdIsDiagnostic() {
-  const contexts = [
-    registryContext({ row: 5 }),
-    registryContext({ row: 8 })
-  ];
-  const result = analyze(
-    [registryEntry()],
-    contexts,
-    { changeType: 'OTHER' }
-  );
-  assert.strictEqual(result.actions.length, 0);
-  assert.strictEqual(
-    result.conflicts.filter(item => item.type === 'duplicate_event_id').length,
-    2
-  );
-}
-
-function testActiveAndArchivedDuplicateEventIdIsDiagnostic() {
-  const active = registryContext({ eventId: 'shared-history-event' });
-  const archived = {
-    eventId: 'shared-history-event',
-    sheetId: 900,
-    sheetName: '刀表封存_2026',
-    row: 12,
-    kind: 'ARCHIVE',
-    archived: true
-  };
-  const scan = registryScan([active]);
-  scan.eventLocations['shared-history-event'].push(archived);
-  scan.duplicateIds = ['shared-history-event'];
-  const result = call(
-    'analyzeRegistryDifferences_',
-    [registryEntry({ eventId: 'shared-history-event' })],
-    scan,
-    { changeType: 'OTHER' }
-  );
-  assert.ok(result.conflicts.some(item => {
-    return item.type === 'duplicate_event_id';
-  }));
-}
-
-function testArchiveOnlyDuplicateEventIdIsDiagnostic() {
-  const archiveLocation = row => ({
-    eventId: 'duplicate-archive-event',
-    sheetId: 900,
-    sheetName: '刀表封存_2026',
-    row,
-    kind: 'ARCHIVE',
-    archived: true
-  });
-  const scan = registryScan([]);
-  scan.eventLocations['duplicate-archive-event'] = [
-    archiveLocation(10),
-    archiveLocation(20)
-  ];
-  scan.duplicateIds = ['duplicate-archive-event'];
-  const result = call(
-    'analyzeRegistryDifferences_',
-    [],
-    scan,
-    { changeType: 'HEALTH' }
-  );
-  assert.ok(result.conflicts.some(item => {
-    return item.type === 'duplicate_archive_event_id';
-  }));
-}
-
-function testArchivedRowsDoNotSync() {
-  const result = analyze(
-    [registryEntry({ archived: true })],
-    [
-      registryContext({
-        archived: true,
-        blockKey: '2026-08-24|高榮',
-        rowHash: 'changed'
-      })
-    ],
-    { changeType: 'OTHER' }
-  );
-  assert.strictEqual(result.actions.length, 0);
-}
-
-function testInvalidTimeIsConflict() {
-  const result = analyze(
-    [registryEntry()],
-    [
-      registryContext({
-        valid: false,
-        invalidReason: 'invalid_time',
-        timeInfo: { errorMessage: '時間範圍錯誤' }
-      })
-    ],
-    { changeType: 'EDIT' }
-  );
-  assert.ok(result.conflicts.some(item => item.type === 'invalid_time'));
-}
 
 function testAnnualArchiveNamingAndEligibility() {
   assert.strictEqual(
@@ -3528,12 +2145,13 @@ function testMonthlyTextFormatsOnlyInitializeSystemCreatedRows() {
   assert.ok(onOpenBody.includes('SpreadsheetApp.getUi()'));
   assert.strictEqual(onOpenBody.includes('getActiveSpreadsheet'), false);
 
-  const calendarSource = sourceByFile['calendar_sync.js'];
+  const calendarSource = sourceByFile['schedule_integrity.js'];
   const structureBody = calendarSource.slice(
     calendarSource.indexOf('function processCalendarStructureChange'),
     calendarSource.indexOf('function buildCalendarSyncRuntime_')
   );
-  assert.ok(structureBody.includes("allowMissingDeletes: changeType === 'REMOVE_ROW'"));
+  assert.ok(structureBody.includes('externalCalendarResult_'));
+  assert.strictEqual(structureBody.includes('allowMissingDeletes'), false);
   assert.strictEqual(structureBody.includes('setNumberFormat'), false);
 
   const sheetSource = sourceByFile['sheet_model.js'];
@@ -3571,7 +2189,7 @@ function testMonthlyTextFormatsOnlyInitializeSystemCreatedRows() {
 
 function testMonthlyIolTextInputsHaveNoPostEditRewrite() {
   const sheetSource = sourceByFile['sheet_model.js'];
-  const calendarSource = sourceByFile['calendar_sync.js'];
+  const calendarSource = sourceByFile['schedule_integrity.js'];
   const onEditBody = calendarSource.slice(
     calendarSource.indexOf('function processRowChange'),
     calendarSource.indexOf('function processCalendarStructureChange')
@@ -3765,22 +2383,6 @@ function testArchiveTransactionGuardFailsClosed() {
   delete scriptPropertyStore.ANNUAL_SURGERY_ARCHIVE_TRANSACTION_V1;
 }
 
-function testFuScanIsBatchedAndRetryCacheRelocatesByFingerprint() {
-  const calendarSource = sourceByFile['calendar_sync.js'];
-  const scanBody = calendarSource.slice(
-    calendarSource.indexOf('function buildManagedSheetCalendarScan_'),
-    calendarSource.indexOf('function buildGlobalEventIdLocationsLightweight_')
-  );
-  assert.ok(scanBody.includes(
-    'sheet.getRange(2, 1, rowCount, lastColumn).getValues()'
-  ));
-  assert.strictEqual(scanBody.includes('sheet.getRange(row, 1'), false);
-  const workflowSource = sourceByFile['workflows.js'];
-  assert.ok(workflowSource.includes('function locateCachedMonthlySchedule_'));
-  ['rowHash', 'blockKey', 'eventId'].forEach(field => {
-    assert.ok(workflowSource.includes(field));
-  });
-}
 
 function testColumnWidthsRequireExplicitRequestAfterCreation() {
   const source = sourceByFile['sheet_model.js'];
@@ -3821,34 +2423,20 @@ function testColumnWidthsRequireExplicitRequestAfterCreation() {
 }
 
 function testInstallDoesNotBatchRewriteCalendar() {
-  const setupBody = sourceByFile['code.js'].slice(
-    sourceByFile['code.js'].indexOf('function setup()'),
-    sourceByFile['code.js'].indexOf('function assertNoLegacyOpOnly_')
-  );
-  assert.strictEqual(setupBody.includes('batchSync'), false);
-  assert.strictEqual(setupBody.includes('Calendar.Events'), false);
-  assert.ok(setupBody.includes('rebuildCalendarRegistry_'));
-  assert.ok(
-    setupBody.indexOf('assertCalendarRegistrySafeToRebuild_') <
-      setupBody.indexOf('rebuildCalendarRegistry_')
-  );
-  assert.ok(setupBody.includes('allowRepairableStructureActions: true'));
-  assert.ok(setupBody.includes('normalizeTimes: false'));
-  const preflightBody = sourceByFile['calendar_sync.js'].slice(
-    sourceByFile['calendar_sync.js'].indexOf(
-      'function assertCalendarRegistrySafeToRebuild_'
-    ),
-    sourceByFile['calendar_sync.js'].indexOf('function isContextAffected_')
-  );
-  assert.ok(preflightBody.includes('ignoredRepairableActions'));
-  assert.ok(preflightBody.includes('ignoredRepairableConflicts'));
+  const setup = evaluate('setup.toString()');
+  assert.ok(setup.includes('assertScheduleIntegrity_'));
+  assert.strictEqual(/Registry|Calendar\.|syncManaged/.test(setup), false);
+  const install = evaluate('installOrRepairTriggers_.toString()');
+  assert.ok(install.includes("newTrigger('processScheduleEdit')"));
+  assert.strictEqual(install.includes('.onChange()'), false);
+  assert.strictEqual(install.includes('.timeBased()'), false);
 }
 
 function testSystemNotesPreserveManualNotes() {
   const sheet = new FakeSheet('FU', 40, [['病歷號'], ['X001']]);
   const cell = sheet.getRange(2, 1);
   cell.setNote('人工註記');
-  const prefix = evaluate('CALENDAR_SYNC_NOTE_PREFIX');
+  const prefix = evaluate('MONTHLY_STRUCTURE_NOTE_PREFIX');
 
   call('setSystemNote_', cell, prefix, '第一次失敗');
   assert.ok(cell.getNote().includes('人工註記'));
@@ -3867,1266 +2455,17 @@ function testSystemNotesPreserveManualNotes() {
   assert.strictEqual(cell.getNote(), '人工後記');
 }
 
-function testCalendarErrorsUseVisibleIdentityCell() {
-  const sheet = new FakeSheet('FU', 41, [
-    ['病歷號', '姓名', '時間', 'CalendarEventId'],
-    ['X001', '測試姓名', '', 'event-secret']
-  ]);
-  const managed = {
-    sheet,
-    row: 2,
-    chartNo: 'X001',
-    patientName: '測試姓名',
-    columns: {
-      CHART_NO: 1,
-      NAME: 2,
-      TIME: 3,
-      EVENT_ID: 4
-    }
-  };
-  sheet.getRange(2, 1).setNote('人工註記');
-  sheet.getRange(2, 4).setNote(
-    `${evaluate('CALENDAR_SYNC_NOTE_PREFIX')}舊版隱藏錯誤`
-  );
-
-  call(
-    'setContextSyncNote_',
-    managed,
-    '更新 Calendar 事件失敗：event-secret',
-    false
-  );
-
-  const visibleNote = sheet.getRange(2, 1).getNote();
-  assert.ok(visibleNote.includes('人工註記'));
-  assert.ok(visibleNote.includes('更新 Calendar 事件失敗'));
-  assert.ok(visibleNote.includes('檢查同步健康'));
-  assert.strictEqual(visibleNote.includes('event-secret'), false);
-  assert.strictEqual(sheet.getRange(2, 4).getNote(), '');
-
-  const nameOnly = {
-    ...managed,
-    chartNo: '',
-    patientName: '測試姓名'
-  };
-  assert.strictEqual(call('getContextNoteCell_', nameOnly).getColumn(), 2);
-
-  sheet.getRange(2, 3).setNote('人工時間註記');
-  const invalidTime = {
-    ...managed,
-    archived: false,
-    eventId: '',
-    invalidReason: 'invalid_time',
-    timeInfo: { errorMessage: '時間範圍錯誤。' }
-  };
-  const invalidResult = call('syncManagedContext_', invalidTime, {});
-  assert.strictEqual(invalidResult.status, 'invalid_time');
-  assert.strictEqual(sheet.getRange(2, 1).getNote(), '人工註記');
-  assert.ok(sheet.getRange(2, 3).getNote().includes('人工時間註記'));
-  assert.ok(sheet.getRange(2, 3).getNote().includes('時間範圍錯誤'));
-}
-
-function testHealthRowsRedactIdsAndSeparateFailures() {
-  const conflictRows = call('getHealthIssueRows_', {
-    analysis: {
-      actions: [],
-      conflicts: [{
-        type: 'duplicate_event_id',
-        eventId: 'event-secret',
-        context: { sheetName: 'FU', row: 2 },
-        message: 'CalendarEventId event-secret 出現在多列。'
-      }]
-    },
-    results: []
-  });
-  assert.strictEqual(conflictRows[0][1], '衝突');
-  assert.strictEqual(conflictRows[0][6].includes('event-secret'), false);
-
-  const failureRows = call('getHealthIssueRows_', {
-    analysis: {
-      actions: [{
-        type: 'update',
-        eventId: 'event-secret',
-        context: { sheetName: 'FU', row: 2 }
-      }],
-      conflicts: []
-    },
-    results: [{
-      action: {
-        type: 'update',
-        eventId: 'event-secret',
-        context: { sheetName: 'FU', row: 2 }
-      },
-      result: { ok: false, status: 'update_failed' }
-    }]
-  });
-  assert.strictEqual(failureRows.length, 1);
-  assert.strictEqual(failureRows[0][1], '失敗');
-  assert.strictEqual(failureRows[0][2], 'update_failed');
-
-  const healthySummary = call('buildHealthAlertSummary_', {
-    analysis: { actions: [], conflicts: [] },
-    results: []
-  });
-  assert.strictEqual(healthySummary.hasIssues, false);
-  assert.ok(healthySummary.text.includes('未發現'));
-
-  const appliedAction = {
-    type: 'calendar_drift',
-    eventId: 'event-drift',
-    context: { sheetName: '202608', sheetId: 8, row: 5 }
-  };
-  const pendingAction = {
-    type: 'calendar_orphan',
-    eventId: 'event-orphan',
-    previous: { sheetName: 'Calendar', row: '' }
-  };
-  const mixedRows = call('getHealthIssueRows_', {
-    analysis: {
-      actions: [appliedAction, pendingAction],
-      conflicts: []
-    },
-    results: [{
-      action: appliedAction,
-      result: { ok: true, status: 'updated' }
-    }]
-  });
-  assert.strictEqual(mixedRows.length, 1);
-  assert.strictEqual(mixedRows[0][1], '待處理');
-  assert.strictEqual(mixedRows[0][2], 'calendar_orphan');
-  assert.ok(mixedRows[0][6].includes('等待確認刪除'));
-
-  const conflictSummary = call('buildHealthAlertSummary_', {
-    analysis: {
-      actions: [],
-      conflicts: [{
-        type: 'duplicate_event_id',
-        eventId: 'event-secret',
-        context: { sheetName: 'FU', row: 2 },
-        message: 'CalendarEventId event-secret 出現在多列。'
-      }]
-    },
-    results: []
-  }, 10);
-  assert.strictEqual(conflictSummary.hasIssues, true);
-  assert.ok(conflictSummary.text.includes('FU 第 2 列'));
-  assert.strictEqual(conflictSummary.text.includes('event-secret'), false);
-}
-
-function testHealthRowsExposePendingQueueWithoutClinicalData() {
-  const rows = call('getHealthIssueRows_', {
-    analysis: { actions: [], conflicts: [] },
-    results: [],
-    pendingQueue: {
-      version: 1,
-      fullScan: false,
-      allowMissingDeletes: false,
-      sheets: { 88: [4, 9] },
-      reasons: ['EDIT'],
-      updatedAt: '2026-07-27T00:00:00.000Z'
-    }
-  });
-  assert.strictEqual(rows.length, 1);
-  assert.strictEqual(rows[0][1], '待重試');
-  assert.strictEqual(rows[0][2], 'pending_queue');
-  assert.ok(rows[0][6].includes('1 張表、2 列'));
-  assert.strictEqual(rows[0][6].includes('虛構病人'), false);
-}
-
-function testHealthReportIsRetired() {
-  const calendarSource = sourceByFile['calendar_sync.js'];
-  const deployedSource = files.map(file => sourceByFile[file]).join('\n');
-  [
-    'SYNC_ARCHITECTURE_UPGRADE',
-    'previewSyncArchitectureUpgrade',
-    'runSyncArchitectureUpgrade',
-    'backupLegacySyncProperties_'
-  ].forEach(text => assert.strictEqual(calendarSource.includes(text), false));
-  assert.strictEqual(deployedSource.includes('writeHealthReportSheet_'), false);
-  assert.strictEqual(calendarSource.includes('sheet.showSheet()'), false);
-  assert.strictEqual(calendarSource.includes('sheet.hideSheet()'), false);
-  assert.strictEqual(deployedSource.includes('同步健康報告'), false);
-  assert.strictEqual(
-    evaluate('typeof inspectLegacyHealthReportSheet_'),
-    'undefined'
-  );
-  assert.strictEqual(
-    evaluate('typeof removeLegacySyncHealthReportSheet'),
-    'undefined'
-  );
-  assert.strictEqual(evaluate('typeof buildHealthAlertSummary_'), 'function');
-}
-function testRegistryStoresRawIdButNoClinicalPlaintext() {
-  const entry = call('toRegistryEntry_', registryContext());
-  assert.strictEqual(entry.eventId, 'event-1');
-  [
-    'chartNo',
-    'patientName',
-    'condition',
-    'plan',
-    'tel'
-  ].forEach(key => assert.strictEqual(Object.hasOwn(entry, key), false));
-}
-
-function clearScriptProperties() {
-  Object.keys(scriptPropertyStore).forEach(key => {
-    delete scriptPropertyStore[key];
-  });
-}
-
-function installCalendarMock(options = {}) {
-  const events = {};
-  (options.initialEvents || []).forEach(event => {
-    events[event.id] = JSON.parse(JSON.stringify(event));
-  });
-  let insertCount = 0;
-  let updateCount = 0;
-  let removeCount = 0;
-  let getCount = 0;
-  let listCount = 0;
-  context.Calendar = {
-    Events: {
-      insert(resource) {
-        insertCount++;
-        const id = `created-${insertCount}`;
-        events[id] = { id, ...JSON.parse(JSON.stringify(resource)) };
-        return events[id];
-      },
-      update(resource, _calendarId, eventId) {
-        updateCount++;
-        if (options.update404 || !events[eventId]) {
-          const error = new Error('404 not found');
-          throw error;
-        }
-        events[eventId] = { id: eventId, ...JSON.parse(JSON.stringify(resource)) };
-        return events[eventId];
-      },
-      get(_calendarId, eventId) {
-        getCount++;
-        if ((options.getErrorIds || []).includes(eventId)) {
-          throw new Error(options.getErrorMessage || '503 read failed');
-        }
-        if (
-          (options.get404Ids || []).includes(eventId) ||
-          !events[eventId]
-        ) {
-          throw new Error('404 not found');
-        }
-        return events[eventId];
-      },
-      remove(_calendarId, eventId) {
-        removeCount++;
-        if (options.removeError) throw new Error(options.removeError);
-        if (options.remove404 || !events[eventId]) throw new Error('404 not found');
-        delete events[eventId];
-      },
-      list(_calendarId, listOptions = {}) {
-        listCount++;
-        if (options.listError) throw new Error(options.listError);
-        const omitted = new Set(options.omitFromList || []);
-        const ids = Object.keys(events)
-          .filter(id => !omitted.has(id))
-          .sort();
-        const pageSize = options.pageSize || ids.length || 1;
-        const start = Number(listOptions.pageToken || 0);
-        const pageIds = ids.slice(start, start + pageSize);
-        const next = start + pageSize < ids.length
-          ? String(start + pageSize)
-          : '';
-        return {
-          items: pageIds.map(id => events[id]),
-          nextPageToken: next
-        };
-      }
-    }
-  };
-  return {
-    events,
-    counts: () => ({
-      insertCount,
-      updateCount,
-      removeCount,
-      getCount,
-      listCount
-    })
-  };
-}
-
-function liveCalendarContext(overrides = {}) {
-  return {
-    eventId: 'event-current',
-    sheetId: 50,
-    sheetName: '202608',
-    kind: 'MONTHLY',
-    archived: false,
-    row: 2,
-    blockKey: '2026-08-10|高榮',
-    rowHash: 'live-row-hash',
-    valid: true,
-    invalidReason: '',
-    chartNo: 'X001',
-    patientName: '測試姓名',
-    condition: 'CATA OS',
-    hospital: '高榮',
-    tel: '',
-    plan: '',
-    ga: '',
-    date: new Date(2026, 7, 10),
-    timeInfo: call('resolveCalendarTime_', '08:00'),
-    ...overrides
-  };
-}
-
-function testCalendarRepairOwnerRequiresUniqueIdentityAndSchedule() {
-  const owner = liveCalendarContext({
-    eventId: 'event-duplicate',
-    sheetId: 50,
-    row: 30,
-    chartNo: 'X001',
-    patientName: '測試姓名',
-    condition: '最新診斷',
-    date: new Date(2026, 7, 13),
-    timeInfo: call('resolveCalendarTime_', '12:00')
-  });
-  const event = plain(call('buildCalendarResource_', owner));
-  event.id = 'event-duplicate';
-  event.summary = 'X001 | 測試姓名 | 舊診斷';
-
-  assert.strictEqual(
-    call('getUniqueCalendarRepairOwnerKey_', event, [owner]),
-    '50:30'
-  );
-
-  const sameIdentityAndSchedule = {
-    ...owner,
-    row: 33,
-    condition: '另一診斷'
-  };
-  assert.strictEqual(
-    call(
-      'getUniqueCalendarRepairOwnerKey_',
-      event,
-      [owner, sameIdentityAndSchedule]
-    ),
-    ''
-  );
-
-  const wrongSchedule = {
-    ...owner,
-    row: 34,
-    timeInfo: call('resolveCalendarTime_', '12:30')
-  };
-  assert.strictEqual(
-    call('getUniqueCalendarRepairOwnerKey_', event, [wrongSchedule]),
-    ''
-  );
-
-  const wrongIdentity = {
-    ...owner,
-    row: 35,
-    chartNo: 'X002'
-  };
-  assert.strictEqual(
-    call('getUniqueCalendarRepairOwnerKey_', event, [wrongIdentity]),
-    ''
-  );
-}
-
-function testLiveCalendarAuditFindsColorDriftMissingAndOrphans() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  const current = liveCalendarContext();
-  const expected = call('buildCalendarResource_', current);
-  const archiveEvent = {
-    id: 'event-archive',
-    summary: 'A001 | 歷史病例 | CATA',
-    description: 'TEL: 000',
-    colorId: '5',
-    start: { date: '2026-01-01' },
-    end: { date: '2026-01-02' }
-  };
-  const orphanEvent = {
-    id: 'event-orphan',
-    summary: 'O001 | 舊資料 | CATA',
-    description: 'Plan: migrated',
-    colorId: '5',
-    start: { date: '2026-02-01' },
-    end: { date: '2026-02-02' }
-  };
-  const api = installCalendarMock({
-    initialEvents: [
-      { id: current.eventId, ...expected, colorId: '2' },
-      archiveEvent,
-      orphanEvent,
-      {
-        id: 'event-manual',
-        summary: '私人行程',
-        description: '不屬於系統',
-        start: { date: '2026-03-01' },
-        end: { date: '2026-03-02' }
-      }
-    ],
-    omitFromList: [current.eventId],
-    pageSize: 2
-  });
-  const missing = liveCalendarContext({
-    eventId: 'event-missing',
-    row: 3,
-    rowHash: 'missing-row-hash'
-  });
-  const scan = registryScan([current, missing], [{
-    sheetId: 50,
-    sheetName: '202608',
-    kind: 'MONTHLY',
-    archived: false
-  }]);
-  scan.eventLocations['event-archive'] = [{
-    eventId: 'event-archive',
-    sheetId: 90,
-    sheetName: '刀表封存_2026',
-    kind: 'ARCHIVE',
-    archived: true,
-    row: 10
-  }];
-
-  const result = call('analyzeLiveCalendarState_', scan);
-  assert.deepStrictEqual(
-    plain(result.actions.map(item => item.type).sort()),
-    ['calendar_drift', 'calendar_missing', 'calendar_orphan']
-  );
-  assert.strictEqual(
-    result.actions.find(item => item.type === 'calendar_orphan').eventId,
-    'event-orphan'
-  );
-  assert.strictEqual(result.unmanagedEvents.length, 1);
-  assert.strictEqual(result.conflicts.length, 0);
-  assert.strictEqual(api.counts().getCount, 2);
-  assert.ok(api.counts().listCount >= 2);
-}
-
-function testLiveCalendarAuditFailsClosedAndOrphanDeleteNeedsConfirmation() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  installCalendarMock({ listError: 'temporary list failure' });
-  const failed = call(
-    'analyzeLiveCalendarState_',
-    registryScan([liveCalendarContext()])
-  );
-  assert.strictEqual(failed.ok, false);
-  assert.strictEqual(failed.conflicts[0].type, 'calendar_list_failed');
-
-  const orphan = {
-    id: 'event-orphan',
-    summary: 'O001 | 舊資料 | CATA',
-    description: 'Plan: migrated',
-    start: { date: '2026-02-01' },
-    end: { date: '2026-02-02' }
-  };
-  const api = installCalendarMock({ initialEvents: [orphan] });
-  const action = {
-    type: 'calendar_orphan',
-    eventId: orphan.id,
-    context: null,
-    previous: { sheetName: 'Calendar', row: '' }
-  };
-  const scan = registryScan([]);
-  const analysis = { actions: [action], conflicts: [] };
-  assert.strictEqual(
-    call('applyLiveCalendarActions_', scan, analysis, []).length,
-    0
-  );
-  assert.ok(api.events[orphan.id]);
-  const applied = call(
-    'applyLiveCalendarActions_',
-    scan,
-    analysis,
-    [orphan.id]
-  );
-  assert.strictEqual(applied.length, 1);
-  assert.strictEqual(applied[0].result.ok, true);
-  assert.strictEqual(api.events[orphan.id], undefined);
-}
-
-function testCalendarLifecycleCreateAndVerify() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  const api = installCalendarMock();
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const row = Array(headers.length).fill('');
-  row[headers.indexOf('姓名')] = '測試姓名';
-  row[headers.indexOf('日期')] = new Date(2026, 7, 10);
-  row[headers.indexOf('Condition')] = '追蹤';
-  const sheet = new FakeSheet('FU', 50, [headers, row]);
-  const columns = call('getRequiredFuColumns_', sheet);
-  const managed = call('buildFuRowContext_', sheet, 2, columns);
-  const result = call('syncManagedContext_', managed, {});
-  assert.strictEqual(result.ok, true);
-  assert.strictEqual(result.status, 'created');
-  assert.strictEqual(api.counts().insertCount, 1);
-  assert.strictEqual(
-    sheet.valueAt(2, headers.indexOf('CalendarEventId') + 1),
-    'created-1'
-  );
-}
 
 function makeMonthlyReorderFixture() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  // Deliberately reorder columns to exercise header-based lookup.
   const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS')).reverse();
   const makeRow = fields => headers.map(header => fields[header] || '');
-  const sheet = new FakeSheet('202609', 909, [
-    headers,
+  const sheet = new FakeSheet('202609', 909, [headers,
     makeRow({ '日期／報到時間': new Date(2026, 8, 10), '醫院': '高榮', '病歷號': '◆ 刀日' }),
     makeRow({ '病歷號': 'TEST-A', '姓名': '測試甲', CalendarEventId: 'event-a' }),
-    makeRow({ '病歷號': 'TEST-B', '姓名': '測試乙', CalendarEventId: 'event-b' })
-  ]);
-  const spreadsheet = makeFakeSpreadsheet([sheet]);
-  const columns = call('getRequiredMonthlyColumns_', sheet);
-  const scan = call('buildCurrentCalendarScan_', spreadsheet);
-  call('writeCalendarRegistryStore_', scan);
-  const api = installCalendarMock({ initialEvents: scan.contexts.map(item => ({
-    ...plain(call('buildCalendarResource_', item)), id: item.eventId
-  })) });
-  return { sheet, spreadsheet, columns, scan, api };
+    makeRow({ '病歷號': 'TEST-B', '姓名': '測試乙', CalendarEventId: 'event-b' })]);
+  return { sheet, spreadsheet: makeFakeSpreadsheet([sheet]), columns: call('getRequiredMonthlyColumns_', sheet) };
 }
 
-function testMonthlyMoveDuringCalendarUpdateDoesNotCopyEventId() {
-  const { sheet, columns, scan, api } = makeMonthlyReorderFixture();
-  const originalUpdate = context.Calendar.Events.update;
-  context.Calendar.Events.update = (...args) => {
-    const result = originalUpdate(...args);
-    [sheet.rows[2], sheet.rows[3]] = [sheet.rows[3], sheet.rows[2]];
-    sheet.setNoteAt(3, columns.CHART_NO, '另一列的人工註記');
-    call('setSystemNote_', sheet.getRange(3, columns.CHART_NO),
-      evaluate('CALENDAR_SYNC_NOTE_PREFIX'), '另一列仍待重試');
-    return result;
-  };
-  try {
-    const result = call('syncManagedContext_', scan.contexts[0], scan.eventLocations);
-    assert.strictEqual(result.ok, true);
-    assert.strictEqual(sheet.valueAt(3, columns.EVENT_ID), 'event-b');
-    assert.strictEqual(sheet.valueAt(4, columns.EVENT_ID), 'event-a');
-    assert.ok(sheet.noteAt(3, columns.CHART_NO).includes('另一列仍待重試'));
-    assert.strictEqual(api.counts().insertCount, 0);
-  } finally {
-    context.Calendar.Events.update = originalUpdate;
-  }
-}
-
-function testMonthlyReorderClearsStaleNotesWithoutCalendarCalls() {
-  const { sheet, spreadsheet, columns, api } = makeMonthlyReorderFixture();
-  [sheet.rows[2], sheet.rows[3]] = [sheet.rows[3], sheet.rows[2]];
-  sheet.setNoteAt(4, columns.CHART_NO, '人工備註保留');
-  call('setSystemNote_', sheet.getRange(4, columns.CHART_NO),
-    evaluate('CALENDAR_CONFLICT_NOTE_PREFIX'), '舊重複警告');
-  call('setSystemNote_', sheet.getRange(3, columns.CHART_NO),
-    evaluate('CALENDAR_SYNC_NOTE_PREFIX'), '舊同步警告');
-  call('reconcileCalendarRegistry_', spreadsheet, { apply: false, changeType: 'HEALTH' });
-  assert.ok(sheet.noteAt(4, columns.CHART_NO).includes('舊重複警告'));
-  const result = call('reconcileCalendarRegistry_', spreadsheet,
-    { apply: true, changeType: 'OTHER' });
-  assert.strictEqual(result.ok, true);
-  assert.strictEqual(sheet.noteAt(4, columns.CHART_NO), '人工備註保留');
-  assert.strictEqual(sheet.noteAt(3, columns.CHART_NO), '');
-  assert.strictEqual(api.counts().updateCount, 0);
-  assert.strictEqual(api.counts().insertCount, 0);
-  assert.strictEqual(api.counts().removeCount, 0);
-  assert.strictEqual(call('readCalendarRegistryStore_').entries
-    .find(entry => entry.eventId === 'event-a').row, 4);
-}
-
-function testMonthlyReorderKeepsActualDuplicateDiagnostics() {
-  const { sheet, spreadsheet, columns, api } = makeMonthlyReorderFixture();
-  sheet.rows[3][columns.EVENT_ID - 1] = 'event-a';
-  call('reconcileCalendarRegistry_', spreadsheet, { apply: false, changeType: 'OTHER' });
-  assert.throws(() => call('reconcileCalendarRegistry_', spreadsheet,
-    { apply: true, changeType: 'OTHER' }), /重複/);
-  [3, 4].forEach(row => assert.ok(sheet.noteAt(row, columns.CHART_NO).includes('重複')));
-  assert.strictEqual(api.counts().updateCount, 0);
-}
-
-function testMonthlyDateChangesDuringSyncRemainPendingUntilRetried() {
-  const { sheet, spreadsheet, columns, api } = makeMonthlyReorderFixture();
-  const originalUpdate = context.Calendar.Events.update;
-  context.Calendar.Events.update = (...args) => {
-    const result = originalUpdate(...args);
-    // Move this patient under a new date while the request is in flight.
-    const nextHeader = sheet.rows[1].slice();
-    nextHeader[columns.TIME - 1] = new Date(2026, 8, 17);
-    const moved = sheet.rows.splice(2, 1)[0];
-    sheet.rows.push(nextHeader, moved);
-    return result;
-  };
-  try {
-    const result = call('syncManagedRowsAt_', spreadsheet, sheet, [3]);
-    assert.strictEqual(result.ok, false);
-    assert.strictEqual(result.results[0].result.status, 'row_changed_during_sync');
-    const pending = call('readCalendarRegistryStore_').entries
-      .find(entry => entry.eventId === 'event-a');
-    assert.strictEqual(pending.pendingSync, true);
-    assert.strictEqual(pending.pendingError, 'row_changed_during_sync');
-    assert.strictEqual(sheet.valueAt(5, columns.EVENT_ID), 'event-a');
-    assert.strictEqual(sheet.valueAt(3, columns.EVENT_ID), 'event-b');
-  } finally {
-    context.Calendar.Events.update = originalUpdate;
-  }
-  const retried = call('reconcileCalendarRegistry_', spreadsheet,
-    { apply: true, changeType: 'OTHER' });
-  assert.strictEqual(retried.ok, true);
-  assert.strictEqual(api.events['event-a'].start.date, '2026-09-17');
-  assert.strictEqual(api.events['event-b'].start.date, '2026-09-10');
-  assert.strictEqual(api.counts().insertCount, 0);
-  assert.strictEqual(call('readCalendarRegistryStore_').entries
-    .find(entry => entry.eventId === 'event-a').pendingSync, false);
-}
-
-function testMonthlyReorderDoesNotClearFailedPendingSync() {
-  const { sheet, spreadsheet, columns, scan } = makeMonthlyReorderFixture();
-  call('writeCalendarRegistryStore_', scan, [{
-    ...call('toRegistryEntry_', scan.contexts[0]),
-    pendingSync: true, pendingError: 'update_failed'
-  }]);
-  const originalUpdate = context.Calendar.Events.update;
-  context.Calendar.Events.update = () => { throw new Error('503 temporary failure'); };
-  try {
-    const result = call('reconcileCalendarRegistry_', spreadsheet,
-      { apply: true, changeType: 'OTHER' });
-    assert.strictEqual(result.ok, false);
-    assert.ok(sheet.noteAt(3, columns.CHART_NO).includes('更新失敗'));
-    assert.strictEqual(call('readCalendarRegistryStore_').entries
-      .find(entry => entry.eventId === 'event-a').pendingSync, true);
-  } finally {
-    context.Calendar.Events.update = originalUpdate;
-  }
-}
-
-function testCalendarLifecycle404Recreates() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  const api = installCalendarMock({ update404: true });
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const row = Array(headers.length).fill('');
-  row[headers.indexOf('病歷號')] = 'X404';
-  row[headers.indexOf('日期')] = new Date(2026, 7, 10);
-  row[headers.indexOf('CalendarEventId')] = 'missing-event';
-  const sheet = new FakeSheet('FU', 51, [headers, row]);
-  const columns = call('getRequiredFuColumns_', sheet);
-  const managed = call('buildFuRowContext_', sheet, 2, columns);
-  const result = call('syncManagedContext_', managed, {
-    'missing-event': [managed]
-  });
-  assert.strictEqual(result.ok, true);
-  assert.strictEqual(result.status, 'recreated_404');
-  assert.strictEqual(api.counts().updateCount, 1);
-  assert.strictEqual(api.counts().insertCount, 1);
-}
-
-function testCalendarLifecycleDelete404ClearsId() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  installCalendarMock({ remove404: true });
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const row = Array(headers.length).fill('');
-  row[headers.indexOf('病歷號')] = 'X404';
-  row[headers.indexOf('CalendarEventId')] = 'already-gone';
-  const sheet = new FakeSheet('FU', 52, [headers, row]);
-  const columns = call('getRequiredFuColumns_', sheet);
-  const managed = call('buildFuRowContext_', sheet, 2, columns);
-  const result = call('deleteCurrentContextEvent_', managed);
-  assert.strictEqual(result.ok, true);
-  assert.strictEqual(result.status, 'already_missing');
-  assert.strictEqual(
-    sheet.valueAt(2, headers.indexOf('CalendarEventId') + 1),
-    ''
-  );
-}
-
-function testRegistryChunkRoundTrip() {
-  clearScriptProperties();
-  Object.keys(scriptPropertyCalls).forEach(key => {
-    scriptPropertyCalls[key] = 0;
-  });
-  const contexts = Array.from({ length: 80 }, (_, index) => {
-    return registryContext({
-      eventId: `event-${index}`,
-      row: index + 2,
-      rowHash: `hash-${index}`
-    });
-  });
-  const scan = registryScan(contexts);
-  const index = call('writeCalendarRegistryStore_', scan, []);
-  const loaded = call('readCalendarRegistryStore_');
-  assert.strictEqual(index.eventCount, 80);
-  assert.strictEqual(loaded.ok, true);
-  assert.strictEqual(loaded.entries.length, 80);
-  assert.ok(index.sheets[0].keys.length > 1);
-  assert.ok(
-    loaded.entries.every(entry => !Object.hasOwn(entry, 'patientName'))
-  );
-  assert.strictEqual(
-    scriptPropertyCalls.setProperties,
-    1,
-    '索引應以一次批次寫入 Script Properties'
-  );
-  assert.strictEqual(
-    scriptPropertyCalls.setProperty,
-    0,
-    '索引不可逐分段 setProperty'
-  );
-  assert.strictEqual(
-    scriptPropertyCalls.getProperty,
-    0,
-    '索引回讀不可逐分段 getProperty'
-  );
-  assert.strictEqual(
-    scriptPropertyCalls.getProperties,
-    2,
-    '索引寫入與回讀各只需一次 getProperties'
-  );
-}
-
-function testRetainedRegistryEntryOverridesCurrentScopedScan() {
-  Object.keys(scriptPropertyStore)
-    .filter(key => key.includes('CALENDAR_ROW_REGISTRY_V2'))
-    .forEach(key => delete scriptPropertyStore[key]);
-  const current = registryContext({
-    eventId: 'event-retained',
-    rowHash: 'new-unprocessed-hash',
-    row: 20
-  });
-  const retained = registryEntry({
-    eventId: 'event-retained',
-    rowHash: 'old-baseline-hash',
-    row: 3
-  });
-  call('writeCalendarRegistryStore_', registryScan([current]), [retained]);
-  const stored = call('readCalendarRegistryStore_');
-  assert.strictEqual(stored.ok, true);
-  assert.strictEqual(stored.entries.length, 1);
-  assert.strictEqual(stored.entries[0].rowHash, 'old-baseline-hash');
-  Object.keys(scriptPropertyStore)
-    .filter(key => key.includes('CALENDAR_ROW_REGISTRY_V2'))
-    .forEach(key => delete scriptPropertyStore[key]);
-}
-
-function testPendingDeleteIsRetried() {
-  const result = analyze(
-    [registryEntry({ pendingDelete: true })],
-    [],
-    { changeType: 'OTHER' }
-  );
-  assert.deepStrictEqual(
-    plain(result.actions.map(item => item.type)),
-    ['delete_missing']
-  );
-}
-
-function testRemoveRowQueuePreservesDeletionSemantics() {
-  const previous = context.reconcileCalendarRegistry_;
-  let captured = null;
-  context.reconcileCalendarRegistry_ = (_spreadsheet, options) => {
-    captured = options;
-    return { ok: true, results: [] };
-  };
-  try {
-    const queue = call('emptyPendingCalendarQueue_');
-    queue.fullScan = true;
-    queue.allowMissingDeletes = true;
-    const result = call('applyPendingCalendarQueue_', {}, queue);
-    assert.strictEqual(result.ok, true);
-    assert.strictEqual(captured.changeType, 'REMOVE_ROW');
-    assert.strictEqual(captured.allowMissingDeletes, true);
-  } finally {
-    context.reconcileCalendarRegistry_ = previous;
-  }
-}
-
-function testNativeRemoveRowsDeletesEventsAndUpdatesRegistry() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const sheet = new FakeSheet('FU', 6001, [headers]);
-  const spreadsheet = makeFakeSpreadsheet([sheet]);
-  const entries = ['removed-a', 'removed-b'].map((eventId, index) => {
-    return registryEntry({
-      eventId,
-      sheetId: 6001,
-      sheetName: 'FU',
-      kind: 'FU',
-      row: index + 2,
-      rowHash: `removed-row-${index}`,
-      bindingHash: `removed-binding-${index}`
-    });
-  });
-  call(
-    'writeCalendarRegistryStore_',
-    registryScan([], [{
-      sheetId: 6001,
-      sheetName: 'FU',
-      kind: 'FU',
-      archived: false
-    }]),
-    entries
-  );
-  const api = installCalendarMock({
-    initialEvents: entries.map(entry => ({
-      id: entry.eventId,
-      summary: 'X |  | 追蹤',
-      description: 'Plan: delete row'
-    }))
-  });
-  const queue = call('emptyPendingCalendarQueue_');
-  queue.fullScan = true;
-  queue.allowMissingDeletes = true;
-  const result = call(
-    'applyPendingCalendarQueue_',
-    spreadsheet,
-    queue
-  );
-  assert.strictEqual(result.ok, true);
-  assert.strictEqual(api.counts().removeCount, 2);
-  assert.strictEqual(call('readCalendarRegistryStore_').entries.length, 0);
-}
-
-function testNativeRemoveRowDeleteFailureKeepsPendingDelete() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const sheet = new FakeSheet('FU', 6002, [headers]);
-  const spreadsheet = makeFakeSpreadsheet([sheet]);
-  const entry = registryEntry({
-    eventId: 'removed-fails',
-    sheetId: 6002,
-    sheetName: 'FU',
-    kind: 'FU',
-    row: 2,
-    rowHash: 'removed-row-fails',
-    bindingHash: 'removed-binding-fails'
-  });
-  call(
-    'writeCalendarRegistryStore_',
-    registryScan([], [{
-      sheetId: 6002,
-      sheetName: 'FU',
-      kind: 'FU',
-      archived: false
-    }]),
-    [entry]
-  );
-  installCalendarMock({
-    initialEvents: [{ id: entry.eventId, summary: 'X |  | 追蹤' }],
-    removeError: '503 delete unavailable'
-  });
-  const queue = call('emptyPendingCalendarQueue_');
-  queue.fullScan = true;
-  queue.allowMissingDeletes = true;
-  const result = call(
-    'applyPendingCalendarQueue_',
-    spreadsheet,
-    queue
-  );
-  assert.strictEqual(result.ok, false);
-  const retained = call('readCalendarRegistryStore_').entries[0];
-  assert.strictEqual(retained.eventId, 'removed-fails');
-  assert.strictEqual(retained.pendingDelete, true);
-}
-
-function testRegistryDeleteNeverUsesShiftedRowNumberAsIdentity() {
-  const result = analyze(
-    [registryEntry({ row: 3, rowHash: 'old', bindingHash: 'old-binding' })],
-    [registryContext({
-      eventId: '',
-      row: 3,
-      rowHash: 'different',
-      bindingHash: 'different-binding'
-    })],
-    { changeType: 'REMOVE_ROW' }
-  );
-  assert.ok(result.actions.some(item => item.type === 'delete_missing'));
-  assert.ok(result.actions.some(item => item.type === 'create'));
-  assert.strictEqual(
-    result.conflicts.some(item => {
-      return item.type === 'event_id_removed_or_partial_move';
-    }),
-    false
-  );
-}
-
-function testRegistryBindingMatchPreventsUnsafeRowDelete() {
-  const result = analyze(
-    [registryEntry({ row: 3, rowHash: 'old', bindingHash: 'same-binding' })],
-    [registryContext({
-      eventId: '',
-      row: 30,
-      rowHash: 'changed-after-move',
-      bindingHash: 'same-binding'
-    })],
-    { changeType: 'REMOVE_ROW' }
-  );
-  assert.strictEqual(
-    result.actions.some(item => item.type === 'delete_missing'),
-    false
-  );
-  assert.ok(result.conflicts.some(item => {
-    return item.type === 'event_id_removed_or_partial_move';
-  }));
-}
-
-function testPendingResolutionIsNotDeletedByLaterUnrelatedRemoveRow() {
-  const result = analyze(
-    [registryEntry({
-      pendingResolution: true,
-      pendingResolutionReason: 'multiple_binding_match'
-    })],
-    [],
-    { changeType: 'REMOVE_ROW', allowMissingDeletes: true }
-  );
-  assert.strictEqual(
-    result.actions.some(item => item.type === 'delete_missing'),
-    false
-  );
-  assert.ok(result.conflicts.some(item => {
-    return item.type === 'multiple_binding_match';
-  }));
-}
-
-function testPendingResolutionClearsWhenSameBindingIdReturns() {
-  const result = analyze(
-    [registryEntry({
-      pendingResolution: true,
-      pendingResolutionReason: 'missing_event_id_from_sheet'
-    })],
-    [registryContext()],
-    { changeType: 'HEALTH' }
-  );
-  assert.deepStrictEqual(
-    plain(result.actions.map(item => item.type)),
-    ['resolve_pending_resolution']
-  );
-  assert.strictEqual(result.conflicts.length, 0);
-}
-
-function testSingleSheetRefreshIsolatesMissingRegistryEntry() {
-  clearScriptProperties();
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const row = Array(headers.length).fill('');
-  row[headers.indexOf('病歷號')] = 'CURRENT';
-  row[headers.indexOf('日期')] = new Date(2026, 7, 20);
-  row[headers.indexOf('CalendarEventId')] = 'event-current';
-  const sheet = new FakeSheet('FU', 6101, [headers, row]);
-  const spreadsheet = makeFakeSpreadsheet([sheet]);
-  const current = call(
-    'buildFuRowContext_',
-    sheet,
-    2,
-    call('getRequiredFuColumns_', sheet)
-  );
-  const stale = registryEntry({
-    eventId: 'event-stale',
-    sheetId: 6101,
-    sheetName: 'FU',
-    kind: 'FU',
-    row: 80,
-    rowHash: 'stale-row',
-    bindingHash: 'stale-binding'
-  });
-  call(
-    'writeCalendarRegistryStore_',
-    registryScan(
-      [current],
-      [{ sheetId: 6101, sheetName: 'FU', kind: 'FU', archived: false }]
-    ),
-    [stale]
-  );
-  const refreshed = call(
-    'refreshCalendarRegistryForSheet_',
-    spreadsheet,
-    sheet
-  );
-  assert.strictEqual(refreshed.ok, true);
-  assert.strictEqual(refreshed.pendingResolutionCount, 1);
-  const loaded = call('readCalendarRegistryStore_');
-  const retained = loaded.entries.find(entry => {
-    return entry.eventId === 'event-stale';
-  });
-  assert.strictEqual(retained.pendingResolution, true);
-  assert.strictEqual(
-    retained.pendingResolutionReason,
-    'missing_event_id_from_sheet'
-  );
-  assert.ok(loaded.entries.some(entry => {
-    return entry.eventId === 'event-current';
-  }));
-}
-
-function testPendingResolutionDoesNotBlockUnrelatedFuCreate() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  const fixture = makeFuLifecycleFixture({
-    sheetId: 6102,
-    date: new Date(2026, 7, 20),
-    chartNo: 'NEW-ROW'
-  });
-  seedFuLifecycleRegistry(fixture, [
-    makeFuRegistryEntry(fixture, 'event-stale-other', {
-      row: 90,
-      rowHash: 'stale-other-row',
-      bindingHash: 'stale-other-binding'
-    })
-  ]);
-  const api = installCalendarMock();
-  const result = call(
-    'syncManagedRowsAt_',
-    fixture.spreadsheet,
-    fixture.sheet,
-    [2]
-  );
-  assert.strictEqual(result.ok, true);
-  assert.strictEqual(result.results[0].result.status, 'created');
-  assert.strictEqual(api.counts().insertCount, 1);
-  const loaded = call('readCalendarRegistryStore_');
-  assert.ok(loaded.entries.some(entry => {
-    return entry.eventId === 'created-1' && !entry.pendingResolution;
-  }));
-  assert.ok(loaded.entries.some(entry => {
-    return entry.eventId === 'event-stale-other' && entry.pendingResolution;
-  }));
-}
-
-function makeFuLifecycleFixture(options = {}) {
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const row = Array(headers.length).fill('');
-  row[headers.indexOf('病歷號')] = options.chartNo || 'LIFE-001';
-  row[headers.indexOf('姓名')] = options.patientName || '';
-  row[headers.indexOf('Condition')] = options.condition || '追蹤';
-  row[headers.indexOf('日期')] = options.date || '';
-  row[headers.indexOf('CalendarEventId')] = options.eventId || '';
-  const sheet = new FakeSheet(
-    'FU',
-    options.sheetId === undefined ? 6201 : options.sheetId,
-    [headers, row]
-  );
-  const spreadsheet = makeFakeSpreadsheet(
-    [sheet],
-    options.spreadsheetId || 'fu-lifecycle-test'
-  );
-  const columns = call('getRequiredFuColumns_', sheet);
-  const contextValue = call('buildFuRowContext_', sheet, 2, columns);
-  return { headers, row, sheet, spreadsheet, columns, context: contextValue };
-}
-
-function seedFuLifecycleRegistry(fixture, entries) {
-  call(
-    'writeCalendarRegistryStore_',
-    registryScan(
-      [],
-      [{
-        sheetId: fixture.sheet.getSheetId(),
-        sheetName: 'FU',
-        kind: 'FU',
-        archived: false,
-        fastFingerprint: 'fixture'
-      }]
-    ),
-    entries
-  );
-}
-
-function makeFuRegistryEntry(fixture, eventId, overrides = {}) {
-  return {
-    ...registryEntry({
-      eventId,
-      sheetId: fixture.sheet.getSheetId(),
-      sheetName: 'FU',
-      kind: 'FU',
-      row: 2,
-      blockKey: '2026-07-01',
-      rowHash: 'historical-row-hash',
-      bindingHash: fixture.context.bindingHash,
-      ...overrides
-    })
-  };
-}
-
-function testFuDateAndIdClearUsesUniqueBindingAndDeletesEvent() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  const fixture = makeFuLifecycleFixture();
-  seedFuLifecycleRegistry(fixture, [
-    makeFuRegistryEntry(fixture, 'event-old')
-  ]);
-  const api = installCalendarMock({
-    initialEvents: [{
-      id: 'event-old',
-      summary: 'LIFE-001 |  | 追蹤',
-      description: 'Plan: lifecycle',
-      colorId: '8',
-      start: { date: '2026-07-01' },
-      end: { date: '2026-07-02' }
-    }]
-  });
-  const result = call(
-    'syncManagedRowsAt_',
-    fixture.spreadsheet,
-    fixture.sheet,
-    [2]
-  );
-  assert.strictEqual(result.ok, true);
-  assert.strictEqual(result.results[0].result.status, 'deleted');
-  assert.strictEqual(api.counts().removeCount, 1);
-  assert.strictEqual(api.counts().insertCount, 0);
-  assert.strictEqual(
-    fixture.sheet.valueAt(2, fixture.columns.EVENT_ID),
-    ''
-  );
-  assert.strictEqual(fixture.sheet.valueAt(2, fixture.columns.CHART_NO), 'LIFE-001');
-  const loaded = call('readCalendarRegistryStore_');
-  assert.strictEqual(
-    loaded.entries.some(entry => entry.eventId === 'event-old'),
-    false
-  );
-}
-
-function testFuRecoveredDeleteFailureStillStopsTracking() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  const fixture = makeFuLifecycleFixture({ sheetId: 6202 });
-  seedFuLifecycleRegistry(fixture, [
-    makeFuRegistryEntry(fixture, 'event-delete-fails')
-  ]);
-  installCalendarMock({
-    initialEvents: [{
-      id: 'event-delete-fails',
-      summary: 'LIFE-001 |  | 追蹤',
-      description: 'Plan: lifecycle',
-      colorId: '8',
-      start: { date: '2026-07-01' },
-      end: { date: '2026-07-02' }
-    }],
-    removeError: '503 temporary delete failure'
-  });
-  const result = call(
-    'syncManagedRowsAt_',
-    fixture.spreadsheet,
-    fixture.sheet,
-    [2]
-  );
-  assert.strictEqual(result.ok, true);
-  assert.strictEqual(result.results[0].result.status, 'tracking_stopped');
-  assert.strictEqual(
-    result.results[0].result.calendarDeleteStatus,
-    'delete_failed'
-  );
-  assert.strictEqual(
-    fixture.sheet.valueAt(2, fixture.columns.EVENT_ID),
-    ''
-  );
-  assert.strictEqual(
-    fixture.sheet.noteAt(2, fixture.columns.CHART_NO),
-    ''
-  );
-  const loaded = call('readCalendarRegistryStore_');
-  const pending = loaded.entries.find(entry => {
-    return entry.eventId === 'event-delete-fails';
-  });
-  assert.strictEqual(pending, undefined);
-}
-
-function testInstallPreflightIgnoresUniqueFuStoppedTrackingConflict() {
-  const fixture = makeFuLifecycleFixture({ sheetId: 6204 });
-  const previous = makeFuRegistryEntry(fixture, 'event-stopped');
-  const conflict = {
-    type: 'event_id_removed_or_partial_move',
-    eventId: previous.eventId,
-    context: fixture.context,
-    previous
-  };
-  assert.strictEqual(
-    call('isIgnorableFuStoppedTrackingConflict_', conflict),
-    true
-  );
-  assert.strictEqual(
-    call('isIgnorableFuStoppedTrackingConflict_', {
-      ...conflict,
-      type: 'multiple_binding_match'
-    }),
-    false
-  );
-  const dated = makeFuLifecycleFixture({
-    sheetId: 6205,
-    date: new Date(2026, 7, 20)
-  });
-  assert.strictEqual(
-    call('isIgnorableFuStoppedTrackingConflict_', {
-      ...conflict,
-      context: dated.context
-    }),
-    false
-  );
-}
-
-function testFuAmbiguousBindingNeverCallsCalendar() {
-  clearScriptProperties();
-  scriptPropertyStore.CALENDAR_ID = 'calendar@example.test';
-  const fixture = makeFuLifecycleFixture({ sheetId: 6203 });
-  seedFuLifecycleRegistry(fixture, [
-    makeFuRegistryEntry(fixture, 'event-a'),
-    makeFuRegistryEntry(fixture, 'event-b')
-  ]);
-  const api = installCalendarMock({
-    initialEvents: [
-      { id: 'event-a', summary: 'A', description: '' },
-      { id: 'event-b', summary: 'B', description: '' }
-    ]
-  });
-  const result = call(
-    'syncManagedRowsAt_',
-    fixture.spreadsheet,
-    fixture.sheet,
-    [2]
-  );
-  assert.strictEqual(result.ok, true);
-  assert.strictEqual(
-    result.results[0].result.status,
-    'pending_resolution'
-  );
-  assert.strictEqual(api.counts().removeCount, 0);
-  assert.strictEqual(api.counts().insertCount, 0);
-  const loaded = call('readCalendarRegistryStore_');
-  assert.strictEqual(
-    loaded.entries.filter(entry => entry.pendingResolution).length,
-    2
-  );
-}
-
-function testRegistryRoundTripIncludesBindingAndResolutionFingerprint() {
-  clearScriptProperties();
-  const scan = registryScan([registryContext()]);
-  const first = call('writeCalendarRegistryStore_', scan, []);
-  const retained = registryEntry({
-    pendingResolution: true,
-    pendingResolutionReason: 'ambiguous_binding',
-    pendingError: '虛構病患敏感錯誤內容'
-  });
-  const second = call('writeCalendarRegistryStore_', registryScan([]), [retained]);
-  assert.notStrictEqual(first.fingerprint, second.fingerprint);
-  const loaded = call('readCalendarRegistryStore_');
-  assert.strictEqual(loaded.entries[0].bindingHash, 'binding-hash-1');
-  assert.strictEqual(loaded.entries[0].pendingResolution, true);
-  assert.strictEqual(
-    loaded.entries[0].pendingResolutionReason,
-    'ambiguous_binding'
-  );
-  assert.strictEqual(
-    loaded.entries[0].pendingError,
-    'legacy_error_redacted'
-  );
-  assert.strictEqual(
-    JSON.stringify(scriptPropertyStore).includes('虛構病患敏感錯誤內容'),
-    false
-  );
-  assert.strictEqual(Object.hasOwn(loaded.entries[0], 'patientName'), false);
-}
 
 function testHtmlUsesCollapsedAdvancedAreaAndArchiveLanguage() {
   const fuHtml = fs.readFileSync(path.join(root, 'fu_to_monthly.html'), 'utf8');
@@ -5150,6 +2489,273 @@ function testClaspIncludesAllRuntimeModules() {
   assert.ok(claspIgnore.includes('!monthly_rollup.html'));
 }
 
+
+function testExternalOwnerPreventsCalendarMutationsAndKeepsEditFormatting() {
+  const body = evaluate('processScheduleEdit.toString()');
+  assert.ok(body.includes('normalizeEditedTimes_'));
+  assert.ok(body.includes('applyTouchedManagedRowsFormatBatch_'));
+  assert.ok(body.includes('ensureMonthlyHeaderPresentation_'));
+  assert.strictEqual(/syncManaged|Calendar|Registry/.test(body), false);
+  assert.ok(sourceByFile['code.js'].includes("'handoverCalendarToApplication'"));
+}
+
+
+function prepareIdentitySheet(sheet) {
+  const hidden = [];
+  const protections = [];
+  sheet.hideColumns = column => hidden.push(column);
+  sheet.getProtections = () => protections;
+  const getRange = sheet.getRange.bind(sheet);
+  sheet.getRange = (...args) => {
+    const range = getRange(...args);
+    range.protect = () => {
+      const protection = { description: '', warningOnly: true,
+        setDescription(value) { this.description = value; return this; },
+        getDescription() { return this.description; },
+        setWarningOnly(value) { this.warningOnly = value; return this; } };
+      protections.push(protection);
+      return protection;
+    };
+    return range;
+  };
+  context.SpreadsheetApp.ProtectionType = { RANGE: 'RANGE' };
+  return { hidden, protections };
+}
+
+function testScheduleIdentityMigrationPreservesDataAndSkipsBlankRows() {
+  const oldHeaders = plain(evaluate('CONFIG.HEADERS')).filter(value => value !== 'ScheduleSyncId');
+  const fu = new FakeSheet('FU', 901, [oldHeaders.concat(['人工欄']),
+    ['SYN-001', '虛構甲', '', '', '', 'FU', '', '人工 Plan', '', 'old-calendar-id', '人工內容'],
+    Array(oldHeaders.length + 1).fill('')]);
+  fu.setFormulaAt(2, 11, '=1+1');
+  const original = JSON.stringify(fu.rows);
+  const protection = prepareIdentitySheet(fu);
+  const result = call('migrateScheduleSyncIds_', makeFakeSpreadsheet([fu]));
+  assert.strictEqual(result.created, 1);
+  const info = call('getScheduleIdentitySheetInfo_', fu);
+  const id = fu.valueAt(2, info.columns.SYNC_ID);
+  assert.match(id, /^[a-f0-9]{32}$/);
+  assert.strictEqual(fu.valueAt(3, info.columns.SYNC_ID), '');
+  assert.strictEqual(fu.valueAt(2, 10), 'old-calendar-id');
+  assert.strictEqual(fu.formulaAt(2, 11), '=1+1');
+  assert.deepStrictEqual(fu.rows.slice(1).map(row => row.slice(0, oldHeaders.length + 1)), JSON.parse(original).slice(1));
+  assert.ok(protection.hidden.includes(info.columns.SYNC_ID));
+  assert.strictEqual(protection.protections[0].warningOnly, false);
+  const repeated = call('migrateScheduleSyncIds_', makeFakeSpreadsheet([fu]));
+  assert.strictEqual(repeated.created, 0);
+  assert.strictEqual(fu.valueAt(2, info.columns.SYNC_ID), id);
+}
+
+function testScheduleIdentityMigrationValidatesAllSheetsBeforeWriting() {
+  const headers = plain(evaluate('CONFIG.HEADERS'));
+  const first = new FakeSheet('FU', 902, [headers, ['SYN-1', '甲']]);
+  const second = new FakeSheet('All', 903, [headers, ['SYN-2', '乙']]);
+  const column = headers.indexOf('ScheduleSyncId') + 1;
+  first.setValueAt(2, column, 'a'.repeat(32));
+  second.setValueAt(2, column, 'a'.repeat(32));
+  const before = JSON.stringify([first.rows, second.rows]);
+  assert.throws(() => call('migrateScheduleSyncIds_', makeFakeSpreadsheet([first, second])), /識別碼重複/);
+  assert.strictEqual(JSON.stringify([first.rows, second.rows]), before);
+}
+
+function testScheduleIdentityMigrationIncludesDateHeadersAndArchives() {
+  const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS')).filter(value => value !== 'ScheduleSyncId');
+  const date = Array(headers.length).fill('');
+  const patient = Array(headers.length).fill('');
+  date[headers.indexOf('日期／報到時間')] = new Date(2026, 9, 10);
+  date[headers.indexOf('醫院')] = '高榮';
+  date[headers.indexOf('病歷號')] = '◆ 刀日';
+  patient[headers.indexOf('病歷號')] = 'SYN-3';
+  patient[headers.indexOf('姓名')] = '丙';
+  patient[headers.indexOf('CalendarEventId')] = 'preserved-event';
+  const month = new FakeSheet('202610', 904, [headers, date, patient, Array(headers.length).fill('')]);
+  prepareIdentitySheet(month);
+  const archiveHeaders = headers.concat(['ArchiveSourceMonth', 'ArchiveRowType']);
+  const archivedDate = date.concat(['202609', 'DATE_HEADER']);
+  const archivedPatient = patient.concat(['202609', 'PATIENT']);
+  archivedPatient[headers.indexOf('CalendarEventId')] = 'archived-event';
+  const archive = new FakeSheet('刀表封存_2026', 905,
+    [[], [], [], [], [], archiveHeaders, archivedDate, archivedPatient]);
+  prepareIdentitySheet(archive);
+  const result = call('migrateScheduleSyncIds_', makeFakeSpreadsheet([month, archive]));
+  assert.strictEqual(result.created, 4);
+  const scan = call('scanScheduleIdentities_', makeFakeSpreadsheet([month, archive]));
+  assert.strictEqual(scan.conflicts.length, 0);
+  assert.strictEqual(scan.missing, 0);
+  const monthInfo = scan.sheets.find(info => info.name === '202610');
+  assert.strictEqual(month.valueAt(4, monthInfo.columns.SYNC_ID), '');
+  assert.strictEqual(month.valueAt(3, monthInfo.columns.EVENT_ID), 'preserved-event');
+  assert.strictEqual(archive.valueAt(8, headers.indexOf('CalendarEventId') + 1), 'archived-event');
+}
+
+function testScheduleIdentitySurvivesNativeSortAndWholeDateChanges() {
+  const { sheet, columns } = makeMonthlyReorderFixture();
+  sheet.rows.slice(1).forEach((row, index) => {
+    if (row.some(value => value !== '')) sheet.setValueAt(index + 2, columns.SYNC_ID, (index + 1).toString(16).padStart(32, '0'));
+  });
+  const before = {};
+  sheet.rows.slice(1).forEach(row => {
+    const chart = row[columns.CHART_NO - 1];
+    if (chart && chart !== '◆ 刀日') before[chart] = row[columns.SYNC_ID - 1];
+  });
+  sheet.setValueAt(2, columns.TIME, new Date(2026, 10, 18));
+  call('rebuildMonthlySheetSorted_', sheet);
+  sheet.rows.slice(1).forEach(row => {
+    const chart = row[columns.CHART_NO - 1];
+    if (chart && chart !== '◆ 刀日') assert.strictEqual(row[columns.SYNC_ID - 1], before[chart]);
+  });
+  const scan = call('scanMonthlyBlocks_', sheet, columns);
+  assert.ok(scan.blocks.every(item => item.blockKey.startsWith('2026-11-18|')));
+}
+
+function testFormattingOnlyDeploymentHasNoCalendarApiAndLegacyCallsAreSafe() {
+  const deployed = files.map(file => sourceByFile[file]).join('\n');
+  assert.strictEqual(/\bCalendar\.(?:Events|Calendars|CalendarList)\b/.test(deployed), false);
+  assert.strictEqual(/\bCalendarApp\b/.test(deployed), false);
+  assert.strictEqual(evaluate('typeof buildCalendarResource_'), 'undefined');
+  assert.strictEqual(evaluate('typeof rebuildCalendarRegistry_'), 'undefined');
+  assert.strictEqual(evaluate('typeof enqueuePendingCalendarSync_'), 'undefined');
+  ['retryPendingCalendarSync', 'processCalendarStructureChange', 'applySelectedCalendarRepairPlan_']
+    .forEach(name => assert.strictEqual(call(name).status, 'external_calendar_owner'));
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'appsscript.json'), 'utf8'));
+  assert.deepStrictEqual(manifest.dependencies, {});
+  assert.ok(sourceByFile['calendar_handover.js'].includes('protocol: 2'));
+  assert.ok(sourceByFile['code.js'].includes("'migrateScheduleSyncIds'"));
+  assert.strictEqual(fs.existsSync(path.join(root, 'calendar_sync.js')), false);
+}
+
+
+function testNewPatientInsertionPreservesManualBlankRowAndGetsNewIdentity() {
+  const { sheet, columns } = makeMonthlyReorderFixture();
+  const blank = Array(sheet.rows[0].length).fill('');
+  sheet.rows.push(blank.slice(), blank.slice());
+  sheet.setNoteAt(5, columns.MEMO, '人工空白列備註');
+  const before = sheet.rows.length;
+  sheet.insertRowBefore = row => {
+    sheet.rows.splice(row - 1, 0, Array(sheet.rows[0].length).fill(''));
+    const shifted = {};
+    Object.entries(sheet.notes).forEach(([key, value]) => {
+      const [oldRow, column] = key.split(':').map(Number);
+      shifted[`${oldRow >= row ? oldRow + 1 : oldRow}:${column}`] = value;
+    });
+    sheet.notes = shifted;
+  };
+  const scan = call('scanMonthlyBlocks_', sheet, columns);
+  const row = call('insertPatientAtBlockEnd_', sheet, scan.blocks[0],
+    { CHART_NO: 'SYN-NEW', NAME: '新增虛構病人' }, columns, scan);
+  assert.strictEqual(row, 5);
+  assert.strictEqual(sheet.rows.length, before + 1);
+  assert.strictEqual(sheet.valueAt(row, columns.CHART_NO), 'SYN-NEW');
+  assert.match(sheet.valueAt(row, columns.SYNC_ID), /^[a-f0-9]{32}$/);
+  assert.strictEqual(sheet.valueAt(row, columns.EVENT_ID), '');
+  assert.strictEqual(sheet.noteAt(6, columns.MEMO), '人工空白列備註');
+  assert.strictEqual(sheet.valueAt(6, columns.SYNC_ID), '');
+}
+
+function testScheduleIdentityMigrationCanResumeAfterPartialFailure() {
+  const headers = plain(evaluate('CONFIG.HEADERS'));
+  const sheet = new FakeSheet('FU', 906, [headers, ['SYN-1', '甲'], ['SYN-2', '乙']]);
+  prepareIdentitySheet(sheet);
+  const column = headers.indexOf('ScheduleSyncId') + 1;
+  const getRange = sheet.getRange.bind(sheet);
+  let fail = true;
+  sheet.getRange = (...args) => {
+    const range = getRange(...args);
+    if (args[0] === 3 && args[1] === column && args.length === 2) {
+      const setValue = range.setValue.bind(range);
+      range.setValue = value => { if (fail) throw new Error('synthetic write failure'); return setValue(value); };
+    }
+    return range;
+  };
+  const spreadsheet = makeFakeSpreadsheet([sheet]);
+  assert.throws(() => call('migrateScheduleSyncIds_', spreadsheet), /synthetic write failure/);
+  const retained = sheet.valueAt(2, column);
+  assert.match(retained, /^[a-f0-9]{32}$/);
+  fail = false;
+  const result = call('migrateScheduleSyncIds_', spreadsheet);
+  assert.strictEqual(result.created, 1);
+  assert.strictEqual(sheet.valueAt(2, column), retained);
+  assert.notStrictEqual(sheet.valueAt(3, column), retained);
+}
+
+
+function testDuplicateEventBindingStopsSheetOperations() {
+  const { sheet, spreadsheet, columns } = makeMonthlyReorderFixture();
+  sheet.setValueAt(4, columns.EVENT_ID, sheet.valueAt(3, columns.EVENT_ID));
+  const before = JSON.stringify(sheet.rows);
+  assert.throws(() => call('assertScheduleIntegrity_', spreadsheet), /CalendarEventId 重複/);
+  assert.strictEqual(JSON.stringify(sheet.rows), before);
+}
+
+function testFuRequestCacheUsesPermanentIdentityAfterMoveAndCalendarReplacement() {
+  const { sheet, spreadsheet, columns } = makeMonthlyReorderFixture();
+  const syncId = 'd'.repeat(32);
+  sheet.setValueAt(3, columns.SYNC_ID, syncId);
+  const cached = { syncId, eventId: 'event-a', sheetId: sheet.getSheetId() };
+  [sheet.rows[2], sheet.rows[3]] = [sheet.rows[3], sheet.rows[2]];
+  sheet.setValueAt(4, columns.EVENT_ID, 'replacement-event');
+  sheet.setValueAt(2, columns.TIME, new Date(2026, 9, 20));
+  const found = call('locateCachedMonthlySchedule_', spreadsheet, cached);
+  assert.strictEqual(found.row, 4);
+  assert.strictEqual(found.context.syncId, syncId);
+  assert.strictEqual(found.context.eventId, 'replacement-event');
+  assert.ok(found.context.blockKey.startsWith('2026-10-20|'));
+  sheet.rows.push(sheet.rows[3].slice());
+  assert.throws(() => call('locateCachedMonthlySchedule_', spreadsheet, cached), /排程識別重複/);
+}
+
+function testSurgeryDatePreviewSelectsCampusAndDetectsChange() {
+  const { sheet } = makeMonthlyReorderFixture();
+  const date = new Date(2026, 8, 10);
+  const high = call('buildSurgeryDateInsertionPreview_', sheet, 4, date, '高榮');
+  const union = call('buildSurgeryDateInsertionPreview_', sheet, 4, date, '聯醫');
+  assert.deepStrictEqual(plain(high.duplicateRows), [2]);
+  assert.deepStrictEqual(plain(union.duplicateRows), []);
+  assert.strictEqual(union.hospital, '聯醫');
+  assert.notStrictEqual(high.fingerprint, union.fingerprint);
+  assert.throws(() => call('buildSurgeryDateInsertionPreview_', sheet, 4, date, '未知'), /高榮或聯醫/);
+}
+
+function testCalendarHandoverPublishesWorkerAndRepairsFormattingTriggerOnly() {
+  const { sheet, spreadsheet, columns } = makeMonthlyReorderFixture();
+  [2, 3, 4].forEach((row, index) => sheet.setValueAt(row, columns.SYNC_ID, String(index + 1).repeat(32)));
+  spreadsheet.getSpreadsheetTimeZone = () => 'Asia/Taipei';
+  let metadata = [], repaired = 0;
+  spreadsheet.getDeveloperMetadata = () => metadata;
+  spreadsheet.addDeveloperMetadata = (key, value) => metadata.push({
+    getKey: () => key, getValue: () => value, setValue: next => { value = next; }
+  });
+  const saved = { ...context.SpreadsheetApp };
+  const functions = ['runMenuAction_', 'withSheetOperationLock_', 'installOrRepairTriggers_', 'onOpen'];
+  const originals = functions.map(name => evaluate(name));
+  let prompts = ['synthetic@group.calendar.google.com', 'a'.repeat(32)];
+  context.SpreadsheetApp.getActiveSpreadsheet = () => spreadsheet;
+  context.SpreadsheetApp.DeveloperMetadataVisibility = { DOCUMENT: 'DOCUMENT' };
+  context.SpreadsheetApp.getUi = () => ({ Button: { OK: 'OK' }, ButtonSet: { OK_CANCEL: 'OK_CANCEL' },
+    prompt: () => { const answer = prompts.shift(); return { getSelectedButton: () => 'OK', getResponseText: () => answer }; },
+    alert() {} });
+  context.runMenuAction_ = (_label, action) => action();
+  context.withSheetOperationLock_ = action => action();
+  context.installOrRepairTriggers_ = () => repaired++;
+  context.onOpen = () => {};
+  try {
+    const result = call('handoverCalendarToApplication');
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(repaired, 1);
+    assert.strictEqual(metadata.length, 1);
+    const control = JSON.parse(metadata[0].getValue());
+    assert.strictEqual(control.worker_id, 'a'.repeat(32));
+    assert.strictEqual(control.gas_calendar_disabled, true);
+    assert.strictEqual(control.protocol, 2);
+    assert.strictEqual(control.gas_version, '2026.10.11');
+  } finally {
+    context.SpreadsheetApp = saved;
+    functions.forEach((name, index) => { context[name] = originals[index]; });
+    delete scriptPropertyStore.CALENDAR_OWNER_APPLICATION_V1;
+    delete scriptPropertyStore.CALENDAR_ID;
+  }
+}
+
 const tests = [
   testVersionAndModuleSplit,
   testEightDigitDateInputOnlyInFunctions,
@@ -5161,24 +2767,15 @@ const tests = [
   testTimeNormalizationVariants,
   testMultiRowPasteNormalizesEveryMonthlyTimeCell,
   testWholeMonthlyTimeNormalizationUsesBoundedBatchReads,
-  testFuSnapshotContextDoesNotRereadSheet,
   testUnifiedSortRoutesWithoutChangingSortImplementations,
-  testCalendarPendingQueueCoalescesWithoutClinicalText,
-  testFuNoDateDraftSkipsSyncAndClearsLegacyBusyNote,
-  testIncompleteFuLifecycleSkipsOrDeletesOwnEvent,
-  testBusyTriggerQueuesOnceWithoutWritingBusyNote,
-  testPendingRetryWorkerDrainsQueueOnce,
-  testOnEditNormalizesBeforeShortLockAndAvoidsFullReconcile,
   testFullDateDoesNotCollideWithTime,
   testMonthlyDateHeaderUsesDateAndBlankEventId,
   testMonthlyHeaderMarkerPreservesOtherCells,
   testMonthlyHeaderMarkerNeverOverwritesExistingChartCell,
   testMonthlyStructureIssuesReportHybridAndMissingMarker,
   testDuplicateMonthlyBlocksAreIndependentAndSupported,
-  testOnEditScopesCalendarRowsToTouchedPatientOrHeaderBlock,
   testSurgeryDateInsertionPreviewSplitsOnlyRowsBelowSelection,
   testBlockRefRequiresExactHeaderRowAndIdentity,
-  testPerformanceFastPathsAvoidGlobalRegistryRebuilds,
   testFuNativeSortUsesOneSortAndPreservesNotes,
   testFuNativeSortSkipsAlreadySortedRows,
   testTemporaryNativeSortRollsBackOnVerificationFailure,
@@ -5187,46 +2784,14 @@ const tests = [
   testFuToMonthlyReusesPrecomputedMonthScan,
   testManagedRowFormattingUsesRangeListsAndLeavesCustomColumnAlone,
   testTouchedRowFormattingOnlyChangesEditedStandardColumns,
-  testLightweightEventIndexAndSingleSheetRegistryRefresh,
-  testSingleSheetSyncUsesVerifiedRegistryBeforeGlobalScan,
-  testArchiveEventIdsArePersistedInRegistry,
-  testReorderPreflightIsLocalAndDetectsUnsyncedRowHash,
-  testFastFingerprintMetadataFallsBackSafely,
   testDefaultMonthlyDates,
-  testCalendarTitlePreservesSlots,
-  testRepairBindingSignatureIgnoresOnlyTrailingSurgeryDate,
-  testRepairEventFingerprintIgnoresApiObjectKeyOrder,
   testMonthlyConditionComposition,
-  testCalendarResourceTimedAndAllDay,
-  testMonthlyStrikethroughControlsCancellationColorAndMarker,
-  testFuIgnoresStrikethroughAndFormatQueuesCalendarScanOnly,
   testArbitraryHeaderOrderUsesNames,
   testDuplicateHeadersAreDiagnosed,
   testMonthlyDiagnosisSummaryFormulaDefinition,
   testMonthlyDiagnosisSummaryHeadersStayCanonical,
   testMonthlyDiagnosisSummaryCreationAndManagedRefresh,
   testAnnualArchiveCanonicalizesDiagnosisSummaryHeader,
-  testFuNameOnlyRowIsValid,
-  testMonthlyNameOnlyRowIsValid,
-  testRegistrySameBlockRowReorderNeedsNoApi,
-  testRegistryMoveUpdatesExistingEvent,
-  testRegistryPendingSyncForcesRetryWithoutContentChange,
-  testRegistryCrossMonthMoveUpdatesExistingEvent,
-  testRegistryMissingIdNewRowCreatesEvent,
-  testRegistryManualIdClearIsConflictNotDuplicateCreate,
-  testRegistryNativeRowDeleteDeletesEvent,
-  testRegistryDeleteNeverUsesShiftedRowNumberAsIdentity,
-  testRegistryBindingMatchPreventsUnsafeRowDelete,
-  testPendingResolutionIsNotDeletedByLaterUnrelatedRemoveRow,
-  testPendingResolutionClearsWhenSameBindingIdReturns,
-  testRegistryAmbiguousMissingRowWaitsForConfirmation,
-  testRegistryWholeSheetDeletionNeverDeletesEvents,
-  testRegistryHeaderDeletionDoesNotBatchReschedule,
-  testRegistryDuplicateEventIdIsDiagnostic,
-  testActiveAndArchivedDuplicateEventIdIsDiagnostic,
-  testArchiveOnlyDuplicateEventIdIsDiagnostic,
-  testArchivedRowsDoNotSync,
-  testInvalidTimeIsConflict,
   testAnnualArchiveNamingAndEligibility,
   testConditionParserProvidesSafeSuggestions,
   testTimeSortIsStable,
@@ -5244,42 +2809,27 @@ const tests = [
   testAnnualArchiveStructureUsesProtectedSystemMetadata,
   testLegacyArchiveStateFailsClosed,
   testArchiveTransactionGuardFailsClosed,
-  testFuScanIsBatchedAndRetryCacheRelocatesByFingerprint,
   testColumnWidthsRequireExplicitRequestAfterCreation,
   testInstallDoesNotBatchRewriteCalendar,
   testSystemNotesPreserveManualNotes,
-  testCalendarErrorsUseVisibleIdentityCell,
-  testHealthRowsRedactIdsAndSeparateFailures,
-  testHealthRowsExposePendingQueueWithoutClinicalData,
-  testHealthReportIsRetired,
-  testRegistryStoresRawIdButNoClinicalPlaintext,
-  testCalendarRepairOwnerRequiresUniqueIdentityAndSchedule,
-  testLiveCalendarAuditFindsColorDriftMissingAndOrphans,
-  testLiveCalendarAuditFailsClosedAndOrphanDeleteNeedsConfirmation,
-  testCalendarLifecycleCreateAndVerify,
-  testMonthlyMoveDuringCalendarUpdateDoesNotCopyEventId,
-  testMonthlyReorderClearsStaleNotesWithoutCalendarCalls,
-  testMonthlyReorderKeepsActualDuplicateDiagnostics,
-  testMonthlyDateChangesDuringSyncRemainPendingUntilRetried,
-  testMonthlyReorderDoesNotClearFailedPendingSync,
-  testCalendarLifecycle404Recreates,
-  testCalendarLifecycleDelete404ClearsId,
-  testRegistryChunkRoundTrip,
-  testRetainedRegistryEntryOverridesCurrentScopedScan,
-  testPendingDeleteIsRetried,
-  testRemoveRowQueuePreservesDeletionSemantics,
-  testNativeRemoveRowsDeletesEventsAndUpdatesRegistry,
-  testNativeRemoveRowDeleteFailureKeepsPendingDelete,
-  testSingleSheetRefreshIsolatesMissingRegistryEntry,
-  testPendingResolutionDoesNotBlockUnrelatedFuCreate,
-  testFuDateAndIdClearUsesUniqueBindingAndDeletesEvent,
-  testFuRecoveredDeleteFailureStillStopsTracking,
-  testInstallPreflightIgnoresUniqueFuStoppedTrackingConflict,
-  testFuAmbiguousBindingNeverCallsCalendar,
-  testRegistryRoundTripIncludesBindingAndResolutionFingerprint,
   testHtmlUsesCollapsedAdvancedAreaAndArchiveLanguage,
-  testClaspIncludesAllRuntimeModules
+  testClaspIncludesAllRuntimeModules,
+  testNewPatientInsertionPreservesManualBlankRowAndGetsNewIdentity,
+  testScheduleIdentityMigrationCanResumeAfterPartialFailure,
+  testScheduleIdentityMigrationPreservesDataAndSkipsBlankRows,
+  testScheduleIdentityMigrationValidatesAllSheetsBeforeWriting,
+  testScheduleIdentityMigrationIncludesDateHeadersAndArchives,
+  testScheduleIdentitySurvivesNativeSortAndWholeDateChanges,
+  testFormattingOnlyDeploymentHasNoCalendarApiAndLegacyCallsAreSafe,
+  testExternalOwnerPreventsCalendarMutationsAndKeepsEditFormatting,
+  testDuplicateEventBindingStopsSheetOperations,
+  testFuRequestCacheUsesPermanentIdentityAfterMoveAndCalendarReplacement,
+  testSurgeryDatePreviewSelectsCampusAndDetectsChange,
+  testCalendarHandoverPublishesWorkerAndRepairsFormattingTriggerOnly
 ];
 
-tests.forEach(test => test());
-console.log(`smoke tests passed (${tests.length})`);
+module.exports = { call, FakeSheet, evaluate, plain, makeFakeSpreadsheet, context };
+if (require.main === module) {
+  tests.forEach(test => test());
+  console.log(`smoke tests passed (${tests.length})`);
+}
