@@ -1,6 +1,6 @@
 # 手術排程與 FU 追蹤系統
 
-版本 **2026.10.11**。這是綁定 Google Spreadsheet 的 GAS；本版本只維護線上刀表的格式、conditional formatting、時間正規化、排序、月份／刀日建立、跨表快照與年度封存。**GAS 不讀取、新增、更新或刪除任何 Google Calendar 事件**，也不安裝日曆掃描／重試觸發器。
+版本 **2026.10.11.2**。這是綁定 Google Spreadsheet 的 GAS；本版本只維護線上刀表的格式、conditional formatting、時間正規化、排序、月份／刀日建立、跨表快照與年度封存。**GAS 不讀取、新增、更新或刪除任何 Google Calendar 事件**，也不安裝日曆掃描／重試觸發器。
 
 SOAP → 刀表由平台 EXE 經使用者確認後寫入；刀表 → 日曆由指定 Windows 主機的監控 EXE 負責，包含人工輸入、改期、取消與刪列。日曆不回寫臨床資料；監控程序只維護隱藏的識別欄。
 
@@ -79,7 +79,7 @@ FU 日期格式為 `yyyy/m/d`。刀日標題使用 `yyyy/m/d ddd` 日期、醫�
 文件 metadata `vghks.calendar.control`：
 
 ```json
-{"protocol":2,"owner":"application","gas_calendar_disabled":true,"calendar_id":"CALENDAR_ID","time_zone":"Asia/Taipei","gas_version":"2026.10.11","worker_id":"32位小寫十六進位主機識別"}
+{"protocol":2,"owner":"application","gas_calendar_disabled":true,"calendar_id":"CALENDAR_ID","time_zone":"Asia/Taipei","gas_version":"2026.10.11.2","worker_id":"32位小寫十六進位主機識別"}
 ```
 
 不保存病人原文。這是指定唯一主機的設定，並非分散式鎖；移機前必須停止舊主機，攜帶完整資料目錄，不可同時執行兩台。
@@ -101,6 +101,6 @@ node tests/sheet_contract.js
 git diff --check
 ```
 
-目前 69 項 smoke tests 通過，涵蓋格式、排序、封存、識別遷移、重複 ID、跨月整區改期、跨表重試及主機交接。Calendar 引擎與其測試已移除，由監控程序測試接手事件生命週期。另以 `tests/sheet_contract.js` 核對共用刀表契約：欄名、下拉、欄寬、月份日期、診斷公式與欄位換序後的條件格式。平台持有同一份契約，CI 對比實際 GAS 模型。
+目前 71 項 smoke tests 通過，涵蓋格式、排序、封存、識別遷移、重複 ID、跨月整區改期、跨表重試及主機交接。Calendar 引擎與其測試已移除，由監控程序測試接手事件生命週期。另以 `tests/sheet_contract.js` 核對共用刀表契約：欄名、下拉、欄寬、月份日期、診斷公式與欄位換序後的條件格式。平台持有同一份契約，CI 對比實際 GAS 模型。
 
 這些是合成資料測試；不表示雲端已部署，也不代替刀表副本的拖移、保護範圍與觸發器權限驗收。

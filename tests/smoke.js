@@ -687,7 +687,7 @@ function testIolListReadsOnlyRequestedDateDisplayRows() {
 }
 
 function testVersionAndModuleSplit() {
-  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.11');
+  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.11.2');
   assert.strictEqual(evaluate('typeof processRowChange'), 'function');
   assert.strictEqual(evaluate('typeof processCalendarStructureChange'), 'function');
   assert.strictEqual(evaluate('typeof createMonthlySurgerySheet'), 'function');
@@ -2612,6 +2612,7 @@ function testFormattingOnlyDeploymentHasNoCalendarApiAndLegacyCallsAreSafe() {
   const deployed = files.map(file => sourceByFile[file]).join('\n');
   assert.strictEqual(/\bCalendar\.(?:Events|Calendars|CalendarList)\b/.test(deployed), false);
   assert.strictEqual(/\bCalendarApp\b/.test(deployed), false);
+  assert.strictEqual(/\|\|=|&&=|\?\?=/.test(deployed), false, 'Apps Script parser rejects logical assignment');
   assert.strictEqual(evaluate('typeof buildCalendarResource_'), 'undefined');
   assert.strictEqual(evaluate('typeof rebuildCalendarRegistry_'), 'undefined');
   assert.strictEqual(evaluate('typeof enqueuePendingCalendarSync_'), 'undefined');
@@ -2747,7 +2748,7 @@ function testCalendarHandoverPublishesWorkerAndRepairsFormattingTriggerOnly() {
     assert.strictEqual(control.worker_id, 'a'.repeat(32));
     assert.strictEqual(control.gas_calendar_disabled, true);
     assert.strictEqual(control.protocol, 2);
-    assert.strictEqual(control.gas_version, '2026.10.11');
+    assert.strictEqual(control.gas_version, '2026.10.11.2');
   } finally {
     context.SpreadsheetApp = saved;
     functions.forEach((name, index) => { context[name] = originals[index]; });
@@ -2756,7 +2757,79 @@ function testCalendarHandoverPublishesWorkerAndRepairsFormattingTriggerOnly() {
   }
 }
 
+function testInsertDayWritesSelectedCampusAndRejectsDuplicateIdentityBeforeWriting() {
+  const { sheet, spreadsheet, columns } = makeMonthlyReorderFixture();
+  sheet.setValueAt(4, columns.MEMO, '人工保留');
+  sheet.getActiveRange = () => sheet.getRange(4, 1);
+  sheet.insertRowBefore = row => sheet.rows.splice(row - 1, 0, Array(sheet.rows[0].length).fill(''));
+  sheet.setActiveRange = () => {};
+  spreadsheet.getActiveSheet = () => sheet;
+  spreadsheet.setActiveSheet = () => {};
+  const saved = { ...context.SpreadsheetApp };
+  const functions = ['runMenuAction_', 'withSheetOperationLock_'];
+  const originals = functions.map(name => evaluate(name));
+  let prompts, alerts = [];
+  context.SpreadsheetApp.getActiveSpreadsheet = () => spreadsheet;
+  context.SpreadsheetApp.getUi = () => ({ Button: { OK: 'OK' }, ButtonSet: { OK_CANCEL: 'OK_CANCEL' },
+    prompt: () => { const answer = prompts.shift(); return { getSelectedButton: () => 'OK', getResponseText: () => answer }; },
+    alert: text => { alerts.push(text); return 'OK'; } });
+  context.runMenuAction_ = (_label, action) => action();
+  context.withSheetOperationLock_ = action => action();
+  try {
+    prompts = ['20260911', '聯醫'];
+    const result = call('insertSurgeryDateAtSelection');
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(sheet.valueAt(4, columns.HOSPITAL), '聯醫');
+    assert.strictEqual(sheet.valueAt(4, columns.CHART_NO), '◆ 刀日');
+    assert.match(sheet.valueAt(4, columns.SYNC_ID), /^[a-f0-9]{32}$/);
+    assert.strictEqual(sheet.valueAt(5, columns.EVENT_ID), 'event-b');
+    assert.strictEqual(sheet.valueAt(5, columns.MEMO), '人工保留');
+    assert.ok(alerts.some(text => text.includes('2026-09-11／聯醫刀日')));
+    sheet.setValueAt(3, columns.SYNC_ID, sheet.valueAt(4, columns.SYNC_ID));
+    const before = JSON.stringify(sheet.rows);
+    prompts = ['20260912', '高榮'];
+    assert.throws(() => call('insertSurgeryDateAtSelection'), /識別碼重複/);
+    assert.strictEqual(JSON.stringify(sheet.rows), before);
+  } finally {
+    context.SpreadsheetApp = saved;
+    functions.forEach((name, index) => { context[name] = originals[index]; });
+  }
+}
+
+function testTriggerRepairRemovesLegacyWritersAndPreservesOtherTriggersAndHandover() {
+  const saved = { ...context.SpreadsheetApp }, oldScript = context.ScriptApp;
+  const trigger = name => ({ getHandlerFunction: () => name });
+  let triggers = ['processRowChange', 'retryPendingCalendarSync', 'processMonthlyStructureChange', 'manualOtherTrigger'].map(trigger);
+  context.SpreadsheetApp.getActiveSpreadsheet = () => makeFakeSpreadsheet([]);
+  context.ScriptApp = {
+    getProjectTriggers: () => triggers.slice(),
+    deleteTrigger: value => { triggers = triggers.filter(item => item !== value); },
+    newTrigger: name => {
+      const builder = { forSpreadsheet: () => builder, onEdit: () => builder,
+        create: () => triggers.push(trigger(name)) };
+      return builder;
+    }
+  };
+  scriptPropertyStore.CALENDAR_ROW_REGISTRY_V2_CHUNK_1 = 'legacy';
+  scriptPropertyStore.CALENDAR_SYNC_PENDING_V2 = 'legacy';
+  scriptPropertyStore.CALENDAR_OWNER_APPLICATION_V1 = 'preserved';
+  try {
+    const result = call('installOrRepairTriggers_', false);
+    assert.strictEqual(result.onEdit, 'processScheduleEdit');
+    assert.deepStrictEqual(triggers.map(value => value.getHandlerFunction()).sort(), ['manualOtherTrigger', 'processScheduleEdit']);
+    assert.strictEqual(scriptPropertyStore.CALENDAR_ROW_REGISTRY_V2_CHUNK_1, undefined);
+    assert.strictEqual(scriptPropertyStore.CALENDAR_SYNC_PENDING_V2, undefined);
+    assert.strictEqual(scriptPropertyStore.CALENDAR_OWNER_APPLICATION_V1, 'preserved');
+  } finally {
+    context.SpreadsheetApp = saved;
+    context.ScriptApp = oldScript;
+    delete scriptPropertyStore.CALENDAR_OWNER_APPLICATION_V1;
+  }
+}
+
 const tests = [
+  testInsertDayWritesSelectedCampusAndRejectsDuplicateIdentityBeforeWriting,
+  testTriggerRepairRemovesLegacyWritersAndPreservesOtherTriggersAndHandover,
   testVersionAndModuleSplit,
   testEightDigitDateInputOnlyInFunctions,
   testIolListIsReadOnlyAndKeepsAllDateBlocks,

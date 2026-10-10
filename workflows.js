@@ -377,6 +377,7 @@ function insertSurgeryDateAtSelection() {
       if (refreshedPreview.fingerprint !== preview.fingerprint) {
         throw new Error('選取位置附近資料已變更，請重新執行新增刀日。');
       }
+      assertScheduleIntegrity_(spreadsheet, { allowRepairableStructureActions: true });
       const columns = refreshedPreview.columns;
       const lastColumn = Math.max(
         getLastHeaderColumn_(currentSheet),
@@ -416,12 +417,12 @@ function insertSurgeryDateAtSelection() {
       }
 
       const affectedRows = refreshedPreview.affectedRows.map(row => row + 1);
-      assertScheduleIntegrity_(spreadsheet);
+      assertScheduleIntegrity_(spreadsheet, { allowRepairableStructureActions: true });
       spreadsheet.setActiveSheet(currentSheet);
       currentSheet.setActiveRange(
         currentSheet.getRange(insertRow, columns.TIME)
       );
-      ui.alert(`已在第 ${insertRow} 列建立 ${preview.dateKey}／高榮刀日。\n刀表已保存，日曆由指定主機監控後更新。`);
+      ui.alert(`已在第 ${insertRow} 列建立 ${preview.dateKey}／${hospital}刀日。\n刀表已保存，日曆由指定主機監控後更新。`);
       return { ok: true, row: insertRow, dateKey: preview.dateKey,
         duplicateRows: preview.duplicateRows, affectedRows };
     });

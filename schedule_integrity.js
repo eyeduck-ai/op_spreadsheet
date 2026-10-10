@@ -19,7 +19,10 @@ function scanScheduleEventBindings_(spreadsheet) {
     const values = count ? sheet.getRange(2, 1, count, width).getValues() : [];
     values.forEach((row, index) => {
       const id = toCellText_(getRowFieldValue_(row, columns, 'EVENT_ID'));
-      if (id) (eventLocations[id] ||= []).push({ sheetId: sheet.getSheetId(), row: index + 2, eventId: id });
+      if (id) {
+        if (!eventLocations[id]) eventLocations[id] = [];
+        eventLocations[id].push({ sheetId: sheet.getSheetId(), row: index + 2, eventId: id });
+      }
     });
     if (kind === 'MONTHLY') {
       const scan = scanMonthlyBlocksFromValues_(sheet, columns, values, 2, width, count + 1);
@@ -27,8 +30,10 @@ function scanScheduleEventBindings_(spreadsheet) {
         (issue.severity === 'action' ? structuralActions : structuralConflicts).push(issue));
     }
   });
-  getAnnualArchiveEventIdLocations_(spreadsheet).forEach(location =>
-    (eventLocations[location.eventId] ||= []).push(location));
+  getAnnualArchiveEventIdLocations_(spreadsheet).forEach(location => {
+    if (!eventLocations[location.eventId]) eventLocations[location.eventId] = [];
+    eventLocations[location.eventId].push(location);
+  });
   return { eventLocations, structuralActions, structuralConflicts,
     duplicateIds: Object.keys(eventLocations).filter(id => eventLocations[id].length > 1) };
 }
