@@ -9,7 +9,7 @@
  * - annual_archive.js：私人備份與永久年度封存
  */
 const CONFIG = {
-  VERSION: '2026.10.11.3',
+  VERSION: '2026.10.11.4',
   SHEET_ALL: 'All',
   SHEET_FU: 'FU',
   LEGACY_SHEET_OP: 'OP',

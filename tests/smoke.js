@@ -687,7 +687,7 @@ function testIolListReadsOnlyRequestedDateDisplayRows() {
 }
 
 function testVersionAndModuleSplit() {
-  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.11.3');
+  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.11.4');
   assert.strictEqual(evaluate('typeof processRowChange'), 'function');
   assert.strictEqual(evaluate('typeof processCalendarStructureChange'), 'function');
   assert.strictEqual(evaluate('typeof createMonthlySurgerySheet'), 'function');

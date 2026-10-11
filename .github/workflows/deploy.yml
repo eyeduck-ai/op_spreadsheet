@@ -33,6 +33,8 @@ jobs:
           node tests/smoke.js
           node --check tests/sheet_contract.js
           node tests/sheet_contract.js
+          node --check tests/monitor_handover.js
+          node tests/monitor_handover.js
 
       - name: Setup clasp credentials
         env:
