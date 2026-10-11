@@ -26,7 +26,7 @@ jobs:
           node --check code.js
           node --check sheet_model.js
           node --check schedule_integrity.js
-          node --check calendar_handover.js
+          node --check schedule_identity.js
           node --check workflows.js
           node --check annual_archive.js
           node --check tests/smoke.js

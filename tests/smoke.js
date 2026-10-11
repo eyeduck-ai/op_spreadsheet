@@ -13,7 +13,7 @@ const files = [
   'schedule_integrity.js',
   'workflows.js',
   'annual_archive.js',
-  'calendar_handover.js'
+  'schedule_identity.js'
 ];
 const sourceByFile = Object.fromEntries(
   files.map(file => [
@@ -687,7 +687,7 @@ function testIolListReadsOnlyRequestedDateDisplayRows() {
 }
 
 function testVersionAndModuleSplit() {
-  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.11.2');
+  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.11.3');
   assert.strictEqual(evaluate('typeof processRowChange'), 'function');
   assert.strictEqual(evaluate('typeof processCalendarStructureChange'), 'function');
   assert.strictEqual(evaluate('typeof createMonthlySurgerySheet'), 'function');
@@ -744,9 +744,7 @@ function testCurrentMenuHasNoCompletedMigrationOrLegacyOutput() {
     '執行同步架構升級'
   ].forEach(text => assert.strictEqual(source.includes(text), false));
   [
-    '安裝／修復系統',
-    '遷移固定排程識別欄',
-    '檢查排程識別欄',
+    '安裝／修復刀表格式',
     '套用所有 FU／月表建議欄寬',
     '月刀表 => FU',
     'FU => 月刀表',
@@ -757,6 +755,10 @@ function testCurrentMenuHasNoCompletedMigrationOrLegacyOutput() {
     '彙整舊月刀表'
   ].forEach(text => assert.ok(source.includes(text)));
   [
+    '交由本系統同步日曆',
+    '遷移固定排程識別欄',
+    '檢查排程識別欄',
+    '顯示日曆交接狀態',
     '重建同步索引',
     '套用標準格式',
     '彙整並封存月份刀表',
@@ -2496,7 +2498,7 @@ function testExternalOwnerPreventsCalendarMutationsAndKeepsEditFormatting() {
   assert.ok(body.includes('applyTouchedManagedRowsFormatBatch_'));
   assert.ok(body.includes('ensureMonthlyHeaderPresentation_'));
   assert.strictEqual(/syncManaged|Calendar|Registry/.test(body), false);
-  assert.ok(sourceByFile['code.js'].includes("'handoverCalendarToApplication'"));
+  assert.strictEqual(sourceByFile['code.js'].includes("'handoverCalendarToApplication'"), false);
 }
 
 
@@ -2522,71 +2524,8 @@ function prepareIdentitySheet(sheet) {
   return { hidden, protections };
 }
 
-function testScheduleIdentityMigrationPreservesDataAndSkipsBlankRows() {
-  const oldHeaders = plain(evaluate('CONFIG.HEADERS')).filter(value => value !== 'ScheduleSyncId');
-  const fu = new FakeSheet('FU', 901, [oldHeaders.concat(['人工欄']),
-    ['SYN-001', '虛構甲', '', '', '', 'FU', '', '人工 Plan', '', 'old-calendar-id', '人工內容'],
-    Array(oldHeaders.length + 1).fill('')]);
-  fu.setFormulaAt(2, 11, '=1+1');
-  const original = JSON.stringify(fu.rows);
-  const protection = prepareIdentitySheet(fu);
-  const result = call('migrateScheduleSyncIds_', makeFakeSpreadsheet([fu]));
-  assert.strictEqual(result.created, 1);
-  const info = call('getScheduleIdentitySheetInfo_', fu);
-  const id = fu.valueAt(2, info.columns.SYNC_ID);
-  assert.match(id, /^[a-f0-9]{32}$/);
-  assert.strictEqual(fu.valueAt(3, info.columns.SYNC_ID), '');
-  assert.strictEqual(fu.valueAt(2, 10), 'old-calendar-id');
-  assert.strictEqual(fu.formulaAt(2, 11), '=1+1');
-  assert.deepStrictEqual(fu.rows.slice(1).map(row => row.slice(0, oldHeaders.length + 1)), JSON.parse(original).slice(1));
-  assert.ok(protection.hidden.includes(info.columns.SYNC_ID));
-  assert.strictEqual(protection.protections[0].warningOnly, false);
-  const repeated = call('migrateScheduleSyncIds_', makeFakeSpreadsheet([fu]));
-  assert.strictEqual(repeated.created, 0);
-  assert.strictEqual(fu.valueAt(2, info.columns.SYNC_ID), id);
-}
 
-function testScheduleIdentityMigrationValidatesAllSheetsBeforeWriting() {
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const first = new FakeSheet('FU', 902, [headers, ['SYN-1', '甲']]);
-  const second = new FakeSheet('All', 903, [headers, ['SYN-2', '乙']]);
-  const column = headers.indexOf('ScheduleSyncId') + 1;
-  first.setValueAt(2, column, 'a'.repeat(32));
-  second.setValueAt(2, column, 'a'.repeat(32));
-  const before = JSON.stringify([first.rows, second.rows]);
-  assert.throws(() => call('migrateScheduleSyncIds_', makeFakeSpreadsheet([first, second])), /識別碼重複/);
-  assert.strictEqual(JSON.stringify([first.rows, second.rows]), before);
-}
 
-function testScheduleIdentityMigrationIncludesDateHeadersAndArchives() {
-  const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS')).filter(value => value !== 'ScheduleSyncId');
-  const date = Array(headers.length).fill('');
-  const patient = Array(headers.length).fill('');
-  date[headers.indexOf('日期／報到時間')] = new Date(2026, 9, 10);
-  date[headers.indexOf('醫院')] = '高榮';
-  date[headers.indexOf('病歷號')] = '◆ 刀日';
-  patient[headers.indexOf('病歷號')] = 'SYN-3';
-  patient[headers.indexOf('姓名')] = '丙';
-  patient[headers.indexOf('CalendarEventId')] = 'preserved-event';
-  const month = new FakeSheet('202610', 904, [headers, date, patient, Array(headers.length).fill('')]);
-  prepareIdentitySheet(month);
-  const archiveHeaders = headers.concat(['ArchiveSourceMonth', 'ArchiveRowType']);
-  const archivedDate = date.concat(['202609', 'DATE_HEADER']);
-  const archivedPatient = patient.concat(['202609', 'PATIENT']);
-  archivedPatient[headers.indexOf('CalendarEventId')] = 'archived-event';
-  const archive = new FakeSheet('刀表封存_2026', 905,
-    [[], [], [], [], [], archiveHeaders, archivedDate, archivedPatient]);
-  prepareIdentitySheet(archive);
-  const result = call('migrateScheduleSyncIds_', makeFakeSpreadsheet([month, archive]));
-  assert.strictEqual(result.created, 4);
-  const scan = call('scanScheduleIdentities_', makeFakeSpreadsheet([month, archive]));
-  assert.strictEqual(scan.conflicts.length, 0);
-  assert.strictEqual(scan.missing, 0);
-  const monthInfo = scan.sheets.find(info => info.name === '202610');
-  assert.strictEqual(month.valueAt(4, monthInfo.columns.SYNC_ID), '');
-  assert.strictEqual(month.valueAt(3, monthInfo.columns.EVENT_ID), 'preserved-event');
-  assert.strictEqual(archive.valueAt(8, headers.indexOf('CalendarEventId') + 1), 'archived-event');
-}
 
 function testScheduleIdentitySurvivesNativeSortAndWholeDateChanges() {
   const { sheet, columns } = makeMonthlyReorderFixture();
@@ -2620,8 +2559,9 @@ function testFormattingOnlyDeploymentHasNoCalendarApiAndLegacyCallsAreSafe() {
     .forEach(name => assert.strictEqual(call(name).status, 'external_calendar_owner'));
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'appsscript.json'), 'utf8'));
   assert.deepStrictEqual(manifest.dependencies, {});
-  assert.ok(sourceByFile['calendar_handover.js'].includes('protocol: 2'));
-  assert.ok(sourceByFile['code.js'].includes("'migrateScheduleSyncIds'"));
+  assert.strictEqual(deployed.includes('vghks.calendar.control'), false);
+  assert.strictEqual(evaluate('typeof migrateScheduleSyncIds_'), 'undefined');
+  assert.strictEqual(sourceByFile['code.js'].includes("'migrateScheduleSyncIds'"), false);
   assert.strictEqual(fs.existsSync(path.join(root, 'calendar_sync.js')), false);
 }
 
@@ -2651,32 +2591,6 @@ function testNewPatientInsertionPreservesManualBlankRowAndGetsNewIdentity() {
   assert.strictEqual(sheet.valueAt(row, columns.EVENT_ID), '');
   assert.strictEqual(sheet.noteAt(6, columns.MEMO), '人工空白列備註');
   assert.strictEqual(sheet.valueAt(6, columns.SYNC_ID), '');
-}
-
-function testScheduleIdentityMigrationCanResumeAfterPartialFailure() {
-  const headers = plain(evaluate('CONFIG.HEADERS'));
-  const sheet = new FakeSheet('FU', 906, [headers, ['SYN-1', '甲'], ['SYN-2', '乙']]);
-  prepareIdentitySheet(sheet);
-  const column = headers.indexOf('ScheduleSyncId') + 1;
-  const getRange = sheet.getRange.bind(sheet);
-  let fail = true;
-  sheet.getRange = (...args) => {
-    const range = getRange(...args);
-    if (args[0] === 3 && args[1] === column && args.length === 2) {
-      const setValue = range.setValue.bind(range);
-      range.setValue = value => { if (fail) throw new Error('synthetic write failure'); return setValue(value); };
-    }
-    return range;
-  };
-  const spreadsheet = makeFakeSpreadsheet([sheet]);
-  assert.throws(() => call('migrateScheduleSyncIds_', spreadsheet), /synthetic write failure/);
-  const retained = sheet.valueAt(2, column);
-  assert.match(retained, /^[a-f0-9]{32}$/);
-  fail = false;
-  const result = call('migrateScheduleSyncIds_', spreadsheet);
-  assert.strictEqual(result.created, 1);
-  assert.strictEqual(sheet.valueAt(2, column), retained);
-  assert.notStrictEqual(sheet.valueAt(3, column), retained);
 }
 
 
@@ -2717,45 +2631,6 @@ function testSurgeryDatePreviewSelectsCampusAndDetectsChange() {
   assert.throws(() => call('buildSurgeryDateInsertionPreview_', sheet, 4, date, '未知'), /高榮或聯醫/);
 }
 
-function testCalendarHandoverPublishesWorkerAndRepairsFormattingTriggerOnly() {
-  const { sheet, spreadsheet, columns } = makeMonthlyReorderFixture();
-  [2, 3, 4].forEach((row, index) => sheet.setValueAt(row, columns.SYNC_ID, String(index + 1).repeat(32)));
-  spreadsheet.getSpreadsheetTimeZone = () => 'Asia/Taipei';
-  let metadata = [], repaired = 0;
-  spreadsheet.getDeveloperMetadata = () => metadata;
-  spreadsheet.addDeveloperMetadata = (key, value) => metadata.push({
-    getKey: () => key, getValue: () => value, setValue: next => { value = next; }
-  });
-  const saved = { ...context.SpreadsheetApp };
-  const functions = ['runMenuAction_', 'withSheetOperationLock_', 'installOrRepairTriggers_', 'onOpen'];
-  const originals = functions.map(name => evaluate(name));
-  let prompts = ['synthetic@group.calendar.google.com', 'a'.repeat(32)];
-  context.SpreadsheetApp.getActiveSpreadsheet = () => spreadsheet;
-  context.SpreadsheetApp.DeveloperMetadataVisibility = { DOCUMENT: 'DOCUMENT' };
-  context.SpreadsheetApp.getUi = () => ({ Button: { OK: 'OK' }, ButtonSet: { OK_CANCEL: 'OK_CANCEL' },
-    prompt: () => { const answer = prompts.shift(); return { getSelectedButton: () => 'OK', getResponseText: () => answer }; },
-    alert() {} });
-  context.runMenuAction_ = (_label, action) => action();
-  context.withSheetOperationLock_ = action => action();
-  context.installOrRepairTriggers_ = () => repaired++;
-  context.onOpen = () => {};
-  try {
-    const result = call('handoverCalendarToApplication');
-    assert.strictEqual(result.ok, true);
-    assert.strictEqual(repaired, 1);
-    assert.strictEqual(metadata.length, 1);
-    const control = JSON.parse(metadata[0].getValue());
-    assert.strictEqual(control.worker_id, 'a'.repeat(32));
-    assert.strictEqual(control.gas_calendar_disabled, true);
-    assert.strictEqual(control.protocol, 2);
-    assert.strictEqual(control.gas_version, '2026.10.11.2');
-  } finally {
-    context.SpreadsheetApp = saved;
-    functions.forEach((name, index) => { context[name] = originals[index]; });
-    delete scriptPropertyStore.CALENDAR_OWNER_APPLICATION_V1;
-    delete scriptPropertyStore.CALENDAR_ID;
-  }
-}
 
 function testInsertDayWritesSelectedCampusAndRejectsDuplicateIdentityBeforeWriting() {
   const { sheet, spreadsheet, columns } = makeMonthlyReorderFixture();
@@ -2827,7 +2702,51 @@ function testTriggerRepairRemovesLegacyWritersAndPreservesOtherTriggersAndHandov
   }
 }
 
+
+function testWorkerSetupLegacyCallsCannotMutateSheetOrRegisterHost() {
+  const saved = context.SpreadsheetApp;
+  let alerts = 0;
+  context.SpreadsheetApp = { getUi: () => ({ alert: () => alerts++ }) };
+  try {
+    ['migrateScheduleSyncIds', 'handoverCalendarToApplication', 'showCalendarHandover']
+      .forEach(name => assert.strictEqual(call(name).status, 'external_calendar_owner'));
+    assert.strictEqual(alerts, 3);
+  } finally { context.SpreadsheetApp = saved; }
+}
+
+function testIdentityScanDiagnosesExistingDuplicatesWithoutMigration() {
+  const headers = plain(evaluate('CONFIG.HEADERS'));
+  const first = new FakeSheet('FU', 902, [headers, ['SYN-1', '甲']]);
+  const second = new FakeSheet('All', 903, [headers, ['SYN-2', '乙']]);
+  const column = headers.indexOf('ScheduleSyncId') + 1;
+  first.setValueAt(2, column, 'a'.repeat(32));
+  second.setValueAt(2, column, 'a'.repeat(32));
+  const before = JSON.stringify([first.rows, second.rows]);
+  const result = call('scanScheduleIdentities_', makeFakeSpreadsheet([first, second]));
+  assert.ok(result.conflicts.some(value => value.includes('識別碼重複')));
+  assert.strictEqual(JSON.stringify([first.rows, second.rows]), before);
+}
+
+function testSystemProtectionRepairPreservesWorkerAndOwnerSettings() {
+  const headers = plain(evaluate('CONFIG.HEADERS'));
+  const sheet = new FakeSheet('FU', 907, [headers, ['SYN-1', '甲']]);
+  const protection = prepareIdentitySheet(sheet);
+  const columns = call('getRequiredFuColumns_', sheet);
+  call('hideAndProtectSystemColumns_', sheet, columns, ['EVENT_ID', 'SYNC_ID']);
+  assert.strictEqual(protection.protections.length, 2);
+  assert.ok(protection.protections.every(item => item.warningOnly));
+  const sync = protection.protections.find(item => item.description.endsWith('SYNC_ID'));
+  sync.warningOnly = false; // An explicit owner protection must remain strict.
+  call('hideAndProtectSystemColumns_', sheet, columns, ['EVENT_ID', 'SYNC_ID']);
+  assert.strictEqual(protection.protections.length, 2);
+  assert.strictEqual(sync.warningOnly, false);
+  assert.strictEqual(protection.protections.find(item => item.description.endsWith('EVENT_ID')).warningOnly, true);
+}
+
 const tests = [
+  testSystemProtectionRepairPreservesWorkerAndOwnerSettings,
+  testWorkerSetupLegacyCallsCannotMutateSheetOrRegisterHost,
+  testIdentityScanDiagnosesExistingDuplicatesWithoutMigration,
   testInsertDayWritesSelectedCampusAndRejectsDuplicateIdentityBeforeWriting,
   testTriggerRepairRemovesLegacyWritersAndPreservesOtherTriggersAndHandover,
   testVersionAndModuleSplit,
@@ -2888,17 +2807,12 @@ const tests = [
   testHtmlUsesCollapsedAdvancedAreaAndArchiveLanguage,
   testClaspIncludesAllRuntimeModules,
   testNewPatientInsertionPreservesManualBlankRowAndGetsNewIdentity,
-  testScheduleIdentityMigrationCanResumeAfterPartialFailure,
-  testScheduleIdentityMigrationPreservesDataAndSkipsBlankRows,
-  testScheduleIdentityMigrationValidatesAllSheetsBeforeWriting,
-  testScheduleIdentityMigrationIncludesDateHeadersAndArchives,
   testScheduleIdentitySurvivesNativeSortAndWholeDateChanges,
   testFormattingOnlyDeploymentHasNoCalendarApiAndLegacyCallsAreSafe,
   testExternalOwnerPreventsCalendarMutationsAndKeepsEditFormatting,
   testDuplicateEventBindingStopsSheetOperations,
   testFuRequestCacheUsesPermanentIdentityAfterMoveAndCalendarReplacement,
   testSurgeryDatePreviewSelectsCampusAndDetectsChange,
-  testCalendarHandoverPublishesWorkerAndRepairsFormattingTriggerOnly
 ];
 
 module.exports = { call, FakeSheet, evaluate, plain, makeFakeSpreadsheet, context };

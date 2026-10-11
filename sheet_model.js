@@ -514,25 +514,15 @@ function hideAndProtectSystemColumns_(sheet, columns, fieldKeys) {
       if (typeof existing.setRange === 'function') {
         existing.setRange(sheet.getRange(1, column, sheet.getMaxRows(), 1));
       }
-      if (typeof existing.setWarningOnly === 'function') existing.setWarningOnly(false);
-      // Preserve owner-granted service-account and collaborator permissions.
+      // Preserve both warning-only ranges prepared by the worker and strict
+      // protections/editors explicitly chosen by the owner.
     }
     if (!existing) {
       const protection = sheet.getRange(1, column, sheet.getMaxRows(), 1)
         .protect()
         .setDescription(description);
       if (typeof protection.setWarningOnly === 'function') {
-        protection.setWarningOnly(key !== 'SYNC_ID');
-        if (key === 'SYNC_ID' && typeof protection.getEditors === 'function' &&
-            typeof protection.removeEditors === 'function') {
-          const owner = typeof Session.getEffectiveUser === 'function' ? Session.getEffectiveUser() : null;
-          if (owner && typeof protection.addEditor === 'function') protection.addEditor(owner);
-          protection.removeEditors(protection.getEditors().filter(editor =>
-            !owner || String(editor.getEmail()) !== String(owner.getEmail())));
-          if (typeof protection.canDomainEdit === 'function' && protection.canDomainEdit()) {
-            protection.setDomainEdit(false);
-          }
-        }
+        protection.setWarningOnly(true);
       }
     }
   });

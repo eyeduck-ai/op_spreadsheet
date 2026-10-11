@@ -9,7 +9,7 @@
  * - annual_archive.js：私人備份與永久年度封存
  */
 const CONFIG = {
-  VERSION: '2026.10.11.2',
+  VERSION: '2026.10.11.3',
   SHEET_ALL: 'All',
   SHEET_FU: 'FU',
   LEGACY_SHEET_OP: 'OP',
@@ -194,7 +194,6 @@ const CONFIG = {
   PLAN_GREEN_KEYWORDS: ['APPLY']
 };
 
-const CALENDAR_ID_PROPERTY = 'CALENDAR_ID';
 const LEGACY_EVENT_ID_HEADERS = ['日曆eventID', '日曆apiEventID'];
 const LEGACY_MONTHLY_TIME_HEADERS = ['時間'];
 const MONTHLY_DATE_HEADER_MARKER = '◆ 刀日';
@@ -384,9 +383,6 @@ function withSheetOperationLock_(callback) {
 
 
 
-function getConfiguredCalendarId_() {
-  return toCellText_(PropertiesService.getScriptProperties().getProperty(CALENDAR_ID_PROPERTY));
-}
 
 
 
@@ -504,16 +500,11 @@ function showVersionInfo() {
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   const maintenance = ui.createMenu('維護工具')
-    .addItem('遷移固定排程識別欄', 'migrateScheduleSyncIds')
-    .addItem('交由本系統同步日曆', 'handoverCalendarToApplication')
-    .addItem('顯示日曆交接狀態', 'showCalendarHandover')
-    .addItem('安裝／修復系統', 'installOrRepairSystem')
+    .addItem('安裝／修復刀表格式', 'installOrRepairSystem')
     .addItem(
       '套用所有 FU／月表建議欄寬',
       'applyAllRecommendedColumnWidths'
     )
-    .addSeparator()
-    .addItem('檢查排程識別欄', 'checkScheduleSyncIds')
     .addSeparator()
     .addItem(`版本：${CONFIG.VERSION}`, 'showVersionInfo');
 
