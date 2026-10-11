@@ -78,6 +78,19 @@ function parserContract() {
 
 function templateChecks() {
   const config = plain(evaluate('CONFIG'));
+  const duplicate = new FakeSheet('202610', 9, [[...config.MONTHLY_HEADERS, '']]);
+  duplicate.setFormulaAt(1, config.MONTHLY_HEADERS.length + 1,
+    '=T(N("SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V2"))&"診斷"');
+  assert.throws(() => call('getRequiredMonthlyColumns_', duplicate), /重複/);
+  assert.throws(() => call('getScheduleIdentitySheetInfo_', duplicate), /重複/);
+  const emptyTail = new FakeSheet('202610', 8, [[...config.MONTHLY_HEADERS, '', '']]);
+  assert.strictEqual(call('monthlyHeaderLayout_', emptyTail).length, config.MONTHLY_HEADERS.length);
+  emptyTail.setValueAt(2, config.MONTHLY_HEADERS.length + 2, '人工尾欄');
+  assert.strictEqual(call('monthlyHeaderLayout_', emptyTail).length, config.MONTHLY_HEADERS.length + 2);
+  emptyTail.setValueAt(2, config.MONTHLY_HEADERS.length + 2, '');
+  emptyTail.getMaxColumns = () => config.MONTHLY_HEADERS.length + 4;
+  emptyTail.setNoteAt(8, config.MONTHLY_HEADERS.length + 4, '只有註記的人工尾欄');
+  assert.strictEqual(call('monthlyHeaderLayout_', emptyTail).length, config.MONTHLY_HEADERS.length + 4);
   const reordered = ['ScheduleSyncId', '人工備註', ...config.MONTHLY_HEADERS.filter(value => value !== 'ScheduleSyncId')];
   const older = new FakeSheet('202609', 10, [reordered]);
   const latest = new FakeSheet('202610', 11, [reordered]);

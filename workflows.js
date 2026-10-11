@@ -132,9 +132,25 @@ function reorderManagedSheets_(spreadsheet) {
   return ordered.map(sheet => sheet.getName());
 }
 
+function meaningfulMonthlyWidth_(sheet) {
+  const width = Math.max(sheet.getMaxColumns(), sheet.getLastColumn());
+  const range = sheet.getRange(1, 1, Math.max(1, sheet.getMaxRows()), width);
+  const values = range.getValues();
+  const formulas = typeof range.getFormulas === 'function' ? range.getFormulas() : [];
+  const notes = typeof range.getNotes === 'function' ? range.getNotes() : [];
+  let last = 0;
+  values.forEach((row, rowIndex) => row.forEach((value, column) => {
+    if ((value !== '' && value !== null && value !== undefined) ||
+        (formulas[rowIndex] || [])[column] || (notes[rowIndex] || [])[column]) {
+      last = Math.max(last, column + 1);
+    }
+  }));
+  return Math.max(1, last);
+}
+
 function monthlyHeaderLayout_(sheet) {
   const columns = getRequiredMonthlyColumns_(sheet);
-  const width = Math.max(sheet.getLastColumn(), ...Object.values(columns));
+  const width = Math.max(meaningfulMonthlyWidth_(sheet), ...Object.values(columns));
   const values = sheet.getRange(1, 1, 1, width).getValues()[0];
   Object.keys(columns).forEach(key => {
     values[columns[key] - 1] = CONFIG.MONTHLY_FIELD_HEADERS[key];
@@ -170,7 +186,7 @@ function createOrInitializeMonthlySheet_(spreadsheet, monthName) {
   const template = created ? getMonthlyCreationTemplate_(spreadsheet) : null;
   if (!sheet) sheet = spreadsheet.insertSheet(monthName);
   if (template) {
-    const width = Math.max(template.getLastColumn(), getLastHeaderColumn_(template));
+    const width = meaningfulMonthlyWidth_(template);
     ensureColumnCapacity_(sheet, width);
     template.getRange(1, 1, 1, width).copyTo(sheet.getRange(1, 1, 1, width));
   }
@@ -180,7 +196,7 @@ function createOrInitializeMonthlySheet_(spreadsheet, monthName) {
     enableDiagnosisSummary: created
   });
   if (template) {
-    const width = Math.max(template.getLastColumn(), getLastHeaderColumn_(template));
+    const width = meaningfulMonthlyWidth_(template);
     // Native header copy preserves formulas, manual headers, notes and formats.
     template.getRange(1, 1, 1, width).copyTo(sheet.getRange(1, 1, 1, width));
     format.columns = ensureManagedHeaders_(sheet, 'MONTHLY');

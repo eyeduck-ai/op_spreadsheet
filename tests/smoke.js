@@ -687,7 +687,7 @@ function testIolListReadsOnlyRequestedDateDisplayRows() {
 }
 
 function testVersionAndModuleSplit() {
-  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.11.5');
+  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.11.6');
   assert.strictEqual(evaluate('typeof processRowChange'), 'function');
   assert.strictEqual(evaluate('typeof processCalendarStructureChange'), 'function');
   assert.strictEqual(evaluate('typeof createMonthlySurgerySheet'), 'function');
@@ -1412,7 +1412,7 @@ function testMonthlyNativeSortSkipsAlreadySortedSheet() {
   assert.strictEqual(result.changed, false);
   assert.ok(!result.sheetScan);
   assert.strictEqual(result.strategy, 'precomputed_noop');
-  assert.strictEqual(sheet.calls.getFormulas, 0);
+  assert.strictEqual(sheet.calls.getFormulas, 1); // Header formulas must always be checked for duplicate fields.
   assert.strictEqual(sheet.calls.getNotes, 0);
   assert.strictEqual(sheet.calls.sort, 0);
   assert.strictEqual(sheet.calls.insertColumnsAfter, 0);

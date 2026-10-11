@@ -132,27 +132,18 @@ function buildHeaderColumnMap_(sheet, headerByKey, fieldKeys, options) {
     );
   });
   const formulaMatchers = settings.formulaMatchers || [];
-  const formulaKeys = {};
-  formulaMatchers.forEach(matcher => {
-    if (matcher && matcher.key) formulaKeys[matcher.key] = true;
-  });
-  const needsFormulaLookup = formulaMatchers.length && (
-    Object.keys(formulaKeys).some(key => keyByIndex.indexOf(key) === -1) ||
-    headers.some(isSpreadsheetFormulaErrorHeader_)
-  );
   let formulas = [];
-  if (needsFormulaLookup) {
-    const range = sheet.getRange(1, 1, 1, Math.max(1, headers.length));
-    if (typeof range.getFormulas === 'function') {
-      formulas = (range.getFormulas()[0] || []).slice();
-      formulas.forEach((formula, index) => {
-        if (keyByIndex[index]) return;
-        keyByIndex[index] = resolveHeaderKeyFromMatchers_(
-          toCellText_(formula),
-          formulaMatchers
-        );
-      });
-    }
+  const range = sheet.getRange(1, 1, 1, Math.max(1, headers.length));
+  if (typeof range.getFormulas === 'function') {
+    formulas = (range.getFormulas()[0] || []).slice();
+    formulas.forEach((formula, index) => {
+      const key = resolveHeaderKeyFromMatchers_(toCellText_(formula), formulaMatchers);
+      if (!key) return;
+      if (keyByIndex[index] && keyByIndex[index] !== key) {
+        throw new Error('表頭文字與系統公式欄位衝突，請先核對。');
+      }
+      keyByIndex[index] = key;
+    });
   }
 
   const columns = {};
