@@ -38,7 +38,13 @@ function getScheduleIdentitySheetInfo_(sheet) {
   });
   const headerByKey = kind === 'FU' ? CONFIG.FIELD_HEADERS : CONFIG.MONTHLY_FIELD_HEADERS;
   const columns = {};
-  Object.keys(headerByKey).forEach(key => { columns[key] = byHeader[headerByKey[key]] || 0; });
+  if (kind !== 'ARCHIVE') {
+    const managed = kind === 'FU' ? getFuColumnInfo_(sheet) : getMonthlyColumnInfo_(sheet);
+    assertUniqueHeaders_(managed, name);
+    Object.assign(columns, managed.columns);
+  } else {
+    Object.keys(headerByKey).forEach(key => { columns[key] = byHeader[headerByKey[key]] || 0; });
+  }
   if (!columns.CHART_NO || !columns.NAME || (kind === 'MONTHLY' && !columns.TIME)) {
     throw new Error(`${name} 缺少辨識病人／刀日的必要欄位，請先修復標題。`);
   }
@@ -57,16 +63,12 @@ function classifyScheduleIdentityRow_(info, values) {
   const chart = toCellText_(getRowFieldValue_(values, info.columns, 'CHART_NO'));
   const name = toCellText_(getRowFieldValue_(values, info.columns, 'NAME'));
   if (info.kind === 'MONTHLY') {
-    const date = parseFullDate_(getRowFieldValue_(values, info.columns, 'TIME'));
-    if (date) {
-      if (chart !== MONTHLY_DATE_HEADER_MARKER ||
-          toCellText_(getRowFieldValue_(values, info.columns, 'EVENT_ID'))) {
-        throw new Error(`${info.name} 有不完整或混合刀日標題，請先修復。`);
-      }
-      return 'DATE_HEADER';
+    const classification = classifyMonthlyRowValues_(values, info.columns);
+    if (classification.type === MONTHLY_ROW_TYPES.HYBRID_CONFLICT) {
+      throw new Error(`${info.name} 有不完整或混合刀日標題，請先修復。`);
     }
-    if (chart === MONTHLY_DATE_HEADER_MARKER) {
-      throw new Error(`${info.name} 有缺少有效日期的刀日標題，請先修復。`);
+    if (classification.type === MONTHLY_ROW_TYPES.DATE_HEADER) {
+      return 'DATE_HEADER';
     }
   }
   return chart || name ? 'PATIENT' : '';

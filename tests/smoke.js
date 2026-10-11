@@ -687,7 +687,7 @@ function testIolListReadsOnlyRequestedDateDisplayRows() {
 }
 
 function testVersionAndModuleSplit() {
-  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.11.4');
+  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.11.5');
   assert.strictEqual(evaluate('typeof processRowChange'), 'function');
   assert.strictEqual(evaluate('typeof processCalendarStructureChange'), 'function');
   assert.strictEqual(evaluate('typeof createMonthlySurgerySheet'), 'function');
@@ -957,6 +957,8 @@ function testMonthlyDateHeaderUsesDateAndBlankEventId() {
   };
   const header = Array(23).fill('');
   header[0] = new Date(2026, 7, 10);
+  header[1] = '高榮';
+  header[2] = '◆ 刀日';
   assert.strictEqual(
     call('classifyMonthlyRowValues_', header, columns).type,
     'DATE_HEADER'
@@ -973,6 +975,7 @@ function testMonthlyDateHeaderUsesDateAndBlankEventId() {
   );
   header[22] = '';
   header[0] = new Date(1899, 11, 30, 8, 0);
+  header[2] = '';
   assert.strictEqual(
     call('classifyMonthlyRowValues_', header, columns).type,
     'PATIENT'
@@ -992,13 +995,13 @@ function testMonthlyHeaderMarkerPreservesOtherCells() {
     2,
     columns
   );
-  assert.strictEqual(result.ok, true);
-  assert.strictEqual(
-    sheet.valueAt(2, columns.CHART_NO),
-    evaluate('MONTHLY_DATE_HEADER_MARKER')
-  );
-  assert.strictEqual(sheet.valueAt(2, columns.HOSPITAL), '高榮');
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(sheet.valueAt(2, columns.CHART_NO), '');
+  assert.strictEqual(sheet.valueAt(2, columns.HOSPITAL), '');
   assert.strictEqual(sheet.valueAt(2, columns.NAME), '刀日人工備註');
+  sheet.setValueAt(2, columns.CHART_NO, '◆ 刀日');
+  sheet.setValueAt(2, columns.HOSPITAL, '聯醫');
+  assert.strictEqual(call('ensureMonthlyHeaderPresentation_', sheet, 2, columns).ok, true);
   assert.strictEqual(
     sheet.validations[`2:${columns.CHART_NO}`].allowInvalid,
     false
@@ -1006,7 +1009,7 @@ function testMonthlyHeaderMarkerPreservesOtherCells() {
 
   sheet.setValueAt(2, columns.TIME, '08:00');
   call('ensureMonthlyHeaderPresentation_', sheet, 2, columns);
-  assert.strictEqual(sheet.valueAt(2, columns.CHART_NO), '');
+  assert.strictEqual(sheet.valueAt(2, columns.CHART_NO), '◆ 刀日');
   assert.strictEqual(sheet.valueAt(2, columns.NAME), '刀日人工備註');
 }
 
@@ -1049,10 +1052,10 @@ function testMonthlyStructureIssuesReportHybridAndMissingMarker() {
   const issues = call('getMonthlyStructureIssues_', sheet, scan);
   assert.deepStrictEqual(
     plain(issues.map(item => item.type).sort()),
-    ['monthly_header_marker_missing', 'monthly_hybrid_date_event_id']
+    ['monthly_hybrid_date_event_id', 'monthly_invalid_date_header']
   );
-  assert.strictEqual(scan.blocks.length, 1);
-  assert.strictEqual(scan.hybrids.length, 1);
+  assert.strictEqual(scan.blocks.length, 0);
+  assert.strictEqual(scan.hybrids.length, 2);
 }
 
 function testDuplicateMonthlyBlocksAreIndependentAndSupported() {

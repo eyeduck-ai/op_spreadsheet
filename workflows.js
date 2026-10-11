@@ -132,6 +132,27 @@ function reorderManagedSheets_(spreadsheet) {
   return ordered.map(sheet => sheet.getName());
 }
 
+function monthlyHeaderLayout_(sheet) {
+  const columns = getRequiredMonthlyColumns_(sheet);
+  const width = Math.max(sheet.getLastColumn(), ...Object.values(columns));
+  const values = sheet.getRange(1, 1, 1, width).getValues()[0];
+  Object.keys(columns).forEach(key => {
+    values[columns[key] - 1] = CONFIG.MONTHLY_FIELD_HEADERS[key];
+  });
+  return values.map(value => toSingleLineText_(value).normalize('NFKC'));
+}
+
+function getMonthlyCreationTemplate_(spreadsheet) {
+  const sheets = spreadsheet.getSheets().filter(sheet => isMonthlySheetName_(sheet.getName()))
+    .sort((left, right) => right.getName().localeCompare(left.getName()));
+  if (!sheets.length) return null;
+  const layout = JSON.stringify(monthlyHeaderLayout_(sheets[0]));
+  if (sheets.some(sheet => JSON.stringify(monthlyHeaderLayout_(sheet)) !== layout)) {
+    throw new Error('月份刀表的臨床、技術或人工欄位位置不同；請先對齊所有月份欄位後再建立新月。');
+  }
+  return sheets[0];
+}
+
 function createOrInitializeMonthlySheet_(spreadsheet, monthName) {
   assertNoLegacyArchiveState_();
   assertNoActiveAnnualArchiveTransaction_();
@@ -146,12 +167,29 @@ function createOrInitializeMonthlySheet_(spreadsheet, monthName) {
   }
   let sheet = spreadsheet.getSheetByName(monthName);
   const created = !sheet;
+  const template = created ? getMonthlyCreationTemplate_(spreadsheet) : null;
   if (!sheet) sheet = spreadsheet.insertSheet(monthName);
+  if (template) {
+    const width = Math.max(template.getLastColumn(), getLastHeaderColumn_(template));
+    ensureColumnCapacity_(sheet, width);
+    template.getRange(1, 1, 1, width).copyTo(sheet.getRange(1, 1, 1, width));
+  }
   const format = applyMonthlyFormatting_(sheet, {
     forceWidths: created,
     initializeTextInputs: created,
     enableDiagnosisSummary: created
   });
+  if (template) {
+    const width = Math.max(template.getLastColumn(), getLastHeaderColumn_(template));
+    // Native header copy preserves formulas, manual headers, notes and formats.
+    template.getRange(1, 1, 1, width).copyTo(sheet.getRange(1, 1, 1, width));
+    format.columns = ensureManagedHeaders_(sheet, 'MONTHLY');
+    if (typeof template.getColumnWidth === 'function') {
+      for (let column = 1; column <= width; column++) {
+        sheet.setColumnWidth(column, template.getColumnWidth(column));
+      }
+    }
+  }
   const addedBlocks = ensureDefaultMonthlyBlocks_(sheet, format.columns);
   return { sheet, created, addedBlocks, columns: format.columns };
 }

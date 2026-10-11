@@ -684,6 +684,10 @@ function clearSystemNote_(range, prefixes) {
 }
 
 function parseFullDate_(value) {
+  if (typeof value === 'number') {
+    return Number.isInteger(value) && value >= 36526 && value <= 73050
+      ? new Date(1899, 11, 30 + value) : null;
+  }
   if (value instanceof Date && !isNaN(value.getTime())) {
     const year = value.getFullYear();
     if (
@@ -691,7 +695,8 @@ function parseFullDate_(value) {
       year <= 2099 &&
       value.getHours() === 0 &&
       value.getMinutes() === 0 &&
-      value.getSeconds() === 0
+      value.getSeconds() === 0 &&
+      value.getMilliseconds() === 0
     ) {
       return new Date(year, value.getMonth(), value.getDate());
     }
@@ -744,18 +749,39 @@ function isCompletelyBlankRow_(rowValues) {
   return (rowValues || []).every(value => !toCellText_(value));
 }
 
+function normalizeMonthlyMarker_(value) {
+  return toCellText_(value).normalize('NFKC').replace(/\s+/g, ' ');
+}
+
+function isMonthlyDateLike_(value) {
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    return value.getFullYear() !== 1899 || value.getMonth() !== 11 || value.getDate() !== 30;
+  }
+  if (typeof value === 'number') return value >= 36526;
+  const text = toCellText_(value);
+  return /(?:^|[^\d])\d{3,4}[-/.]\d{1,2}[-/.]\d{1,2}(?:$|[^\d])/.test(text) || /^\d{8}$/.test(text);
+}
+
 function classifyMonthlyRowValues_(rowValues, columns) {
   const date = parseFullDate_(getRowFieldValue_(rowValues, columns, 'TIME'));
   const eventId = toCellText_(
     getRowFieldValue_(rowValues, columns, 'EVENT_ID')
   );
-  if (date) {
+  const marker = normalizeMonthlyMarker_(getRowFieldValue_(rowValues, columns, 'CHART_NO'));
+  const hospital = toCellText_(getRowFieldValue_(rowValues, columns, 'HOSPITAL'));
+  if (date || marker.indexOf('◆') === 0 || isMonthlyDateLike_(getRowFieldValue_(rowValues, columns, 'TIME'))) {
+    const reasons = [];
+    if (!date) reasons.push('date');
+    if (marker !== MONTHLY_DATE_HEADER_MARKER) reasons.push('marker');
+    if (CONFIG.HOSPITAL_OPTIONS.indexOf(hospital) === -1) reasons.push('hospital');
+    if (eventId) reasons.push('event_id');
     return {
-      type: eventId
+      type: reasons.length
         ? MONTHLY_ROW_TYPES.HYBRID_CONFLICT
         : MONTHLY_ROW_TYPES.DATE_HEADER,
       date,
-      eventId
+      eventId,
+      reasons
     };
   }
   return {
@@ -768,7 +794,7 @@ function classifyMonthlyRowValues_(rowValues, columns) {
 }
 
 function getMonthlyHeaderMarkerState_(rowValues, columns) {
-  const value = toCellText_(
+  const value = normalizeMonthlyMarker_(
     getRowFieldValue_(rowValues, columns, 'CHART_NO')
   );
   return {
@@ -821,9 +847,7 @@ function scanMonthlyBlocksFromValues_(
     const classification = classifyMonthlyRowValues_(rowValues, cols);
     if (classification.type === MONTHLY_ROW_TYPES.DATE_HEADER) {
       const date = classification.date;
-      const hospital =
-        toCellText_(getRowFieldValue_(rowValues, cols, 'HOSPITAL')) ||
-        HOSPITAL_KAOH;
+      const hospital = toCellText_(getRowFieldValue_(rowValues, cols, 'HOSPITAL'));
       const blockKey = `${formatDateKey_(date)}|${hospital}`;
       const occurrence = (blockRowsByKey[blockKey] || []).length + 1;
       currentBlock = {
@@ -865,8 +889,9 @@ function scanMonthlyBlocksFromValues_(
         row,
         values: rowValues,
         date: classification.date,
-        dateKey: formatDateKey_(classification.date),
-        eventId: classification.eventId
+        dateKey: classification.date ? formatDateKey_(classification.date) : '',
+        eventId: classification.eventId,
+        reasons: classification.reasons
       });
       currentBlock = null;
       return;
@@ -937,11 +962,11 @@ function getMonthlyStructureIssues_(sheet, scan) {
   result.hybrids.forEach(item => {
     issues.push({
       severity: 'conflict',
-      type: 'monthly_hybrid_date_event_id',
+      type: item.eventId ? 'monthly_hybrid_date_event_id' : 'monthly_invalid_date_header',
       row: item.row,
       eventId: item.eventId,
       message:
-        '第一欄是完整日期但該列已有 CalendarEventId；未將它當作日期標題或病人列。'
+        '刀日標題需有有效完整日期、高榮或聯醫、◆ 刀日且 CalendarEventId 空白；原資料已保留，請人工核對。'
     });
   });
   result.orphans.forEach(item => {
@@ -964,9 +989,7 @@ function getMonthlyStructureIssues_(sheet, scan) {
       type: item.type,
       row: item.row,
       eventId: '',
-      message: item.type === 'monthly_header_marker_missing'
-        ? '日期標題尚未顯示 ◆ 刀日，等待安裝／修復或編輯時自動補齊。'
-        : '日期標題的病歷號格含既有內容；系統未覆寫。'
+      message: '刀日標題的標記不完整，原資料已保留，請人工核對。'
     });
   });
   Object.keys(result.rowValuesByRow).forEach(rowKey => {
@@ -978,16 +1001,16 @@ function getMonthlyStructureIssues_(sheet, scan) {
     );
     if (
       !classification.date &&
-      toCellText_(
+      normalizeMonthlyMarker_(
         getRowFieldValue_(values, result.columns, 'CHART_NO')
       ) === MONTHLY_DATE_HEADER_MARKER
     ) {
       issues.push({
-        severity: 'action',
+        severity: 'conflict',
         type: 'monthly_stale_header_marker',
         row,
         eventId: '',
-        message: '該列已不是完整日期標題，等待編輯或安裝／修復時清除舊的 ◆ 刀日標記。'
+        message: '刀日標記的日期無效，原日期及標記均保留，請人工核對。'
       });
     }
   });
@@ -1080,13 +1103,9 @@ function ensureMonthlyHeaderPresentation_(sheet, row, columns, rowValues) {
   const classification = classifyMonthlyRowValues_(values, columns);
   const markerCell = sheet.getRange(row, columns.CHART_NO);
   if (classification.type !== MONTHLY_ROW_TYPES.DATE_HEADER) {
-    const markerValue = toCellText_(markerCell.getValue());
-    if (!classification.date && markerValue === MONTHLY_DATE_HEADER_MARKER) {
-      markerCell.clearContent();
-    }
-    if (!classification.date) {
-      markerCell.clearDataValidations();
-      clearSystemNote_(markerCell, [MONTHLY_STRUCTURE_NOTE_PREFIX]);
+    if (classification.type === MONTHLY_ROW_TYPES.HYBRID_CONFLICT) {
+      setSystemNote_(markerCell, MONTHLY_STRUCTURE_NOTE_PREFIX,
+        '刀日日期、院區或標記不完整，或混入事件 ID；既有內容或公式未被覆寫，請人工核對。');
     }
     return {
       ok: classification.type !== MONTHLY_ROW_TYPES.HYBRID_CONFLICT,
@@ -1110,12 +1129,6 @@ function ensureMonthlyHeaderPresentation_(sheet, row, columns, rowValues) {
   }
   dateCell.setNumberFormat('yyyy/m/d ddd');
   const hospitalCell = sheet.getRange(row, columns.HOSPITAL);
-  const hospitalFormula = typeof hospitalCell.getFormula === 'function'
-    ? toCellText_(hospitalCell.getFormula())
-    : '';
-  if (!toCellText_(hospitalCell.getValue()) && !hospitalFormula) {
-    hospitalCell.setValue(HOSPITAL_KAOH);
-  }
   hospitalCell.setDataValidation(
     buildListValidation_(CONFIG.HOSPITAL_OPTIONS, false)
   );
@@ -1138,9 +1151,7 @@ function ensureMonthlyHeaderPresentation_(sheet, row, columns, rowValues) {
       markerValue: markerState.value
     };
   }
-  markerCell
-    .setValue(MONTHLY_DATE_HEADER_MARKER)
-    .setDataValidation(buildListValidation_([MONTHLY_DATE_HEADER_MARKER], false));
+  markerCell.setDataValidation(buildListValidation_([MONTHLY_DATE_HEADER_MARKER], false));
   clearSystemNote_(markerCell, [MONTHLY_STRUCTURE_NOTE_PREFIX]);
   return {
     ok: true,
@@ -1953,8 +1964,12 @@ function appendMonthlyBlock_(sheet, date, hospital, columns, options) {
   const cols = columns || getRequiredMonthlyColumns_(sheet);
   const settings = options || {};
   const dateKey = formatDateKey_(date);
-  const normalizedHospital = toCellText_(hospital) || HOSPITAL_KAOH;
+  const normalizedHospital = toCellText_(hospital);
+  if (!parseFullDate_(date) || CONFIG.HOSPITAL_OPTIONS.indexOf(normalizedHospital) === -1) {
+    throw new Error('新增刀日需有有效完整日期及高榮或聯醫。');
+  }
   const currentScan = settings.scan || scanMonthlyBlocks_(sheet, cols);
+  if (currentScan.hybrids.length) throw new Error('刀日標題不完整，請先核對日期、院區、標記與事件 ID。');
   const existing = currentScan.blocks.find(block => {
     return block.dateKey === dateKey && block.hospital === normalizedHospital;
   });
@@ -2481,23 +2496,7 @@ function rebuildMonthlySheetSorted_(sheet, options) {
     };
   }
 
-  let normalizedHeaderHospitals = 0;
-  scan.blocks.forEach(block => {
-    const hospital = toCellText_(
-      getRowFieldValue_(block.values, columns, 'HOSPITAL')
-    );
-    if (!hospital) {
-      normalizedHeaderHospitals++;
-      sheet.getRange(block.row, columns.HOSPITAL).setValue(HOSPITAL_KAOH);
-      setRowFieldValue_(block.values, columns, 'HOSPITAL', HOSPITAL_KAOH);
-      setRowFieldValue_(
-        scan.rowValuesByRow[block.row],
-        columns,
-        'HOSPITAL',
-        HOSPITAL_KAOH
-      );
-    }
-  });
+  const normalizedHeaderHospitals = 0;
 
   const lastColumn = Math.max(
     scan.lastColumn,
@@ -2601,8 +2600,12 @@ function findOrCreateMonthlyBlock_(
   precomputedScan
 ) {
   const dateKey = formatDateKey_(date);
-  const normalizedHospital = toCellText_(hospital) || HOSPITAL_KAOH;
+  const normalizedHospital = toCellText_(hospital);
+  if (!parseFullDate_(date) || CONFIG.HOSPITAL_OPTIONS.indexOf(normalizedHospital) === -1) {
+    throw new Error('新增刀日需有有效完整日期及高榮或聯醫。');
+  }
   const scan = precomputedScan || scanMonthlyBlocks_(sheet, columns);
+  if (scan.hybrids.length) throw new Error('刀日標題不完整，請先核對日期、院區、標記與事件 ID。');
   const matches = scan.blocks.filter(block => {
     return block.dateKey === dateKey && block.hospital === normalizedHospital;
   });
@@ -2629,6 +2632,7 @@ function resolveMonthlyBlockRef_(sheet, blockRef, columns, precomputedScan) {
   const row = Number(ref.headerRow || ref.row);
   if (!row || row < 2) return null;
   const scan = precomputedScan || scanMonthlyBlocks_(sheet, columns);
+  if (scan.hybrids.length) throw new Error('刀日標題不完整，請先核對日期、院區、標記與事件 ID。');
   const block = scan.blocks.find(item => item.row === row);
   if (!block) return null;
   if (
@@ -2654,6 +2658,7 @@ function insertPatientAtBlockEnd_(
   precomputedScan
 ) {
   const scan = precomputedScan || scanMonthlyBlocks_(sheet, columns);
+  if (scan.hybrids.length) throw new Error('刀日標題不完整，請先核對日期、院區、標記與事件 ID。');
   const currentBlock = scan.blocks.find(item => {
     return item.row === Number(block && block.row) &&
       item.dateKey === toCellText_(block && block.dateKey) &&

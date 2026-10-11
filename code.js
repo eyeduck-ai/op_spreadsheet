@@ -9,7 +9,7 @@
  * - annual_archive.js：私人備份與永久年度封存
  */
 const CONFIG = {
-  VERSION: '2026.10.11.4',
+  VERSION: '2026.10.11.5',
   SHEET_ALL: 'All',
   SHEET_FU: 'FU',
   LEGACY_SHEET_OP: 'OP',
@@ -195,7 +195,7 @@ const CONFIG = {
 };
 
 const LEGACY_EVENT_ID_HEADERS = ['日曆eventID', '日曆apiEventID'];
-const LEGACY_MONTHLY_TIME_HEADERS = ['時間'];
+const LEGACY_MONTHLY_TIME_HEADERS = ['時間', '日期/報到時間'];
 const MONTHLY_DATE_HEADER_MARKER = '◆ 刀日';
 const MONTHLY_DIAGNOSIS_SUMMARY_FORMULA_MARKER =
   'SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V2';
