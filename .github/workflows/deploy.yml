@@ -4,12 +4,19 @@ on:
   push:
     branches:
       - master
+  workflow_dispatch:
+    inputs:
+      verification_spreadsheet_id:
+        description: Spreadsheet ID to compare with the existing deployed project's parent
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   deploy:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
 
     steps:
@@ -57,4 +64,21 @@ jobs:
           CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
           CLASP_JSON: ${{ secrets.CLASP_JSON }}
           EXPECTED_SPREADSHEET_ID: 1LxMVRAlXvRAKhhmUbKioj71Ju-EjQ-qXcSkcjjHruEo
+        run: node tools/verify_bound_parent.js
+
+  verify_binding:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Verify existing bound spreadsheet without deployment
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+          CLASP_JSON: ${{ secrets.CLASP_JSON }}
+          EXPECTED_SPREADSHEET_ID: ${{ inputs.verification_spreadsheet_id }}
         run: node tools/verify_bound_parent.js
