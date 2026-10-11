@@ -10,6 +10,14 @@ on:
         description: Spreadsheet ID to compare with the existing deployed project's parent
         required: true
         type: string
+      verification_kind:
+        description: Read-only verification mode
+        required: false
+        default: binding
+        type: choice
+        options:
+          - binding
+          - protections
 
 permissions:
   contents: read
@@ -77,8 +85,18 @@ jobs:
         with:
           node-version: "24"
       - name: Verify existing bound spreadsheet without deployment
+        if: inputs.verification_kind != 'protections'
         env:
           CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
           CLASP_JSON: ${{ secrets.CLASP_JSON }}
           EXPECTED_SPREADSHEET_ID: ${{ inputs.verification_spreadsheet_id }}
         run: node tools/verify_bound_parent.js
+      - name: Verify technical protection editability without deployment or writes
+        if: inputs.verification_kind == 'protections'
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+          EXPECTED_SPREADSHEET_ID: ${{ inputs.verification_spreadsheet_id }}
+        run: |
+          node --check tools/verify_protections.js
+          node tests/verify_protections.js
+          node tools/verify_protections.js
