@@ -40,7 +40,7 @@ function readAnnualArchiveTransaction_() {
     null
   );
   if (value && (Array.isArray(value) || typeof value !== 'object')) {
-    throw new Error('永久封存交易狀態格式無效；自動同步已安全停止。');
+    throw new Error('永久封存交易狀態格式無效；刀表作業已安全停止。');
   }
   return value;
 }
@@ -70,7 +70,7 @@ function assertNoActiveAnnualArchiveTransaction_() {
   if (transaction) {
     throw new Error(
       `永久封存交易尚未完成（${transaction.operationId || '未知識別碼'}）。` +
-      '請從「彙整舊月刀表」繼續完成，期間不會執行自動同步。'
+      '請從「彙整舊月刀表」繼續完成，期間暫停刀表編輯格式處理。'
     );
   }
   return true;
@@ -227,7 +227,7 @@ function createMonthlySurgerySheet() {
     reorderManagedSheets_(spreadsheet);
     spreadsheet.setActiveSheet(result.sheet);
     ui.alert(
-      `${result.created ? '已建立' : '已初始化'} ${monthName}；` +
+      `${result.created ? '已建立' : '已更新格式'} ${monthName}；` +
       `補上 ${result.addedBlocks} 個第 2／4 個星期一與星期四的高榮日期區塊。`
     );
     return { ok: true, ...result };
@@ -247,12 +247,6 @@ function buildSurgeryDateInsertionPreview_(sheet, insertRow, date, hospital = HO
   if (!CONFIG.HOSPITAL_OPTIONS.includes(hospital)) throw new Error('請選擇高榮或聯醫。');
   const columns = getRequiredMonthlyColumns_(sheet);
   const scan = scanMonthlyBlocks_(sheet, columns);
-  const cancelledRows = readMonthlyCancelledRows_(
-    sheet,
-    columns,
-    scan.firstRow || 2,
-    (scan.values || []).length
-  );
   const conflicts = getMonthlyStructureIssues_(sheet, scan)
     .filter(issue => issue.severity === 'conflict');
   if (conflicts.length) {
@@ -272,9 +266,7 @@ function buildSurgeryDateInsertionPreview_(sheet, insertRow, date, hospital = HO
         sheet,
         patient,
         block,
-        columns,
-        false,
-        cancelledRows
+        columns
       );
     });
   });
@@ -283,9 +275,7 @@ function buildSurgeryDateInsertionPreview_(sheet, insertRow, date, hospital = HO
       sheet,
       patient,
       null,
-      columns,
-      false,
-      cancelledRows
+      columns
     );
   });
   const affectedRows = Object.keys(contextsByRow)
@@ -789,7 +779,7 @@ function addSelectedMonthlyRowToFu() {
     const selected = getSelectedManagedRow_('MONTHLY');
     const source = getMonthlySnapshotFromRow_(selected.sheet, selected.row);
     const fuSheet = getMainTrackingSheet_(selected.spreadsheet);
-    if (!fuSheet) throw new Error('找不到 FU。請先執行「安裝／修復系統」。');
+    if (!fuSheet) throw new Error('找不到 FU／All，請確認追蹤分頁名稱。');
     const columns = getRequiredFuColumns_(fuSheet);
     const lastColumn = Math.max(
       fuSheet.getLastColumn(),
@@ -1363,18 +1353,16 @@ function submitFuToMonthlySchedule(payload) {
       toCellText_(getRowFieldValue_(written, columns, 'NAME')) !==
         source.data.patientName
     ) {
-      throw new Error('月表列回讀驗證失敗；未呼叫 Calendar。');
+      throw new Error('月表列回讀驗證失敗，請核對剛建立的資料列。');
     }
     const createdContext = buildScheduleRowSnapshot_(
       sheet,
       { row, values: written },
       block,
-      columns,
-      false,
-      {}
+      columns
     );
     if (!createdContext.valid) {
-      throw new Error('新建月份資料列無法建立安全重送指紋；未呼叫 Calendar。');
+      throw new Error('新建月份資料列無法建立安全重送指紋，請核對剛建立的資料列。');
     }
     performance.mark('Sheet 寫入');
     const cacheRecord = {

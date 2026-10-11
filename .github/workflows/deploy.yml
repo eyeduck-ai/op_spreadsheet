@@ -63,7 +63,7 @@ jobs:
         env:
           CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
           CLASP_JSON: ${{ secrets.CLASP_JSON }}
-          EXPECTED_SPREADSHEET_ID: 1LxMVRAlXvRAKhhmUbKioj71Ju-EjQ-qXcSkcjjHruEo
+          EXPECTED_SPREADSHEET_ID: 1hlQRr1-0rJKIy0Mf84-dI91zZD3jVURR-4eKOgndKc0
         run: node tools/verify_bound_parent.js
 
   verify_binding:

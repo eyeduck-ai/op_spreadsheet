@@ -1,12 +1,14 @@
 # 手術排程與 FU 追蹤系統
 
-版本 **2026.10.12.1**。GAS 負責線上刀表格式、conditional formatting、時間正規化、排序、建立月份／刀日、FU 跨表操作與年度封存。**GAS 不存取 Google Calendar，不登記監控主機，也不負責既有資料的識別欄遷移。**
+版本 **2026.10.12.2**。GAS 負責線上刀表格式、conditional formatting、時間正規化、排序、建立月份／刀日、FU 跨表操作與年度封存。**GAS 不存取 Google Calendar，不登記監控主機，也不負責既有資料的識別欄遷移。**
 
 平台 EXE 辨識 SOAP 的手術／FU Tag，由使用者確認後更新刀表。指定 Windows 主機的監控 EXE 處理刀表 → 日曆，包含人工新增、改期、取消與刪列；日曆不回寫刀表。
 
-## 首次設定
+## 使用現有刀表與部署
 
-push 到 `master` 後，GitHub Actions 先執行語法、smoke 與共用刀表契約測試，再用既有 secrets 執行 `clasp push`。成功代表雲端 GAS 原始碼已更新；重新整理試算表即可載入新版選單。
+現有線上刀表已採新格式，不需要 GAS 初始化。直接使用現有刀表與 EXE 即可。GAS 更新後重新整理試算表，就會載入新版選單。
+
+push 到 `master` 後，GitHub Actions 先執行語法、smoke 與共用刀表契約測試，再用既有 secrets 執行 `clasp push`，並唯讀核對正式刀表綁定。
 
 **監控設定全部在監控 EXE 完成，不需要 GAS 選單操作：**輸入刀表網址、日曆 ID、服務帳戶金鑰後，程式自動檢查權限、追加／辨識系統欄、配置永久識別碼、隱藏系統欄、登記主機及回讀核對。監控維持停用，準備完成後由使用者啟用。
 
@@ -14,7 +16,7 @@ push 到 `master` 後，GitHub Actions 先執行語法、smoke 與共用刀表�
 
 設定、金鑰、指定主機身分與未完成操作保存在監控主機的資料庫。更新 EXE 並保留完整資料資料夾，不需重新匯入或登記。移機前停止舊主機；新資料目錄要接手既有刀表時，在 EXE 明確確認替換主機。
 
-`安裝／修復刀表格式` 僅供需要修復格式、驗證或格式觸發器時使用，與監控首次設定無關。舊 Calendar 觸發器入口是安全空操作；本版不新增定時日曆掃描。
+`維護工具 → 修復刀表格式` 是選用的修復工具，只處理既有 FU／All 與月表的格式、下拉驗證及編輯觸發器。它不建立 FU、不批次改寫既有報到時間、不配置既有病人或刀日的識別碼，也不作為主程式／監控的啟動步驟。缺少系統欄時，在 EXE 執行「檢查並準備刀表」；缺少臨床欄時先人工核對第一列表頭。
 
 ## 欄位與格式
 
@@ -49,7 +51,9 @@ FU 日期格式為 `yyyy/m/d`；刀日標題為 `yyyy/m/d ddd` 日期、醫院�
 
 日常選單保留建立新月刀表、選取列新增刀日、整理目前分頁、水晶體清單、月刀表 → FU、FU → 月刀表及彙整舊月刀表。維護工具只有刀表格式修復、建議欄寬及版本；沒有交接或識別欄遷移入口。
 
-格式修復只安裝 `processScheduleEdit` onEdit，清除安裝者可見的舊 Calendar／onChange／重試觸發器；其他使用者的舊入口亦安全停用。GAS 不再保存新的日曆 ID／主機登記或 Calendar Script Properties 索引。
+格式修復只重建 `processScheduleEdit` onEdit，移除執行者可見的舊格式／Calendar／匯出觸發器；不更動其他觸發器或 Script Properties。GAS 不再保存日曆設定／主機登記或 Calendar 索引。
+
+僅保留八個歷史已安裝觸發器名稱：`processRowChange` 只轉交目前編輯格式處理；`processCalendarStructureChange`、`retryPendingCalendarSync`、`processMonthlyStructureChange`、`processCalendarChange`、`exportUpcomingWeekData`、`runPendingUpcomingWeekExport`、`autoExportByEdit` 全為無讀寫空操作，避免其他安裝者的舊觸發器報錯。它們不是選單功能；舊日曆設定、交接、識別遷移、健康檢查及修復入口已移除。
 
 ## 搬列、取消及封存
 
@@ -68,7 +72,7 @@ FU 日期格式為 `yyyy/m/d`；刀日標題為 `yyyy/m/d ddd` 日期、醫院�
 
 ## 模組與驗證
 
-`code.js` 是選單／設定，`sheet_model.js` 是欄位／格式，`schedule_integrity.js` 是結構／人工編輯格式，`schedule_identity.js` 只驗證識別與保留安全舊入口，`workflows.js` 是日常操作，`annual_archive.js` 是年度封存。原 `calendar_handover.js` 與日曆引擎已移除。
+`code.js` 是選單／設定，`sheet_model.js` 是欄位／格式，`schedule_integrity.js` 是結構／人工編輯格式及集中保留的舊觸發器空入口，`schedule_identity.js` 只驗證識別，`workflows.js` 是日常操作，`annual_archive.js` 是年度封存。原 `calendar_handover.js` 與日曆引擎已移除；FU 安排到月表仍保留 request token、永久識別碼與回讀指紋，重送時定位既有列，避免重複建立。
 
 ```powershell
 node --check code.js
@@ -81,7 +85,8 @@ node --check tests/smoke.js
 node tests/smoke.js
 node tests/sheet_contract.js
 node tests/monitor_handover.js
+node tests/parser_contract.js
 git diff --check
 ```
 
-70 項合成 smoke tests 涵蓋格式、排序、封存、識別衝突、跨月改期、只隱藏不新增保護及保留人工保護、舊入口無寫入及簡化選單。共用刀表契約另核對欄名、下拉、欄寬、月份日期、診斷公式與欄位換序後的條件格式。監控交接測試使用實際 GAS 解析器，核對同日不同院區、跨月整列搬移、隱藏 ID 保留、只搬可見欄位診斷與主程式狀態頁排除。實際 Google 權限與自動遷移由監控 EXE 的副本驗證負責。
+72 項合成 smoke tests 涵蓋格式、排序、封存、識別衝突、跨月改期、只隱藏不新增保護及保留人工保護、舊觸發器無寫入及簡化選單。實際格式修復回歸另驗證沒有 FU 時不建表、不配置既有識別碼、不批次改報到時間，保留人工值／公式／註記／保護；缺欄提示按系統欄與臨床欄分流。共用刀表契約另核對欄名、下拉、欄寬、月份日期、診斷公式與欄位換序後的條件格式。監控交接測試使用實際 GAS 解析器，核對同日不同院區、跨月整列搬移、隱藏 ID 保留、只搬可見欄位診斷與主程式狀態頁排除。實際 Google 權限與自動遷移由監控 EXE 的副本驗證負責。

@@ -38,9 +38,8 @@ function scanScheduleEventBindings_(spreadsheet) {
     duplicateIds: Object.keys(eventLocations).filter(id => eventLocations[id].length > 1) };
 }
 
-function assertScheduleIntegrity_(spreadsheet, actionLabel, options) {
-  // The second argument was historically a label in setup; accept an options object too.
-  const settings = options || (typeof actionLabel === 'object' ? actionLabel : {});
+function assertScheduleIntegrity_(spreadsheet, options) {
+  const settings = options || {};
   const scan = scanScheduleEventBindings_(spreadsheet);
   const identities = scanScheduleIdentities_(spreadsheet);
   const issues = [...identities.conflicts, ...scan.duplicateIds.map(id => `CalendarEventId 重複：${id}`),
@@ -177,13 +176,14 @@ function processScheduleEdit(e) {
   if (wrapTouched && end >= start) sheet.autoResizeRows(start, end - start + 1);
 }
 
-// Installed triggers or old open dialogs may still call these names after deployment.
+// Only installed historical trigger names remain. A previous onEdit delegates
+// to sheet formatting; retired Calendar/export triggers are inert until their
+// installer removes them. No menu, migration, repair or Calendar engine lives here.
 function processRowChange(e) { return processScheduleEdit(e); }
-function processCalendarStructureChange() { return externalCalendarResult_(); }
-function retryPendingCalendarSync() { return externalCalendarResult_(); }
-function checkSyncHealth() { return externalCalendarResult_(); }
-function syncPendingChanges() { return externalCalendarResult_(); }
-function repairSelectedCalendarRows() { return externalCalendarResult_(); }
-function applySelectedCalendarRepairPlan_() { return externalCalendarResult_(); }
-function clearContextEventIds() { return externalCalendarResult_(); }
-function repairCalendarBindings() { return externalCalendarResult_(); }
+function processCalendarStructureChange() {}
+function retryPendingCalendarSync() {}
+function processMonthlyStructureChange() {}
+function processCalendarChange() {}
+function exportUpcomingWeekData() {}
+function runPendingUpcomingWeekExport() {}
+function autoExportByEdit() {}

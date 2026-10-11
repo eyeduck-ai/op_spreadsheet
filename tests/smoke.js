@@ -687,7 +687,7 @@ function testIolListReadsOnlyRequestedDateDisplayRows() {
 }
 
 function testVersionAndModuleSplit() {
-  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.12.1');
+  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.12.2');
   assert.strictEqual(evaluate('typeof processRowChange'), 'function');
   assert.strictEqual(evaluate('typeof processCalendarStructureChange'), 'function');
   assert.strictEqual(evaluate('typeof createMonthlySurgerySheet'), 'function');
@@ -744,7 +744,7 @@ function testCurrentMenuHasNoCompletedMigrationOrLegacyOutput() {
     '執行同步架構升級'
   ].forEach(text => assert.strictEqual(source.includes(text), false));
   [
-    '安裝／修復刀表格式',
+    '修復刀表格式',
     '套用所有 FU／月表建議欄寬',
     '月刀表 => FU',
     'FU => 月刀表',
@@ -876,13 +876,15 @@ function testWholeMonthlyTimeNormalizationUsesBoundedBatchReads() {
   const columns = call('getRequiredMonthlyColumns_', sheet);
   sheet.calls.getRange = 0;
   sheet.calls.setValues = 0;
-  const result = call('normalizeExistingTimeColumn_', sheet, 'MONTHLY', columns);
-  assert.deepStrictEqual(plain(result), { normalized: 100, errors: 0 });
+  const event = { range: sheet.getRange(2, columns.TIME, 100, 1) };
+  const result = call('normalizeEditedTimes_', event, sheet, 'MONTHLY', columns);
+  assert.strictEqual(result.normalized, 100);
+  assert.strictEqual(result.errors, 0);
   assert.ok(sheet.calls.getRange <= 5, '100 rows must use bounded batch reads');
   assert.strictEqual(sheet.calls.setValues, 1);
   assert.ok(sheet.rows.slice(1).every(row => row[time] === '08:30'));
   sheet.calls.setValues = 0;
-  assert.strictEqual(call('normalizeExistingTimeColumn_', sheet, 'MONTHLY', columns).normalized, 0);
+  assert.strictEqual(call('normalizeEditedTimes_', event, sheet, 'MONTHLY', columns).normalized, 0);
   assert.strictEqual(sheet.calls.setValues, 0);
 }
 
@@ -2155,7 +2157,7 @@ function testMonthlyTextFormatsOnlyInitializeSystemCreatedRows() {
     calendarSource.indexOf('function processCalendarStructureChange'),
     calendarSource.indexOf('function buildCalendarSyncRuntime_')
   );
-  assert.ok(structureBody.includes('externalCalendarResult_'));
+  assert.strictEqual(call('processCalendarStructureChange'), undefined);
   assert.strictEqual(structureBody.includes('allowMissingDeletes'), false);
   assert.strictEqual(structureBody.includes('setNumberFormat'), false);
 
@@ -2415,10 +2417,11 @@ function testColumnWidthsRequireExplicitRequestAfterCreation() {
   assert.ok(fuFormat.includes('settings.forceWidths'));
   assert.ok(monthFormat.includes('settings.forceWidths'));
   const initFu = source.slice(
-    source.indexOf('function initializeMainTrackingSheet_'),
+    source.indexOf('function repairMainTrackingFormatting_'),
     source.indexOf('function applyAllRecommendedColumnWidths')
   );
-  assert.ok(initFu.includes('forceWidths: created'));
+  assert.ok(initFu.includes('forceWidths: false'));
+  assert.strictEqual(initFu.includes('insertSheet'), false);
   const workflowSource = sourceByFile['workflows.js'];
   const initMonth = workflowSource.slice(
     workflowSource.indexOf('function createOrInitializeMonthlySheet_'),
@@ -2427,11 +2430,13 @@ function testColumnWidthsRequireExplicitRequestAfterCreation() {
   assert.ok(initMonth.includes('forceWidths: created'));
 }
 
-function testInstallDoesNotBatchRewriteCalendar() {
-  const setup = evaluate('setup.toString()');
-  assert.ok(setup.includes('assertScheduleIntegrity_'));
-  assert.strictEqual(/Registry|Calendar\.|syncManaged/.test(setup), false);
-  const install = evaluate('installOrRepairTriggers_.toString()');
+function testFormatRepairDoesNotInitializeOrSynchronize() {
+  const repair = evaluate('repairScheduleFormatting.toString()');
+  assert.ok(repair.includes('assertScheduleIntegrity_'));
+  assert.strictEqual(/Registry|Calendar\.|syncManaged|reorderManagedSheets_|newScheduleSyncId_/.test(repair), false);
+  assert.strictEqual(evaluate('typeof setup'), 'undefined');
+  assert.strictEqual(evaluate('typeof installOrRepairSystem'), 'undefined');
+  const install = evaluate('repairScheduleEditTrigger_.toString()');
   assert.ok(install.includes("newTrigger('processScheduleEdit')"));
   assert.strictEqual(install.includes('.onChange()'), false);
   assert.strictEqual(install.includes('.timeBased()'), false);
@@ -2480,6 +2485,7 @@ function testHtmlUsesCollapsedAdvancedAreaAndArchiveLanguage() {
   assert.ok(fuHtml.includes('selectedBlockRow'));
   assert.ok(fuHtml.includes('headerRow: block.headerRow'));
   assert.ok(fuHtml.includes('.getFuToMonthlyBlockOptions(month)'));
+  assert.strictEqual(/calendarStatus|同步 Calendar|重試 Calendar/.test(fuHtml), false);
   assert.ok(rollupHtml.includes('彙整舊月刀表'));
   assert.ok(rollupHtml.includes('建立私人備份並永久封存'));
   assert.ok(rollupHtml.includes('一般選單不提供還原'));
@@ -2558,8 +2564,8 @@ function testFormattingOnlyDeploymentHasNoCalendarApiAndLegacyCallsAreSafe() {
   assert.strictEqual(evaluate('typeof buildCalendarResource_'), 'undefined');
   assert.strictEqual(evaluate('typeof rebuildCalendarRegistry_'), 'undefined');
   assert.strictEqual(evaluate('typeof enqueuePendingCalendarSync_'), 'undefined');
-  ['retryPendingCalendarSync', 'processCalendarStructureChange', 'applySelectedCalendarRepairPlan_']
-    .forEach(name => assert.strictEqual(call(name).status, 'external_calendar_owner'));
+  plain(evaluate('RETIRED_TRIGGER_HANDLERS')).filter(name => name !== 'processRowChange')
+    .forEach(name => assert.strictEqual(call(name), undefined));
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'appsscript.json'), 'utf8'));
   assert.deepStrictEqual(manifest.dependencies, {});
   assert.strictEqual(deployed.includes('vghks.calendar.control'), false);
@@ -2692,29 +2698,32 @@ function testTriggerRepairRemovesLegacyWritersAndPreservesOtherTriggersAndHandov
   scriptPropertyStore.CALENDAR_SYNC_PENDING_V2 = 'legacy';
   scriptPropertyStore.CALENDAR_OWNER_APPLICATION_V1 = 'preserved';
   try {
-    const result = call('installOrRepairTriggers_', false);
+    const result = call('repairScheduleEditTrigger_');
     assert.strictEqual(result.onEdit, 'processScheduleEdit');
     assert.deepStrictEqual(triggers.map(value => value.getHandlerFunction()).sort(), ['manualOtherTrigger', 'processScheduleEdit']);
-    assert.strictEqual(scriptPropertyStore.CALENDAR_ROW_REGISTRY_V2_CHUNK_1, undefined);
-    assert.strictEqual(scriptPropertyStore.CALENDAR_SYNC_PENDING_V2, undefined);
+    assert.strictEqual(scriptPropertyStore.CALENDAR_ROW_REGISTRY_V2_CHUNK_1, 'legacy');
+    assert.strictEqual(scriptPropertyStore.CALENDAR_SYNC_PENDING_V2, 'legacy');
     assert.strictEqual(scriptPropertyStore.CALENDAR_OWNER_APPLICATION_V1, 'preserved');
   } finally {
     context.SpreadsheetApp = saved;
     context.ScriptApp = oldScript;
     delete scriptPropertyStore.CALENDAR_OWNER_APPLICATION_V1;
+    delete scriptPropertyStore.CALENDAR_ROW_REGISTRY_V2_CHUNK_1;
+    delete scriptPropertyStore.CALENDAR_SYNC_PENDING_V2;
   }
 }
 
 
-function testWorkerSetupLegacyCallsCannotMutateSheetOrRegisterHost() {
-  const saved = context.SpreadsheetApp;
-  let alerts = 0;
-  context.SpreadsheetApp = { getUi: () => ({ alert: () => alerts++ }) };
-  try {
-    ['migrateScheduleSyncIds', 'handoverCalendarToApplication', 'showCalendarHandover']
-      .forEach(name => assert.strictEqual(call(name).status, 'external_calendar_owner'));
-    assert.strictEqual(alerts, 3);
-  } finally { context.SpreadsheetApp = saved; }
+function testObsoleteCalendarMenusAndInternalScaffoldingAreRemoved() {
+  ['promptAndSaveCalendarId', 'migrateScheduleSyncIds', 'checkScheduleSyncIds',
+    'handoverCalendarToApplication', 'showCalendarHandover', 'restoreGasCalendarOwner',
+    'checkSyncHealth', 'syncPendingChanges', 'repairSelectedCalendarRows',
+    'applySelectedCalendarRepairPlan_', 'clearContextEventIds', 'repairCalendarBindings',
+    'isExternalCalendarOwner_', 'externalCalendarMenu_', 'externalCalendarResult_',
+    'removeAnnualArchiveProtections_', 'hideAndProtectSystemColumns_',
+    'protectAnnualArchiveSheet_', 'isSpreadsheetFormulaErrorHeader_',
+    'initializeMainTrackingSheet_', 'initializeAllMonthlySheets_', 'normalizeExistingTimeColumn_']
+    .forEach(name => assert.strictEqual(evaluate(`typeof ${name}`), 'undefined'));
 }
 
 function testIdentityScanDiagnosesExistingDuplicatesWithoutMigration() {
@@ -2735,7 +2744,7 @@ function testSystemColumnsAreHiddenWithoutCreatingOrChangingProtections() {
   const sheet = new FakeSheet('FU', 907, [headers, ['SYN-1', '甲']]);
   const protection = prepareIdentitySheet(sheet);
   const columns = call('getRequiredFuColumns_', sheet);
-  call('hideAndProtectSystemColumns_', sheet, columns, ['EVENT_ID', 'SYNC_ID']);
+  call('hideSystemColumns_', sheet, columns, ['EVENT_ID', 'SYNC_ID']);
   assert.strictEqual(protection.protections.length, 0);
   assert.deepStrictEqual(protection.hidden, [columns.EVENT_ID, columns.SYNC_ID]);
   const sync = { description: 'SURGERY_SYSTEM_COLUMN:SYNC_ID', warningOnly: false,
@@ -2743,7 +2752,7 @@ function testSystemColumnsAreHiddenWithoutCreatingOrChangingProtections() {
     setWarningOnly() { throw new Error('Owner policy must remain unchanged'); },
     remove() { throw new Error('Owner protection must remain unchanged'); } };
   protection.protections.push(sync);
-  call('hideAndProtectSystemColumns_', sheet, columns, ['EVENT_ID', 'SYNC_ID']);
+  call('hideSystemColumns_', sheet, columns, ['EVENT_ID', 'SYNC_ID']);
   assert.strictEqual(protection.protections.length, 1);
   assert.strictEqual(protection.protections[0], sync);
   assert.strictEqual(sync.warningOnly, false);
@@ -2756,8 +2765,7 @@ function testAnnualArchiveOnlyHidesTechnicalColumnsAndPreservesProtections() {
   const owner = { description: 'SURGERY_ANNUAL_ARCHIVE:SYSTEM:1', warningOnly: false,
     remove() { throw new Error('Owner protection must remain unchanged'); } };
   state.protections.push(owner);
-  call('protectAnnualArchiveSheet_', sheet);
-  call('removeAnnualArchiveProtections_', sheet);
+  call('hideAnnualArchiveSystemColumns_', sheet);
   const info = call('getAnnualArchiveHeaderInfo_', sheet);
   assert.deepStrictEqual(state.hidden, [info.eventColumn, info.syncColumn,
     info.sourceMonthColumn, info.rowTypeColumn].sort((left, right) => left - right));
@@ -2765,10 +2773,92 @@ function testAnnualArchiveOnlyHidesTechnicalColumnsAndPreservesProtections() {
   files.forEach(file => assert.strictEqual(/\.protect\s*\(|\.setWarningOnly\s*\(|\.getProtections\s*\(/.test(sourceByFile[file]), false));
 }
 
+function testMissingHeadersPointToTheAppropriateRepairOwner() {
+  ['FU', 'MONTHLY'].forEach(kind => {
+    const headers = plain(evaluate(kind === 'FU' ? 'CONFIG.HEADERS' : 'CONFIG.MONTHLY_HEADERS'));
+    const fn = kind === 'FU' ? 'getRequiredFuColumns_' : 'getRequiredMonthlyColumns_';
+    const name = kind === 'FU' ? 'FU' : '202610';
+    const technical = new FakeSheet(name, 920, [headers.filter(value => value !== 'ScheduleSyncId')]);
+    assert.throws(() => call(fn, technical), error => /檢查並準備刀表/.test(error.message) && !/修復刀表格式/.test(error.message));
+    const clinical = new FakeSheet(name, 921, [headers.filter(value => value !== '姓名')]);
+    assert.throws(() => call(fn, clinical), error => /補回第一列表頭/.test(error.message) && !/檢查並準備刀表/.test(error.message));
+  });
+}
+
+function testFormatRepairOnlyTouchesExistingSheetsWithoutAssigningIds() {
+  const savedSpreadsheetApp = { ...context.SpreadsheetApp };
+  const savedScriptApp = context.ScriptApp;
+  const savedUuid = context.Utilities.getUuid;
+  const menus = [];
+  let inserted = 0, triggersCreated = 0;
+  const menu = { addItem: (_label, fn) => { menus.push(fn); return menu; },
+    addSeparator: () => menu, addSubMenu: () => menu, addToUi: () => menu };
+  const ui = { ButtonSet: { OK: 'OK' }, createMenu: () => menu, alert: () => {} };
+  const conditional = () => { const builder = {
+    whenFormulaSatisfied: () => builder, setBackground: () => builder,
+    setBold: () => builder, setRanges: () => builder, build: () => ({})
+  }; return builder; };
+  context.SpreadsheetApp.getUi = () => ui;
+  context.SpreadsheetApp.newConditionalFormatRule = conditional;
+  context.ScriptApp = { getProjectTriggers: () => [], newTrigger: () => {
+    const builder = { forSpreadsheet: () => builder, onEdit: () => builder,
+      create: () => { triggersCreated++; } }; return builder;
+  } };
+  context.Utilities.getUuid = () => { throw new Error('Repair must not assign identities'); };
+  try {
+    [false, true].forEach(includeFu => {
+      const headers = [...plain(evaluate('CONFIG.MONTHLY_HEADERS')), '人工欄'];
+      const row = fields => headers.map(header => fields[header] || '');
+      const month = new FakeSheet('202610', 922, [headers,
+        row({ '日期／報到時間': new Date(2026, 9, 12), '醫院': '高榮', '病歷號': '◆ 刀日' }),
+        row({ '日期／報到時間': 830, '病歷號': 'SYN-REPAIR', '姓名': '合成病人', '人工欄': '保留' })]);
+      const sheets = [month];
+      if (includeFu) sheets.push(new FakeSheet('FU', 923,
+        [plain(evaluate('CONFIG.HEADERS')), ['SYN-FU', '合成追蹤']]));
+      month.setFormulaAt(3, headers.length, '=1+1');
+      month.setNoteAt(3, headers.length, '人工註記');
+      const before = JSON.stringify(sheets.map(sheet => sheet.rows));
+      const protections = sheets.map(sheet => {
+        const state = prepareIdentitySheet(sheet);
+        state.protections.push({ warningOnly: false, description: 'owner' });
+        const getRange = sheet.getRange.bind(sheet);
+        sheet.getRange = (...args) => {
+          const range = getRange(...args);
+          range.setBackground = () => range;
+          range.setFontColor = () => range;
+          return range;
+        };
+        return state;
+      });
+      const spreadsheet = makeFakeSpreadsheet(sheets);
+      spreadsheet.insertSheet = () => { inserted++; throw new Error('Repair must not create sheets'); };
+      context.SpreadsheetApp.getActiveSpreadsheet = () => spreadsheet;
+      const result = call('repairScheduleFormatting');
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(Boolean(result.fuResult.skipped), !includeFu);
+      assert.strictEqual(result.monthlyResult.count, 1);
+      assert.strictEqual(JSON.stringify(sheets.map(sheet => sheet.rows)), before);
+      assert.strictEqual(month.formulaAt(3, headers.length), '=1+1');
+      assert.strictEqual(month.noteAt(3, headers.length), '人工註記');
+      assert.ok(month.getConditionalFormatRules().length > 0, 'Existing month formatting is repaired');
+      assert.ok(protections.every(state => state.hidden.length === 2 && state.protections.length === 1 && !state.protections[0].warningOnly));
+    });
+    assert.strictEqual(inserted, 0);
+    assert.strictEqual(triggersCreated, 2);
+    menus.forEach(name => assert.strictEqual(evaluate(`typeof ${name}`), 'function'));
+  } finally {
+    context.SpreadsheetApp = savedSpreadsheetApp;
+    context.ScriptApp = savedScriptApp;
+    context.Utilities.getUuid = savedUuid;
+  }
+}
+
 const tests = [
+  testMissingHeadersPointToTheAppropriateRepairOwner,
+  testFormatRepairOnlyTouchesExistingSheetsWithoutAssigningIds,
   testSystemColumnsAreHiddenWithoutCreatingOrChangingProtections,
   testAnnualArchiveOnlyHidesTechnicalColumnsAndPreservesProtections,
-  testWorkerSetupLegacyCallsCannotMutateSheetOrRegisterHost,
+  testObsoleteCalendarMenusAndInternalScaffoldingAreRemoved,
   testIdentityScanDiagnosesExistingDuplicatesWithoutMigration,
   testInsertDayWritesSelectedCampusAndRejectsDuplicateIdentityBeforeWriting,
   testTriggerRepairRemovesLegacyWritersAndPreservesOtherTriggersAndHandover,
@@ -2825,7 +2915,7 @@ const tests = [
   testLegacyArchiveStateFailsClosed,
   testArchiveTransactionGuardFailsClosed,
   testColumnWidthsRequireExplicitRequestAfterCreation,
-  testInstallDoesNotBatchRewriteCalendar,
+  testFormatRepairDoesNotInitializeOrSynchronize,
   testSystemNotesPreserveManualNotes,
   testHtmlUsesCollapsedAdvancedAreaAndArchiveLanguage,
   testClaspIncludesAllRuntimeModules,

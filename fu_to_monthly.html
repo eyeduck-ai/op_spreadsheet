@@ -192,7 +192,7 @@
         </section>
 
         <div class="actions">
-          <button id="submit" type="submit">建立月刀表排程並同步 Calendar</button>
+          <button id="submit" type="submit">建立月刀表排程</button>
           <button id="cancel" type="button">取消</button>
           <div id="status" aria-live="polite"></div>
         </div>
@@ -390,7 +390,7 @@
         };
         byId("submit").disabled = true;
         byId("status").className = "";
-        byId("status").textContent = "正在建立月刀表列並同步 Calendar…";
+        byId("status").textContent = "正在建立月刀表列…";
         google.script.run
           .withSuccessHandler(result => {
             byId("submit").disabled = false;
@@ -415,10 +415,10 @@
               return;
             }
             byId("status").textContent = result.message ||
-              `已定位 ${result.sheetName} 第 ${result.row} 列；Calendar：${result.calendarStatus}`;
+              `已定位 ${result.sheetName} 第 ${result.row} 列；日曆由指定 Windows 主機監控後更新。`;
             byId("status").className = result.ok ? "success" : "error";
             if (!result.ok) {
-              byId("submit").textContent = "重試 Calendar 同步";
+              byId("submit").textContent = "重試建立月刀表";
             }
           })
           .withFailureHandler(error => {

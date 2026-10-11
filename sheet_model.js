@@ -89,11 +89,6 @@ function getLastHeaderColumn_(sheet) {
   return getLastHeaderColumnFromValues_(getSheetHeaderValues_(sheet));
 }
 
-function isSpreadsheetFormulaErrorHeader_(value) {
-  return /^#(?:ERROR!|REF!|VALUE!|NAME\?|N\/A|NUM!|DIV\/0!|NULL!)$/i
-    .test(toCellText_(value));
-}
-
 function isMonthlyDiagnosisSummaryHeaderText_(value) {
   const text = toCellText_(value);
   const header = CONFIG.MONTHLY_FIELD_HEADERS.DIAGNOSIS;
@@ -401,6 +396,16 @@ function assertUniqueHeaders_(info, label) {
   }
 }
 
+function missingHeaderInstructions_(keys) {
+  const systemKeys = ['EVENT_ID', 'SYNC_ID'];
+  return [
+    keys.some(key => systemKeys.indexOf(key) !== -1)
+      ? '系統欄請在 EXE 執行「檢查並準備刀表」。' : '',
+    keys.some(key => systemKeys.indexOf(key) === -1)
+      ? '臨床欄請先核對並補回第一列表頭。' : ''
+  ].filter(Boolean).join('');
+}
+
 function getRequiredFuColumns_(sheet) {
   const info = getFuColumnInfo_(sheet);
   assertUniqueHeaders_(info, 'FU ');
@@ -408,7 +413,7 @@ function getRequiredFuColumns_(sheet) {
     throw new Error(
       `FU 缺少必要欄位：${info.missingKeys
         .map(key => CONFIG.FIELD_HEADERS[key])
-        .join('、')}。請先執行「安裝／修復系統」。`
+        .join('、')}。${missingHeaderInstructions_(info.missingKeys)}`
     );
   }
   return info.columns;
@@ -421,7 +426,7 @@ function getRequiredMonthlyColumns_(sheet) {
     throw new Error(
       `月份刀表缺少必要欄位：${info.missingKeys
         .map(key => CONFIG.MONTHLY_FIELD_HEADERS[key])
-        .join('、')}。請先執行「安裝／修復系統」。`
+        .join('、')}。${missingHeaderInstructions_(info.missingKeys)}`
     );
   }
   return info.columns;
@@ -489,13 +494,12 @@ function ensureManagedHeaders_(sheet, kind) {
   if (info.missingKeys.length) {
     throw new Error(`無法補齊欄位：${info.missingKeys.join('、')}`);
   }
-  hideAndProtectSystemColumns_(sheet, info.columns, ['EVENT_ID', 'SYNC_ID']);
+  hideSystemColumns_(sheet, info.columns, ['EVENT_ID', 'SYNC_ID']);
   return info.columns;
 }
 
-function hideAndProtectSystemColumns_(sheet, columns, fieldKeys) {
-  // Compatibility name: technical columns are hidden only. Owner protections
-  // are neither created nor adjusted by formatting or initialization.
+function hideSystemColumns_(sheet, columns, fieldKeys) {
+  // Owner protections are neither created nor adjusted by formatting.
   (fieldKeys || []).forEach(key => {
     const column = columns[key];
     if (!column) return;
@@ -1710,23 +1714,16 @@ function applyTouchedManagedRowsFormatBatch_(
   };
 }
 
-function initializeMainTrackingSheet_(spreadsheet, showAlert) {
+function repairMainTrackingFormatting_(spreadsheet) {
   assertNoLegacyOpOnly_(spreadsheet);
-  let sheet = getMainTrackingSheet_(spreadsheet);
-  const created = !sheet;
-  if (!sheet) {
-    sheet = spreadsheet.insertSheet(CONFIG.SHEET_FU);
-  }
-  const result = applyFuFormatting_(sheet, { forceWidths: created });
-  const normalization = { normalized: 0, errors: 0 };
-  const message = `${sheet.getName()} 已初始化；FU 事件使用全天模式。`;
-  if (showAlert) SpreadsheetApp.getUi().alert(message);
+  const sheet = getMainTrackingSheet_(spreadsheet);
+  if (!sheet) return { ok: true, skipped: true, message: '沒有 FU／All，略過。' };
+  const result = applyFuFormatting_(sheet, { forceWidths: false });
+  const message = `${sheet.getName()} 格式已修復。`;
   return {
     ok: true,
     sheet,
-    created,
     columns: result.columns,
-    normalization,
     message
   };
 }
@@ -1771,41 +1768,13 @@ function applyAllRecommendedColumnWidths() {
   });
 }
 
-function initializeAllMonthlySheets_(spreadsheet, showAlert, options) {
-  const settings = options || {};
-  const normalizeTimes = settings.normalizeTimes !== false;
+function repairMonthlyFormatting_(spreadsheet) {
   const sheets = getActiveMonthlySheets_(spreadsheet);
-  let normalized = 0;
-  let errors = 0;
   sheets.forEach(sheet => {
-    const result = applyMonthlyFormatting_(sheet, { forceWidths: false });
-    if (normalizeTimes) {
-      const timeResult = normalizeExistingTimeColumn_(
-        sheet,
-        'MONTHLY',
-        result.columns
-      );
-      normalized += timeResult.normalized;
-      errors += timeResult.errors;
-    }
+    applyMonthlyFormatting_(sheet, { forceWidths: false });
   });
-  const message = normalizeTimes
-    ? (
-      `${sheets.length} 張月份刀表已初始化；時間正規化 ${normalized} 格，` +
-      `錯誤 ${errors} 格。`
-    )
-    : `${sheets.length} 張月份刀表已初始化；既有報到時間未批次改寫。`;
-  if (showAlert) SpreadsheetApp.getUi().alert(message);
-  return { ok: true, count: sheets.length, normalized, errors, message };
-}
-
-function normalizeExistingTimeColumn_(sheet, kind, columns) {
-  const rowCount = sheet.getLastRow() - 1;
-  if (!columns.TIME || rowCount <= 0) return { normalized: 0, errors: 0 };
-  const result = normalizeEditedTimes_(
-    { range: sheet.getRange(2, columns.TIME, rowCount, 1) }, sheet, kind, columns
-  );
-  return { normalized: result.normalized, errors: result.errors };
+  return { ok: true, count: sheets.length,
+    message: `${sheets.length} 張月份刀表格式已修復；既有報到時間未批次改寫。` };
 }
 
 function normalizeEditedTimes_(event, sheet, kind, columns) {

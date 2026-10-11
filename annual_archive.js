@@ -564,12 +564,7 @@ function ensureAnnualArchiveCustomHeaders_(sheet, sections) {
   return info;
 }
 
-function removeAnnualArchiveProtections_(sheet) {
-  // Legacy compatibility entrypoint: existing owner protections are preserved.
-}
-
-function protectAnnualArchiveSheet_(sheet) {
-  // Compatibility name: archive technical columns are hidden only.
+function hideAnnualArchiveSystemColumns_(sheet) {
   const info = getAnnualArchiveHeaderInfo_(sheet);
   const systemColumns = [
     info.eventColumn,
@@ -716,7 +711,7 @@ function applyAnnualArchiveDisplay_(sheet, isNew) {
     });
   }
   applyAnnualArchiveConditionalFormats_(sheet);
-  protectAnnualArchiveSheet_(sheet);
+  hideAnnualArchiveSystemColumns_(sheet);
   sheet.setFrozenRows(ANNUAL_ARCHIVE_HEADER_ROW);
 }
 
@@ -1162,9 +1157,7 @@ function finalizeAnnualArchiveTransaction_(spreadsheet, transaction) {
   if (currentFingerprint !== transaction.allEventIdFingerprint) {
     throw new Error('封存前後 CalendarEventId 集合不一致。');
   }
-  const bindings = assertScheduleIntegrity_(spreadsheet, {
-    allowConflicts: false
-  });
+  const bindings = assertScheduleIntegrity_(spreadsheet);
   reorderManagedSheets_(spreadsheet);
   writeAnnualArchiveTransaction_(null);
   return {

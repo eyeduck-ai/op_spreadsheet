@@ -9,7 +9,7 @@
  * - annual_archive.js：私人備份與永久年度封存
  */
 const CONFIG = {
-  VERSION: '2026.10.12.1',
+  VERSION: '2026.10.12.2',
   SHEET_ALL: 'All',
   SHEET_FU: 'FU',
   LEGACY_SHEET_OP: 'OP',
@@ -215,7 +215,10 @@ const SIDE_OD_BACKGROUND = '#D9EAD3';
 const SIDE_OU_BACKGROUND = '#D9D2E9';
 const TIME_ERROR_NOTE_PREFIX = '系統時間檢查：';
 const MONTHLY_STRUCTURE_NOTE_PREFIX = '系統刀日結構：';
-const LEGACY_TRIGGER_HANDLERS = [
+const RETIRED_TRIGGER_HANDLERS = [
+  'processRowChange',
+  'processCalendarStructureChange',
+  'retryPendingCalendarSync',
   'processMonthlyStructureChange',
   'processCalendarChange',
   'exportUpcomingWeekData',
@@ -388,10 +391,6 @@ function withSheetOperationLock_(callback) {
 
 
 
-function promptAndSaveCalendarId() {
-  return externalCalendarMenu_(); // Legacy menu entry: no Calendar access.
-}
-
 function deleteTriggersByHandler_(handlerName) {
   let count = 0;
   ScriptApp.getProjectTriggers().forEach(trigger => {
@@ -403,60 +402,41 @@ function deleteTriggersByHandler_(handlerName) {
   return count;
 }
 
-function installOrRepairTriggers_(showAlert) {
+function repairScheduleEditTrigger_() {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  ['processScheduleEdit', 'processRowChange', 'processCalendarStructureChange',
-    'retryPendingCalendarSync'].concat(LEGACY_TRIGGER_HANDLERS).forEach(deleteTriggersByHandler_);
+  ['processScheduleEdit'].concat(RETIRED_TRIGGER_HANDLERS).forEach(deleteTriggersByHandler_);
   ScriptApp.newTrigger('processScheduleEdit').forSpreadsheet(spreadsheet).onEdit().create();
-  const properties = PropertiesService.getScriptProperties();
-  Object.keys(properties.getProperties()).filter(key =>
-    /^CALENDAR_ROW_REGISTRY_V2(?:_|$)/.test(key) || /^CALENDAR_SYNC_PENDING/.test(key)
-  ).forEach(key => properties.deleteProperty(key));
-  if (showAlert) SpreadsheetApp.getUi().alert('已修復 onEdit 格式處理並清除舊日曆索引／重試設定。');
-  return { ok: true, onEdit: 'processScheduleEdit', onChange: '', pendingRetry: '' };
+  return { ok: true, onEdit: 'processScheduleEdit' };
 }
 
-function installOrRepairSystem() {
-  return setup();
-}
-
-function setup() {
-  return runMenuAction_('安裝／修復系統', () => {
+function repairScheduleFormatting() {
+  return runMenuAction_('修復刀表格式', () => {
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
     assertNoLegacyOpOnly_(spreadsheet);
     assertNoLegacyArchiveState_();
     assertNoActiveAnnualArchiveTransaction_();
     assertScheduleIntegrity_(
       spreadsheet,
-      '安裝／修復',
       { allowRepairableStructureActions: true }
     );
-    const fuResult = initializeMainTrackingSheet_(spreadsheet, false);
-    const monthlyResult = initializeAllMonthlySheets_(
-      spreadsheet,
-      false,
-      { normalizeTimes: false }
-    );
-    installOrRepairTriggers_(false);
-    const identityResult = assertScheduleIntegrity_(spreadsheet, {
-      allowConflicts: false
-    });
-    reorderManagedSheets_(spreadsheet);
+    const fuResult = repairMainTrackingFormatting_(spreadsheet);
+    const monthlyResult = repairMonthlyFormatting_(spreadsheet);
+    const triggerResult = repairScheduleEditTrigger_();
+    assertScheduleIntegrity_(spreadsheet);
     onOpen();
 
     const message = [
-      '已完成格式、驗證、觸發器、排程識別及分頁順序修復。',
-      '本動作沒有新增、更新或刪除 Calendar 事件。',
+      '已修復既有刀表格式、下拉驗證及編輯觸發器。',
+      '現有刀表格式正常時，不需執行本功能。',
       `FU：${fuResult.message}`,
-      `月份表：${monthlyResult.message}`,
-      `綁定：${identityResult.eventCount} 個 CalendarEventId。`
+      `月份表：${monthlyResult.message}`
     ].join('\n');
-    SpreadsheetApp.getUi().alert('安裝／修復完成', message, SpreadsheetApp.getUi().ButtonSet.OK);
+    SpreadsheetApp.getUi().alert('格式修復完成', message, SpreadsheetApp.getUi().ButtonSet.OK);
     return {
       ok: true,
       fuResult,
       monthlyResult,
-      identityResult,
+      triggerResult,
       message
     };
   });
@@ -500,7 +480,7 @@ function showVersionInfo() {
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   const maintenance = ui.createMenu('維護工具')
-    .addItem('安裝／修復刀表格式', 'installOrRepairSystem')
+    .addItem('修復刀表格式', 'repairScheduleFormatting')
     .addItem(
       '套用所有 FU／月表建議欄寬',
       'applyAllRecommendedColumnWidths'
