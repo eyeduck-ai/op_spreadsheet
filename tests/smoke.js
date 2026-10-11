@@ -687,7 +687,7 @@ function testIolListReadsOnlyRequestedDateDisplayRows() {
 }
 
 function testVersionAndModuleSplit() {
-  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.11.6');
+  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.12.1');
   assert.strictEqual(evaluate('typeof processRowChange'), 'function');
   assert.strictEqual(evaluate('typeof processCalendarStructureChange'), 'function');
   assert.strictEqual(evaluate('typeof createMonthlySurgerySheet'), 'function');
@@ -2730,24 +2730,44 @@ function testIdentityScanDiagnosesExistingDuplicatesWithoutMigration() {
   assert.strictEqual(JSON.stringify([first.rows, second.rows]), before);
 }
 
-function testSystemProtectionRepairPreservesWorkerAndOwnerSettings() {
+function testSystemColumnsAreHiddenWithoutCreatingOrChangingProtections() {
   const headers = plain(evaluate('CONFIG.HEADERS'));
   const sheet = new FakeSheet('FU', 907, [headers, ['SYN-1', '甲']]);
   const protection = prepareIdentitySheet(sheet);
   const columns = call('getRequiredFuColumns_', sheet);
   call('hideAndProtectSystemColumns_', sheet, columns, ['EVENT_ID', 'SYNC_ID']);
-  assert.strictEqual(protection.protections.length, 2);
-  assert.ok(protection.protections.every(item => item.warningOnly));
-  const sync = protection.protections.find(item => item.description.endsWith('SYNC_ID'));
-  sync.warningOnly = false; // An explicit owner protection must remain strict.
+  assert.strictEqual(protection.protections.length, 0);
+  assert.deepStrictEqual(protection.hidden, [columns.EVENT_ID, columns.SYNC_ID]);
+  const sync = { description: 'SURGERY_SYSTEM_COLUMN:SYNC_ID', warningOnly: false,
+    setRange() { throw new Error('Owner range must remain unchanged'); },
+    setWarningOnly() { throw new Error('Owner policy must remain unchanged'); },
+    remove() { throw new Error('Owner protection must remain unchanged'); } };
+  protection.protections.push(sync);
   call('hideAndProtectSystemColumns_', sheet, columns, ['EVENT_ID', 'SYNC_ID']);
-  assert.strictEqual(protection.protections.length, 2);
+  assert.strictEqual(protection.protections.length, 1);
+  assert.strictEqual(protection.protections[0], sync);
   assert.strictEqual(sync.warningOnly, false);
-  assert.strictEqual(protection.protections.find(item => item.description.endsWith('EVENT_ID')).warningOnly, true);
+}
+
+function testAnnualArchiveOnlyHidesTechnicalColumnsAndPreservesProtections() {
+  const headers = call('getNewAnnualArchiveHeaders_', []);
+  const sheet = new FakeSheet('年度封存_2025', 908, [[], [], [], [], [], headers]);
+  const state = prepareIdentitySheet(sheet);
+  const owner = { description: 'SURGERY_ANNUAL_ARCHIVE:SYSTEM:1', warningOnly: false,
+    remove() { throw new Error('Owner protection must remain unchanged'); } };
+  state.protections.push(owner);
+  call('protectAnnualArchiveSheet_', sheet);
+  call('removeAnnualArchiveProtections_', sheet);
+  const info = call('getAnnualArchiveHeaderInfo_', sheet);
+  assert.deepStrictEqual(state.hidden, [info.eventColumn, info.syncColumn,
+    info.sourceMonthColumn, info.rowTypeColumn].sort((left, right) => left - right));
+  assert.deepStrictEqual(state.protections, [owner]);
+  files.forEach(file => assert.strictEqual(/\.protect\s*\(|\.setWarningOnly\s*\(|\.getProtections\s*\(/.test(sourceByFile[file]), false));
 }
 
 const tests = [
-  testSystemProtectionRepairPreservesWorkerAndOwnerSettings,
+  testSystemColumnsAreHiddenWithoutCreatingOrChangingProtections,
+  testAnnualArchiveOnlyHidesTechnicalColumnsAndPreservesProtections,
   testWorkerSetupLegacyCallsCannotMutateSheetOrRegisterHost,
   testIdentityScanDiagnosesExistingDuplicatesWithoutMigration,
   testInsertDayWritesSelectedCampusAndRejectsDuplicateIdentityBeforeWriting,

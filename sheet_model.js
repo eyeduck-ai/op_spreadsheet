@@ -494,28 +494,12 @@ function ensureManagedHeaders_(sheet, kind) {
 }
 
 function hideAndProtectSystemColumns_(sheet, columns, fieldKeys) {
+  // Compatibility name: technical columns are hidden only. Owner protections
+  // are neither created nor adjusted by formatting or initialization.
   (fieldKeys || []).forEach(key => {
     const column = columns[key];
     if (!column) return;
     sheet.hideColumns(column);
-    const description = `SURGERY_SYSTEM_COLUMN:${key}`;
-    const existing = sheet.getProtections(SpreadsheetApp.ProtectionType.RANGE)
-      .find(item => item.getDescription() === description);
-    if (existing && key === 'SYNC_ID') {
-      if (typeof existing.setRange === 'function') {
-        existing.setRange(sheet.getRange(1, column, sheet.getMaxRows(), 1));
-      }
-      // Preserve both warning-only ranges prepared by the worker and strict
-      // protections/editors explicitly chosen by the owner.
-    }
-    if (!existing) {
-      const protection = sheet.getRange(1, column, sheet.getMaxRows(), 1)
-        .protect()
-        .setDescription(description);
-      if (typeof protection.setWarningOnly === 'function') {
-        protection.setWarningOnly(true);
-      }
-    }
   });
 }
 

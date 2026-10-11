@@ -3,7 +3,7 @@
 - This repository contains a Google Apps Script surgery scheduling and follow-up tool for `FU` and `YYYYMM` monthly sheets.
 - System-managed headers must use English names. User-facing clinical headers may remain Chinese.
 - Always locate fields by row-1 header names; do not rely on fixed column letters or positions.
-- System columns must be hidden and protected where practical. FU and monthly sheets use `CalendarEventId` for Calendar binding and `ScheduleSyncId` for permanent patient/date-header identity. Preserve both columns across native sorts, moves, copies to archive, and header remapping.
+- System columns must be hidden. Do not automatically create, remove, or adjust protected ranges; preserve any owner-managed protection settings. FU and monthly sheets use `CalendarEventId` for Calendar binding and `ScheduleSyncId` for permanent patient/date-header identity. Preserve both columns across native sorts, moves, copies to archive, and header remapping.
 - GAS must not call Calendar or CalendarApp; only the designated external worker owns event mutations. Keep legacy trigger entrypoints safe no-ops.
 - Keep `tests/fixtures/sheet_contract.json` aligned with the platform's matching contract; run `node tests/sheet_contract.js` before deployment.
 - Duplicate `ScheduleSyncId` or `CalendarEventId` values must be treated as a sync diagnostic, not silently resolved to the first row.

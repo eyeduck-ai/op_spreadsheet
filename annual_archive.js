@@ -565,16 +565,11 @@ function ensureAnnualArchiveCustomHeaders_(sheet, sections) {
 }
 
 function removeAnnualArchiveProtections_(sheet) {
-  sheet.getProtections(SpreadsheetApp.ProtectionType.RANGE)
-    .filter(protection => {
-      return toCellText_(protection.getDescription())
-        .indexOf('SURGERY_ANNUAL_ARCHIVE:') === 0;
-    })
-    .forEach(protection => protection.remove());
+  // Legacy compatibility entrypoint: existing owner protections are preserved.
 }
 
 function protectAnnualArchiveSheet_(sheet) {
-  removeAnnualArchiveProtections_(sheet);
+  // Compatibility name: archive technical columns are hidden only.
   const info = getAnnualArchiveHeaderInfo_(sheet);
   const systemColumns = [
     info.eventColumn,
@@ -584,25 +579,6 @@ function protectAnnualArchiveSheet_(sheet) {
   ].sort((left, right) => left - right);
   systemColumns.forEach(column => {
     sheet.hideColumns(column);
-    const protection = sheet.getRange(1, column, sheet.getMaxRows(), 1)
-      .protect()
-      .setDescription(`SURGERY_ANNUAL_ARCHIVE:SYSTEM:${column}`);
-    if (typeof protection.setWarningOnly === 'function') {
-      protection.setWarningOnly(false);
-    }
-  });
-  buildVisibleRangesExcludingColumns_(
-    sheet,
-    1,
-    sheet.getMaxRows(),
-    info.lastColumn,
-    systemColumns
-  ).forEach((range, index) => {
-    const protection = range.protect()
-      .setDescription(`SURGERY_ANNUAL_ARCHIVE:CLINICAL:${index}`);
-    if (typeof protection.setWarningOnly === 'function') {
-      protection.setWarningOnly(true);
-    }
   });
 }
 
