@@ -1155,17 +1155,22 @@ function findMonthlyDuplicateCandidates_(
   };
 }
 
-function locateCachedMonthlySchedule_(spreadsheet, cached) {
+function locateCachedMonthlySchedule_(spreadsheet, cached, identity) {
+  if (!cached || !/^[a-f0-9]{32}$/.test(toCellText_(cached.syncId))) {
+    throw new Error('重送記錄缺少永久排程 ID，請關閉視窗後重新核對刀表。');
+  }
   const matches = [];
   getActiveMonthlySheets_(spreadsheet).forEach(sheet => {
     const columns = getRequiredMonthlyColumns_(sheet);
     const scan = scanMonthlyBlocks_(sheet, columns);
     scan.blocks.forEach(block => block.patientRows.forEach(patient => {
-      const snapshot = buildScheduleRowSnapshot_(sheet, patient, block, columns);
-      const same = cached.syncId ? snapshot.syncId === cached.syncId
-        : cached.eventId ? snapshot.eventId === cached.eventId
-        : Number(cached.sheetId) === Number(sheet.getSheetId()) && snapshot.rowHash === cached.rowHash && snapshot.blockKey === cached.blockKey;
-      if (same) matches.push({ sheet, row: patient.row, context: snapshot });
+      if (toCellText_(getRowFieldValue_(patient.values, columns, 'SYNC_ID')) !== cached.syncId) return;
+      const chartNo = toCellText_(getRowFieldValue_(patient.values, columns, 'CHART_NO'));
+      const patientName = toCellText_(getRowFieldValue_(patient.values, columns, 'NAME'));
+      if (identity && (identity.chartNo ? chartNo !== identity.chartNo : patientName !== identity.patientName)) {
+        throw new Error('永久排程 ID 綁定的病人已變更，請先核對刀表。');
+      }
+      matches.push({ sheet, row: patient.row, syncId: cached.syncId });
     }));
   });
   if (matches.length > 1) throw new Error('相同請求的排程識別重複，請先核對。');
@@ -1177,6 +1182,8 @@ function submitFuToMonthlySchedule(payload) {
   return withSheetOperationLock_(() => {
     const performance = createPerformancePhaseTimer_('FU => 月刀表');
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    assertNoActiveAnnualArchiveTransaction_();
+    assertScheduleIntegrity_(spreadsheet, { allowRepairableStructureActions: true });
     const fuSheet = getMainTrackingSheet_(spreadsheet);
     if (!fuSheet) throw new Error('找不到 FU。');
     const fuRow = Number(request.fuRow);
@@ -1208,18 +1215,18 @@ function submitFuToMonthlySchedule(payload) {
       hospital
     };
 
+    const requestToken = toCellText_(request.requestToken);
+    if (!/^[a-f0-9-]{32,36}$/i.test(requestToken)) throw new Error('請重新開啟排程視窗以取得有效請求識別碼。');
     const cache = CacheService.getUserCache();
-    const tokenKey = FU_TO_MONTHLY_CACHE_PREFIX + toCellText_(request.requestToken);
+    const tokenKey = FU_TO_MONTHLY_CACHE_PREFIX + requestToken;
     const cached = safeJsonParse_(cache.get(tokenKey), null);
     if (cached) {
-      const located = locateCachedMonthlySchedule_(spreadsheet, cached);
+      const located = locateCachedMonthlySchedule_(spreadsheet, cached, source.data);
       if (located) {
         performance.mark('前置檢查');
-        cached.eventId = located.context.eventId || '';
-        cached.syncId = located.context.syncId;
         cache.put(
           tokenKey,
-          JSON.stringify(cached),
+          JSON.stringify({ syncId: located.syncId }),
           CROSS_SHEET_CACHE_SECONDS
         );
         performance.log();
@@ -1365,14 +1372,7 @@ function submitFuToMonthlySchedule(payload) {
       throw new Error('新建月份資料列無法建立安全重送指紋，請核對剛建立的資料列。');
     }
     performance.mark('Sheet 寫入');
-    const cacheRecord = {
-      sheetId: sheet.getSheetId(),
-      row,
-      blockKey: createdContext.blockKey,
-      rowHash: createdContext.rowHash,
-      eventId: createdContext.eventId || '',
-      syncId: createdContext.syncId
-    };
+    const cacheRecord = { syncId: createdContext.syncId };
     cache.put(
       tokenKey,
       JSON.stringify(cacheRecord),

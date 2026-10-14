@@ -9,7 +9,7 @@
  * - annual_archive.js：私人備份與永久年度封存
  */
 const CONFIG = {
-  VERSION: '2026.10.12.2',
+  VERSION: '2026.10.14',
   SHEET_ALL: 'All',
   SHEET_FU: 'FU',
   LEGACY_SHEET_OP: 'OP',
@@ -375,7 +375,7 @@ function createPerformancePhaseTimer_(action) {
 function withSheetOperationLock_(callback) {
   const lock = LockService.getDocumentLock() || LockService.getScriptLock();
   if (!lock.tryLock(20000)) {
-    throw new Error('目前有另一個同步作業正在執行，請稍後再試。');
+    throw new Error('目前有另一個刀表作業正在執行，請稍後再試。');
   }
   try {
     return callback();
@@ -383,13 +383,6 @@ function withSheetOperationLock_(callback) {
     lock.releaseLock();
   }
 }
-
-
-
-
-
-
-
 
 function deleteTriggersByHandler_(handlerName) {
   let count = 0;

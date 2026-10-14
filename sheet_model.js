@@ -915,9 +915,9 @@ function scanMonthlyBlocksFromValues_(
   };
 }
 
-function scanMonthlyBlocks_(sheet, columns) {
+function scanMonthlyBlocks_(sheet, columns, dataWidth) {
   const cols = columns || getRequiredMonthlyColumns_(sheet);
-  const lastColumn = Math.max(getLastHeaderColumn_(sheet), ...Object.values(cols));
+  const lastColumn = Number(dataWidth) || Math.max(sheet.getLastColumn(), getLastHeaderColumn_(sheet), ...Object.values(cols));
   const lastRow = Math.max(sheet.getLastRow(), 1);
   const values = lastRow > 1
     ? sheet.getRange(2, 1, lastRow - 1, lastColumn).getValues()
@@ -2440,8 +2440,6 @@ function rebuildMonthlySheetSorted_(sheet, options) {
     };
   }
 
-  const normalizedHeaderHospitals = 0;
-
   const lastColumn = Math.max(
     scan.lastColumn,
     sheet.getLastColumn(),
@@ -2472,9 +2470,7 @@ function rebuildMonthlySheetSorted_(sheet, options) {
       patientCount: plan.patientCount,
       generatedBlankRows: insertedRows,
       changed: false,
-      strategy: normalizedHeaderHospitals
-        ? 'normalized_header'
-        : 'precomputed_noop'
+      strategy: 'precomputed_noop'
     };
   }
   const before = captureSortableRangeState_(
@@ -2503,7 +2499,8 @@ function rebuildMonthlySheetSorted_(sheet, options) {
       ) {
         throw new Error('排序後資料、公式或 notes 核對不一致。');
       }
-      verifiedScan = scanMonthlyBlocks_(sheet, columns);
+      // Temporary sort keys are not patient data or permanent system columns.
+      verifiedScan = scanMonthlyBlocks_(sheet, columns, lastColumn);
       validateMonthlyNativeSortScan_(
         sheet,
         verifiedScan,
@@ -2615,20 +2612,28 @@ function insertPatientAtBlockEnd_(
     : currentBlock.row;
   const targetRow = lastPatientRow + 1;
   let nextHeaderRow = nextBlock ? nextBlock.row : 0;
-  // Always insert a complete new patient row; manual blank rows remain available.
-  if (targetRow <= sheet.getMaxRows()) {
+  const lastColumn = Math.max(sheet.getLastColumn(), getLastHeaderColumn_(sheet), ...Object.values(columns));
+  const targetRange = targetRow <= sheet.getMaxRows()
+    ? sheet.getRange(targetRow, 1, 1, lastColumn) : null;
+  // Reuse only a truly empty row inside this block. Empty-display formulas and
+  // manual notes are data; inserting a complete row preserves them and both IDs.
+  const reusable = targetRange && (!nextHeaderRow || targetRow < nextHeaderRow) &&
+    [targetRange.getValues(), targetRange.getFormulas(), targetRange.getNotes()]
+      .every(rows => rows.every(row => row.every(value => value === '' || value === null)));
+  if (!reusable && targetRow <= sheet.getMaxRows()) {
     sheet.insertRowBefore(targetRow);
     if (nextHeaderRow) nextHeaderRow++;
-  } else {
+  } else if (!reusable) {
     const currentMaxRows = sheet.getMaxRows();
     sheet.insertRowsAfter(currentMaxRows, targetRow - currentMaxRows);
   }
 
-  const lastColumn = Math.max(getLastHeaderColumn_(sheet), ...Object.values(columns));
   const rowValues = Array(lastColumn).fill('');
   Object.keys(valuesByKey || {}).forEach(key => {
     setRowFieldValue_(rowValues, columns, key, valuesByKey[key]);
   });
+  setRowFieldValue_(rowValues, columns, 'HOSPITAL', currentBlock.hospital);
+  setRowFieldValue_(rowValues, columns, 'EVENT_ID', '');
   setRowFieldValue_(rowValues, columns, 'SYNC_ID', newScheduleSyncId_());
   sheet.getRange(targetRow, 1, 1, lastColumn).setValues([rowValues]);
   applyManagedRowFormat_(sheet, targetRow, 'MONTHLY', columns);

@@ -56,9 +56,8 @@ function buildScheduleRowSnapshot_(sheet, patient, block, columns) {
   const timeInfo = resolveScheduleTime_(getRowFieldValue_(values, columns, 'TIME'));
   const invalidReason = !block ? 'no_block' : !(chartNo || patientName) ? 'no_identity'
     : timeInfo.errorMessage ? 'invalid_time' : '';
-  return { sheet, sheetId: sheet.getSheetId(), sheetName: sheet.getName(), row: patient.row,
-    chartNo, patientName, timeInfo, valid: !invalidReason, invalidReason,
-    columns, values, eventId: toCellText_(getRowFieldValue_(values, columns, 'EVENT_ID')),
+  return { chartNo, patientName, valid: !invalidReason, invalidReason,
+    eventId: toCellText_(getRowFieldValue_(values, columns, 'EVENT_ID')),
     syncId: toCellText_(getRowFieldValue_(values, columns, 'SYNC_ID')),
     blockKey: block ? block.blockKey : '',
     rowHash: sha256Hex_(JSON.stringify(values.map(normalizeSortFingerprintCell_))) };

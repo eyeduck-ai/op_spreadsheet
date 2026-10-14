@@ -687,7 +687,7 @@ function testIolListReadsOnlyRequestedDateDisplayRows() {
 }
 
 function testVersionAndModuleSplit() {
-  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.12.2');
+  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.14');
   assert.strictEqual(evaluate('typeof processRowChange'), 'function');
   assert.strictEqual(evaluate('typeof processCalendarStructureChange'), 'function');
   assert.strictEqual(evaluate('typeof createMonthlySurgerySheet'), 'function');
@@ -2152,14 +2152,7 @@ function testMonthlyTextFormatsOnlyInitializeSystemCreatedRows() {
   assert.ok(onOpenBody.includes('SpreadsheetApp.getUi()'));
   assert.strictEqual(onOpenBody.includes('getActiveSpreadsheet'), false);
 
-  const calendarSource = sourceByFile['schedule_integrity.js'];
-  const structureBody = calendarSource.slice(
-    calendarSource.indexOf('function processCalendarStructureChange'),
-    calendarSource.indexOf('function buildCalendarSyncRuntime_')
-  );
   assert.strictEqual(call('processCalendarStructureChange'), undefined);
-  assert.strictEqual(structureBody.includes('allowMissingDeletes'), false);
-  assert.strictEqual(structureBody.includes('setNumberFormat'), false);
 
   const sheetSource = sourceByFile['sheet_model.js'];
   const monthlyFormattingBody = sheetSource.slice(
@@ -2196,10 +2189,10 @@ function testMonthlyTextFormatsOnlyInitializeSystemCreatedRows() {
 
 function testMonthlyIolTextInputsHaveNoPostEditRewrite() {
   const sheetSource = sourceByFile['sheet_model.js'];
-  const calendarSource = sourceByFile['schedule_integrity.js'];
-  const onEditBody = calendarSource.slice(
-    calendarSource.indexOf('function processRowChange'),
-    calendarSource.indexOf('function processCalendarStructureChange')
+  const integritySource = sourceByFile['schedule_integrity.js'];
+  const onEditBody = integritySource.slice(
+    integritySource.indexOf('function processScheduleEdit'),
+    integritySource.indexOf('function processRowChange')
   );
   assert.strictEqual(
     sheetSource.includes('normalizeMonthlySignedTextInputs_'),
@@ -2611,19 +2604,32 @@ function testDuplicateEventBindingStopsSheetOperations() {
   assert.strictEqual(JSON.stringify(sheet.rows), before);
 }
 
+function testUnnamedTailDataSurvivesMonthlySorting() {
+  const { sheet, columns } = makeMonthlyReorderFixture();
+  const tail = sheet.getLastColumn() + 2;
+  sheet.setValueAt(5, tail, '人工尾欄資料');
+  const scan = call('scanMonthlyBlocks_', sheet, columns);
+  assert.strictEqual(scan.blocks[0].patientRows.length, 3);
+  call('rebuildMonthlySheetSorted_', sheet);
+  assert.strictEqual(sheet.rows.filter(row => row[tail - 1] === '人工尾欄資料').length, 1);
+  assert.strictEqual(sheet.valueAt(1, tail), '');
+  assert.strictEqual(call('scanMonthlyBlocks_', sheet, columns).blocks[0].patientRows.length, 3);
+}
+
 function testFuRequestCacheUsesPermanentIdentityAfterMoveAndCalendarReplacement() {
   const { sheet, spreadsheet, columns } = makeMonthlyReorderFixture();
   const syncId = 'd'.repeat(32);
   sheet.setValueAt(3, columns.SYNC_ID, syncId);
-  const cached = { syncId, eventId: 'event-a', sheetId: sheet.getSheetId() };
+  const cached = { syncId };
   [sheet.rows[2], sheet.rows[3]] = [sheet.rows[3], sheet.rows[2]];
   sheet.setValueAt(4, columns.EVENT_ID, 'replacement-event');
   sheet.setValueAt(2, columns.TIME, new Date(2026, 9, 20));
   const found = call('locateCachedMonthlySchedule_', spreadsheet, cached);
   assert.strictEqual(found.row, 4);
-  assert.strictEqual(found.context.syncId, syncId);
-  assert.strictEqual(found.context.eventId, 'replacement-event');
-  assert.ok(found.context.blockKey.startsWith('2026-10-20|'));
+  assert.strictEqual(found.syncId, syncId);
+  assert.strictEqual(sheet.valueAt(found.row, columns.EVENT_ID), 'replacement-event');
+  assert.throws(() => call('locateCachedMonthlySchedule_', spreadsheet, { eventId: 'replacement-event' }), /永久排程 ID/);
+  assert.throws(() => call('locateCachedMonthlySchedule_', spreadsheet, cached, { chartNo: 'WRONG' }), /病人已變更/);
   sheet.rows.push(sheet.rows[3].slice());
   assert.throws(() => call('locateCachedMonthlySchedule_', spreadsheet, cached), /排程識別重複/);
 }
@@ -2924,6 +2930,7 @@ const tests = [
   testFormattingOnlyDeploymentHasNoCalendarApiAndLegacyCallsAreSafe,
   testExternalOwnerPreventsCalendarMutationsAndKeepsEditFormatting,
   testDuplicateEventBindingStopsSheetOperations,
+  testUnnamedTailDataSurvivesMonthlySorting,
   testFuRequestCacheUsesPermanentIdentityAfterMoveAndCalendarReplacement,
   testSurgeryDatePreviewSelectsCampusAndDetectsChange,
 ];

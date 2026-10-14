@@ -1,6 +1,6 @@
 # 手術排程與 FU 追蹤系統
 
-版本 **2026.10.12.2**。GAS 負責線上刀表格式、conditional formatting、時間正規化、排序、建立月份／刀日、FU 跨表操作與年度封存。**GAS 不存取 Google Calendar，不登記監控主機，也不負責既有資料的識別欄遷移。**
+版本 **2026.10.14**。GAS 負責線上刀表格式、conditional formatting、時間正規化、排序、建立月份／刀日、FU 跨表操作與年度封存。**GAS 不存取 Google Calendar，不登記監控主機，也不負責既有資料的識別欄遷移。**
 
 平台 EXE 辨識 SOAP 的手術／FU Tag，由使用者確認後更新刀表。指定 Windows 主機的監控 EXE 處理刀表 → 日曆，包含人工新增、改期、取消與刪列；日曆不回寫刀表。
 
@@ -34,6 +34,8 @@ FU 可見欄：`病歷號、姓名、TEL、醫院、Tag、Condition、日期、P
 | `CalendarEventId` | 監控 EXE 的日曆事件綁定；既有值保留，GAS 不建立或清除。 |
 
 GAS 建立新月表、刀日及跨表病人時會配置新的 ScheduleSyncId；手動空白列保持空白，監控 EXE 在資料出現後配置。月表 → FU、FU → 月表是另一筆排程，不能沿用來源的兩個 ID。
+
+新增病人使用指定日期＋院區區塊末端的空白列；有公式（即使顯示空字串）、註記或資料時插入完整新列，保留原內容且不跨入下一刀日。病人醫院欄寫入目的刀日院區，報到時間仍獨立保存。未命名的人工尾欄也納入資料列掃描與排序。
 
 系統欄只自動隱藏，不建立警告或嚴格保護。FU、月表、新月份、格式修復及年度封存均不自動建立、移除或調整受保護範圍；既有人工保護設定保留。完整搬列仍須包含兩個隱藏識別欄。
 
@@ -72,7 +74,7 @@ FU 日期格式為 `yyyy/m/d`；刀日標題為 `yyyy/m/d ddd` 日期、醫院�
 
 ## 模組與驗證
 
-`code.js` 是選單／設定，`sheet_model.js` 是欄位／格式，`schedule_integrity.js` 是結構／人工編輯格式及集中保留的舊觸發器空入口，`schedule_identity.js` 只驗證識別，`workflows.js` 是日常操作，`annual_archive.js` 是年度封存。原 `calendar_handover.js` 與日曆引擎已移除；FU 安排到月表仍保留 request token、永久識別碼與回讀指紋，重送時定位既有列，避免重複建立。
+`code.js` 是選單／設定，`sheet_model.js` 是欄位／格式，`schedule_integrity.js` 是結構／人工編輯格式及集中保留的舊觸發器空入口，`schedule_identity.js` 只驗證識別，`workflows.js` 是日常操作，`annual_archive.js` 是年度封存。原 `calendar_handover.js` 與日曆引擎已移除；FU 安排到月表的 request token 只快取永久 ScheduleSyncId，不再依事件 ID、原月份、列號或內容雜湊猜測同一排程。重送重新定位並核對病歷號；跨月搬移或監控更新事件綁定均不重建病人，識別重複或病人不符時停止。
 
 ```powershell
 node --check code.js
@@ -86,7 +88,10 @@ node tests/smoke.js
 node tests/sheet_contract.js
 node tests/monitor_handover.js
 node tests/parser_contract.js
+node tests/workflow_contract.js
 git diff --check
 ```
 
-72 項合成 smoke tests 涵蓋格式、排序、封存、識別衝突、跨月改期、只隱藏不新增保護及保留人工保護、舊觸發器無寫入及簡化選單。實際格式修復回歸另驗證沒有 FU 時不建表、不配置既有識別碼、不批次改報到時間，保留人工值／公式／註記／保護；缺欄提示按系統欄與臨床欄分流。共用刀表契約另核對欄名、下拉、欄寬、月份日期、診斷公式與欄位換序後的條件格式。監控交接測試使用實際 GAS 解析器，核對同日不同院區、跨月整列搬移、隱藏 ID 保留、只搬可見欄位診斷與主程式狀態頁排除。實際 Google 權限與自動遷移由監控 EXE 的副本驗證負責。
+73 項合成 smoke tests 涵蓋格式、排序、封存、識別衝突、跨月改期、只隱藏不新增保護及保留人工保護、舊觸發器無寫入及簡化選單。實際格式修復回歸另驗證沒有 FU 時不建表、不配置既有識別碼、不批次改報到時間，保留人工值／公式／註記／保護；缺欄提示按系統欄與臨床欄分流。共用刀表契約另核對欄名、下拉、欄寬、月份日期、診斷公式與欄位換序後的條件格式。監控交接測試使用實際 GAS 解析器，核對同日不同院區、跨月整列搬移、隱藏 ID 保留、只搬可見欄位診斷與主程式狀態頁排除。實際 Google 權限與自動遷移由監控 EXE 的副本驗證負責。
+
+2026.10.14 另以 `workflow_contract.js` 執行實際新增月份、刀日與病人寫入，匯出供兩個 EXE 讀取的合成儲存格；核對同日雙院區、新列院區、空白列使用、空顯示公式與註記保留、永久 ID 重送及整列跨月改期。沒有增加雲端系統欄、隱藏分頁或日曆權限。

@@ -44,6 +44,8 @@ jobs:
           node tests/monitor_handover.js
           node --check tests/parser_contract.js
           node tests/parser_contract.js
+          node --check tests/workflow_contract.js
+          node tests/workflow_contract.js
           node --check tools/verify_bound_parent.js
 
       - name: Setup clasp credentials
