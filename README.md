@@ -1,6 +1,6 @@
 # 手術排程與 FU 追蹤系統
 
-版本 **2026.10.14**。GAS 負責線上刀表格式、conditional formatting、時間正規化、排序、建立月份／刀日、FU 跨表操作與年度封存。**GAS 不存取 Google Calendar，不登記監控主機，也不負責既有資料的識別欄遷移。**
+版本 **2026.10.15**。GAS 負責線上刀表格式、conditional formatting、時間正規化、排序、建立月份／刀日、FU 跨表操作與年度封存。**GAS 不存取 Google Calendar，不登記監控主機，也不負責既有資料的識別欄遷移。**
 
 平台 EXE 辨識 SOAP 的手術／FU Tag，由使用者確認後更新刀表。指定 Windows 主機的監控 EXE 處理刀表 → 日曆，包含人工新增、改期、取消與刪列；日曆不回寫刀表。
 
@@ -59,6 +59,12 @@ FU 日期格式為 `yyyy/m/d`；刀日標題為 `yyyy/m/d ddd` 日期、醫院�
 
 ## 搬列、取消及封存
 
+年度封存與 Windows 6.12.0 共用原生格式契約及固定雲端互斥標記。兩邊均採「預覽 → 備份 → 複製並回讀核對 → 再次確認移除原月份」，可補入較早月份，以原生插列保留年度分頁 ID 與月份排序。GAS 先保存私人 Drive 整檔備份及壓縮原生交易計畫；Script Properties 僅保存精簡交易進度。未知結果只核對原交易，不重送、不自動解除互斥標記。
+
+啟用 manifest 內的 Sheets v4 進階服務；使用既有綁定專案與部署目標，標準 Cloud 專案亦須啟用 Sheets API。封存保存刪節線、富文字、註記、驗證、列高、隱藏狀態及合併儲存格，固定條件格式顯示；不調整人工保護。既有封存格式轉換列於預覽並先備份。舊 GAS 未保存可靠取消狀態的月份須以私人備份核對，Windows 統計標示不完整；新月份區段以 `VGHKS_ARCHIVE_CONTRACT_V2` 註記辨識。
+
+互斥使用 `DOCUMENT` metadata `vghks.sheet.archive.lock`、固定 ID 2147483646，主程式、GAS 與監控均尊重；同一 ID 的原子建立拒絕第二個封存。未完成的舊版 GAS 交易不自動續跑舊刪除流程。更新時一併更新主程式與監控；統計介面由主程式提供。
+
 同一天可以有不同院區的刀日區塊。例如 10/12 高榮與 10/12 聯醫是兩個區塊；監控一律使用患者上方最近有效刀日的完整日期與院區，病人列舊院區由監控正規化。分頁名稱不是事件日期。刀日標題本身有 ScheduleSyncId，沒有 CalendarEventId，也不建立日曆事件。
 
 跨月改期請用列號選取整列（含隱藏欄）剪貼到目的刀日之下；監控以相同 ScheduleSyncId 更新原事件，並沿用 CalendarEventId。只貼可見欄位可能遺留或遺失 ID：原列只剩 ID、ID 重複、同一 ID 改成不同病歷號，或舊排程消失同時出現無 ID 新列，都須先核對，不能把相似姓名／日期當作同一事件。GAS onEdit 不會推測剪貼來源或修補這類綁定。
@@ -83,12 +89,15 @@ node --check schedule_identity.js
 node --check schedule_integrity.js
 node --check workflows.js
 node --check annual_archive.js
+node --check archive_native.js
+node --check archive_transaction.js
 node --check tests/smoke.js
 node tests/smoke.js
 node tests/sheet_contract.js
 node tests/monitor_handover.js
 node tests/parser_contract.js
 node tests/workflow_contract.js
+node tests/archive_contract.js
 git diff --check
 ```
 

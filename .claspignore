@@ -5,6 +5,8 @@
 !schedule_integrity.js
 !workflows.js
 !annual_archive.js
+!archive_native.js
+!archive_transaction.js
 !fu_to_monthly.html
 !monthly_rollup.html
 !iol_list.html

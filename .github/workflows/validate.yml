@@ -1,0 +1,27 @@
+name: Validate Apps Script
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Synthetic validation without deployment credentials
+        run: |
+          for file in *.js tests/*.js; do node --check "$file"; done
+          node tests/smoke.js
+          node tests/sheet_contract.js
+          node tests/parser_contract.js
+          node tests/workflow_contract.js
+          node tests/monitor_handover.js
+          node tests/archive_contract.js
+          git diff --check

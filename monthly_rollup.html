@@ -10,6 +10,7 @@
         color: #202124;
       }
       * { box-sizing: border-box; }
+      [hidden] { display: none !important; }
       body { margin: 0; background: #f8f9fa; }
       main { padding: 18px; }
       h1 { margin: 0 0 8px; font-size: 20px; }
@@ -66,7 +67,9 @@
         font-weight: 600;
         cursor: pointer;
       }
-      #submit { background: #1a73e8; color: #fff; }
+      #submit, #copy { background: #1a73e8; color: #fff; }
+      #finalize { background: #b3261e; color: #fff; }
+      .actions { flex-wrap: wrap; }
       #cancel { background: #e8eaed; color: #3c4043; }
       button:disabled { opacity: .55; cursor: default; }
       #status { flex: 1; font-size: 13px; white-space: pre-wrap; }
@@ -84,20 +87,26 @@
       </section>
 
       <p class="warning">
-        系統會先建立並驗證私人 My Drive 整檔備份及年度封存表，
-        全部成功後才永久刪除原月份分頁。既有 Calendar 事件不會改動；
-        一般選單不提供還原。
-        <label class="confirm">
+        先預覽，建立私人 My Drive 整檔備份，再複製並回讀核對。
+        第二次明確確認後才移除原月份分頁。可補封存較早月份，依月份排序；
+        原年度分頁 ID、人工欄位及刪節線均保留。並存期間自動寫入暫停。
+        完成後一般選單不提供還原，私人備份會保留。
+        <label id="deletionArea" class="confirm" hidden>
           <input id="confirmDeletion" type="checkbox">
-          <span>我了解成功後會永久刪除所選月份分頁。</span>
+          <span>我已核對封存副本與私人備份，確認移除上述原月份分頁。</span>
         </label>
       </p>
 
       <div class="actions">
-        <button id="submit" type="button">建立私人備份並永久封存</button>
+        <button id="submit" type="button">產生封存預覽</button>
+        <button id="copy" type="button" hidden>建立私人備份並複製核對</button>
+        <button id="check" type="button" hidden>核對更新結果</button>
+        <button id="abort" type="button" hidden>取消未複製交易</button>
+        <button id="finalize" type="button" hidden>確認封存後移除原月份</button>
         <button id="cancel" type="button">取消</button>
-        <div id="status" aria-live="polite"></div>
+        <div id="status" role="status" aria-live="polite"></div>
       </div>
+      <ul id="changes"></ul>
     </main>
 
     <script>
@@ -106,6 +115,22 @@
       const submit = document.getElementById("submit");
       const status = document.getElementById("status");
       const confirmDeletion = document.getElementById("confirmDeletion");
+      const copy = document.getElementById("copy"), check = document.getElementById("check"), finalize = document.getElementById("finalize"), abort = document.getElementById('abort');
+      let pending = INITIAL_DATA.pending, verified = false, busy = false;
+
+      function render() {
+        const active = pending && !['preview','applied','rejected'].includes(pending.status);
+        submit.disabled = busy || active;
+        copy.hidden = !pending?.canCopy; copy.disabled = busy;
+        check.hidden = !active; check.disabled = busy;
+        abort.hidden = !pending?.canCancel; abort.disabled = busy;
+        finalize.hidden = pending?.status !== 'copied'; finalize.disabled = busy || !verified || !confirmDeletion.checked;
+        document.getElementById('deletionArea').hidden = finalize.hidden;
+        monthsContainer.querySelectorAll('input').forEach(input => { input.disabled = busy || active; });
+        const list = document.getElementById('changes'); list.replaceChildren();
+        for (const text of pending?.changes || []) { const item = document.createElement('li'); item.textContent = text; list.append(item); }
+        if (pending?.message) status.textContent = pending.message;
+      }
 
       function selectedMonths() {
         return Array.from(
@@ -124,7 +149,8 @@
         name.textContent = month.name;
         const count = document.createElement("span");
         count.className = "count";
-        count.textContent = `${month.patientCount} 筆`;
+        count.textContent = month.patientCount === null ? '待核對' : `${month.patientCount} 筆`;
+        checkbox.addEventListener('change', () => { if (pending?.status === 'preview') { pending = null; verified = false; render(); } });
         label.append(checkbox, name, count);
         monthsContainer.appendChild(label);
       });
@@ -133,41 +159,51 @@
         "click",
         () => google.script.host.close()
       );
-      submit.addEventListener("click", () => {
+      function perform(action) {
         const months = selectedMonths();
-        if (months.length < 1) {
+        if (action === 'preview' && months.length < 1) {
           status.textContent = "請至少選擇一個已結束月份。";
           status.className = "error";
           return;
         }
-        if (!confirmDeletion.checked) {
+        if (action === 'finalize' && (!verified || !confirmDeletion.checked)) {
           status.textContent = "請先確認永久刪除來源月份分頁。";
           status.className = "error";
           return;
         }
 
-        submit.disabled = true;
-        status.textContent = "正在建立私人整檔備份並驗證年度封存；請勿關閉視窗…";
+        busy = true; render();
+        status.textContent = action === 'preview' ? '正在產生預覽…' : action === 'check' ? '只讀取並核對原批次，不重送…' : action === 'finalize' ? '正在核對封存並移除原月份…' : '正在建立私人備份並複製核對；原月份仍保留…';
         status.className = "";
         google.script.run
           .withSuccessHandler(result => {
-            submit.disabled = false;
-            status.textContent = result.message || `已建立 ${result.sheetName}`;
+            busy = false; pending = result; verified = result.status === 'copied' && ['copy','check'].includes(action);
+            confirmDeletion.checked = false; render();
             status.className = result.ok ? "success" : "error";
           })
           .withFailureHandler(error => {
-            submit.disabled = false;
+            busy = false; verified = false;
+            if (pending && action !== 'preview') pending = { ...pending, status: 'uncertain', canCopy: false, message: '結果尚未確認，請核對原交易；不會自動重送。' };
+            render();
             status.textContent = error && error.message
               ? error.message
               : String(error);
             status.className = "error";
           })
           .submitMonthlyRollupRequest({
-            operationId: INITIAL_DATA.operationId,
+            operationId: pending?.operationId || INITIAL_DATA.operationId,
+            action,
             months,
-            confirmedPermanentDeletion: true
+            confirmedPermanentDeletion: action === 'finalize' && confirmDeletion.checked
           });
-      });
+      }
+      submit.addEventListener('click', () => perform('preview'));
+      copy.addEventListener('click', () => perform('copy'));
+      check.addEventListener('click', () => perform('check'));
+      abort.addEventListener('click', () => perform('cancel'));
+      finalize.addEventListener('click', () => perform('finalize'));
+      confirmDeletion.addEventListener('change', render);
+      render();
     </script>
   </body>
 </html>

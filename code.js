@@ -9,7 +9,7 @@
  * - annual_archive.js：私人備份與永久年度封存
  */
 const CONFIG = {
-  VERSION: '2026.10.14',
+  VERSION: '2026.10.15',
   SHEET_ALL: 'All',
   SHEET_FU: 'FU',
   LEGACY_SHEET_OP: 'OP',
@@ -372,12 +372,13 @@ function createPerformancePhaseTimer_(action) {
   };
 }
 
-function withSheetOperationLock_(callback) {
+function withSheetOperationLock_(callback, archiveOwner) {
   const lock = LockService.getDocumentLock() || LockService.getScriptLock();
   if (!lock.tryLock(20000)) {
     throw new Error('目前有另一個刀表作業正在執行，請稍後再試。');
   }
   try {
+    assertNativeArchiveAvailable_(archiveOwner || '');
     return callback();
   } finally {
     lock.releaseLock();
