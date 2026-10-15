@@ -51,15 +51,18 @@ function writeAnnualArchiveTransaction_(transaction) {
     properties.deleteProperty(ANNUAL_ARCHIVE_TRANSACTION_PROPERTY);
     return;
   }
+  const saved = { ...transaction };
+  if (saved.version === 2) { delete saved.summary; delete saved.changes; }
   properties.setProperty(
     ANNUAL_ARCHIVE_TRANSACTION_PROPERTY,
-    JSON.stringify(transaction)
+    JSON.stringify(saved)
   );
 }
 
 function isAnnualArchiveTransactionActive_() {
   try {
-    return Boolean(readAnnualArchiveTransaction_());
+    const transaction = readAnnualArchiveTransaction_();
+    return Boolean(transaction && !['preview', 'applied', 'rejected'].includes(transaction.status));
   } catch (err) {
     return true;
   }
@@ -67,12 +70,13 @@ function isAnnualArchiveTransactionActive_() {
 
 function assertNoActiveAnnualArchiveTransaction_() {
   const transaction = readAnnualArchiveTransaction_();
-  if (transaction) {
+  if (transaction && !['preview', 'applied', 'rejected'].includes(transaction.status)) {
     throw new Error(
       `永久封存交易尚未完成（${transaction.operationId || '未知識別碼'}）。` +
       '請從「彙整舊月刀表」繼續完成，期間暫停刀表編輯格式處理。'
     );
   }
+  assertNativeArchiveAvailable_('');
   return true;
 }
 

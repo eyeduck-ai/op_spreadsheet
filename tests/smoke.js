@@ -13,6 +13,8 @@ const files = [
   'schedule_integrity.js',
   'workflows.js',
   'annual_archive.js',
+  'archive_native.js',
+  'archive_transaction.js',
   'schedule_identity.js'
 ];
 const sourceByFile = Object.fromEntries(
@@ -36,6 +38,7 @@ function digestBytes(value) {
 }
 
 const context = {
+  Sheets: { Spreadsheets: { get: () => ({ developerMetadata: [] }) } },
   console,
   Date,
   JSON,
@@ -75,6 +78,7 @@ const context = {
     getScriptTimeZone: () => 'Asia/Taipei'
   },
   SpreadsheetApp: {
+    getActiveSpreadsheet: () => ({ getId: () => 'SYNTHETIC-SPREADSHEET' }),
     newDataValidation: () => {
       const state = {};
       const builder = {
@@ -687,7 +691,7 @@ function testIolListReadsOnlyRequestedDateDisplayRows() {
 }
 
 function testVersionAndModuleSplit() {
-  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.14');
+  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.15');
   assert.strictEqual(evaluate('typeof processRowChange'), 'function');
   assert.strictEqual(evaluate('typeof processCalendarStructureChange'), 'function');
   assert.strictEqual(evaluate('typeof createMonthlySurgerySheet'), 'function');
@@ -2480,9 +2484,10 @@ function testHtmlUsesCollapsedAdvancedAreaAndArchiveLanguage() {
   assert.ok(fuHtml.includes('.getFuToMonthlyBlockOptions(month)'));
   assert.strictEqual(/calendarStatus|同步 Calendar|重試 Calendar/.test(fuHtml), false);
   assert.ok(rollupHtml.includes('彙整舊月刀表'));
-  assert.ok(rollupHtml.includes('建立私人備份並永久封存'));
+  assert.ok(rollupHtml.includes('建立私人備份並複製核對'));
+  assert.ok(rollupHtml.includes('確認封存後移除原月份'));
   assert.ok(rollupHtml.includes('一般選單不提供還原'));
-  assert.ok(rollupHtml.includes('confirmedPermanentDeletion: true'));
+  assert.ok(rollupHtml.includes("confirmedPermanentDeletion: action === 'finalize' && confirmDeletion.checked"));
 }
 
 function testClaspIncludesAllRuntimeModules() {
@@ -2560,7 +2565,7 @@ function testFormattingOnlyDeploymentHasNoCalendarApiAndLegacyCallsAreSafe() {
   plain(evaluate('RETIRED_TRIGGER_HANDLERS')).filter(name => name !== 'processRowChange')
     .forEach(name => assert.strictEqual(call(name), undefined));
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'appsscript.json'), 'utf8'));
-  assert.deepStrictEqual(manifest.dependencies, {});
+  assert.deepStrictEqual(manifest.dependencies, { enabledAdvancedServices: [{ userSymbol: 'Sheets', version: 'v4', serviceId: 'sheets' }] });
   assert.strictEqual(deployed.includes('vghks.calendar.control'), false);
   assert.strictEqual(evaluate('typeof migrateScheduleSyncIds_'), 'undefined');
   assert.strictEqual(sourceByFile['code.js'].includes("'migrateScheduleSyncIds'"), false);

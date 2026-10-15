@@ -36,6 +36,8 @@ jobs:
           node --check schedule_identity.js
           node --check workflows.js
           node --check annual_archive.js
+          node --check archive_native.js
+          node --check archive_transaction.js
           node --check tests/smoke.js
           node tests/smoke.js
           node --check tests/sheet_contract.js
@@ -46,6 +48,7 @@ jobs:
           node tests/parser_contract.js
           node --check tests/workflow_contract.js
           node tests/workflow_contract.js
+          node tests/archive_contract.js
           node --check tools/verify_bound_parent.js
 
       - name: Setup clasp credentials

@@ -1323,24 +1323,19 @@ function createAnnualArchiveTransaction_(spreadsheet, request) {
 function getRollupDialogData_() {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   assertNoLegacyArchiveState_();
+  const pending = readAnnualArchiveTransaction_();
+  if (pending && pending.version !== 2) throw new Error('有舊版未完成封存；保留來源與備份，請先人工核對，不自動續跑刪除。');
   const currentMonth = formatMonthKey_(new Date());
-  const archived = listArchivedMonthNames_(spreadsheet);
-  const months = getActiveMonthlySheets_(spreadsheet)
-    .filter(sheet => (
-      isClosedMonthForArchive_(sheet.getName(), currentMonth) &&
-      archived.indexOf(sheet.getName()) === -1
-    ))
-    .sort((left, right) => left.getName().localeCompare(right.getName()))
-    .map(sheet => ({
-      name: sheet.getName(),
-      year: sheet.getName().slice(0, 4),
-      patientCount: scanMonthlyBlocks_(
-        sheet,
-        getRequiredMonthlyColumns_(sheet)
-      ).blocks.reduce((sum, block) => sum + block.patientRows.length, 0)
-    }));
+  const book = readNativeArchiveBook_(spreadsheet.getId());
+  const months = book.sheets.filter(sheet => /^20\d{2}(0[1-9]|1[0-2])$/.test(sheet.properties.title) && sheet.properties.title < currentMonth)
+    .sort((a, b) => a.properties.title.localeCompare(b.properties.title)).map(sheet => {
+      const cols = nativeColumns_(sheet, 0);
+      return { name: sheet.properties.title, year: sheet.properties.title.slice(0, 4),
+        patientCount: sheet.rows.slice(1).filter(row => nativeValue_(row, cols, '病歷號') && nativeValue_(row, cols, '病歷號') !== '◆ 刀日' || nativeValue_(row, cols, '姓名') && !nativeDay_(row[cols[CONFIG.MONTHLY_FIELD_HEADERS.TIME]] || {})).length };
+    });
   return {
-    operationId: Utilities.getUuid(),
+    operationId: pending ? pending.operationId : Utilities.getUuid(),
+    pending: pending ? nativePublicArchive_(pending) : null,
     months,
     defaultMonths: months.length ? [months[0].name] : [],
     currentMonth
@@ -1349,26 +1344,8 @@ function getRollupDialogData_() {
 
 function showMonthlyRollupDialog() {
   return runMenuAction_('彙整舊月刀表', () => {
-    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-    const pending = readAnnualArchiveTransaction_();
-    if (pending) {
-      const response = SpreadsheetApp.getUi().alert(
-        '繼續永久封存',
-        `偵測到尚未完成的封存交易：${pending.months.join('、')}。\n` +
-          '按「確定」會從安全檢查點繼續。',
-        SpreadsheetApp.getUi().ButtonSet.OK_CANCEL
-      );
-      if (response !== SpreadsheetApp.getUi().Button.OK) {
-        return { ok: false, cancelled: true };
-      }
-      const result = withSheetOperationLock_(() => {
-        return continueAnnualArchiveTransaction_(spreadsheet, pending);
-      });
-      SpreadsheetApp.getUi().alert(result.message);
-      return result;
-    }
     const data = getRollupDialogData_();
-    if (!data.months.length) {
+    if (!data.months.length && !data.pending) {
       throw new Error('目前沒有可永久封存的已結束月份。');
     }
     const template = HtmlService.createTemplateFromFile('monthly_rollup');
@@ -1382,19 +1359,6 @@ function showMonthlyRollupDialog() {
 }
 
 function submitMonthlyRollupRequest(payload) {
-  return withSheetOperationLock_(() => {
-    const request = payload || {};
-    const token = toCellText_(request.operationId);
-    if (!token) throw new Error('永久封存 request token 遺失，請重新開啟視窗。');
-    const cache = CacheService.getUserCache();
-    const key = `ANNUAL_ARCHIVE_${token}`;
-    const cached = safeJsonParse_(cache.get(key), null);
-    if (cached && cached.ok) return cached;
-    const result = createAnnualArchiveTransaction_(
-      SpreadsheetApp.getActiveSpreadsheet(),
-      request
-    );
-    cache.put(key, JSON.stringify(result), CROSS_SHEET_CACHE_SECONDS);
-    return result;
-  });
+  // Historical callers without an action can only create a preview.
+  return submitNativeArchive_(payload || {});
 }
