@@ -15,7 +15,11 @@ permissions:
   contents: read
 
 jobs:
+  contract:
+    uses: ./.github/workflows/contract.yml
+
   deploy:
+    needs: contract
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
 

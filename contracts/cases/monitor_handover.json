@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "calendar_owner": "external_windows_monitor",
+  "monthly_date_basis": "nearest_valid_day_header",
+  "monthly_hospital_basis": "nearest_valid_day_header",
+  "day_headers_create_events": false,
+  "same_day_blocks": ["2026-10-12|高榮", "2026-10-12|聯醫"],
+  "moved_day": "2026-11-02",
+  "moved_hospital": "聯醫",
+  "patient_sync_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "patient_event_id": "syntheticeventid",
+  "main_state_sheet": "__VGHKS_SYNC_STATE"
+}

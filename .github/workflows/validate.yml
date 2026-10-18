@@ -8,7 +8,11 @@ permissions:
   contents: read
 
 jobs:
+  contract:
+    uses: ./.github/workflows/contract.yml
+
   validate:
+    needs: contract
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
