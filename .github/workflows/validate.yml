@@ -8,7 +8,11 @@ permissions:
   contents: read
 
 jobs:
+  contract:
+    uses: ./.github/workflows/contract.yml
+
   validate:
+    needs: contract
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -24,4 +28,5 @@ jobs:
           node tests/workflow_contract.js
           node tests/monitor_handover.js
           node tests/archive_contract.js
+          node tests/deploy_verification.js
           git diff --check

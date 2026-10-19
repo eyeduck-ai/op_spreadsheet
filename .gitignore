@@ -31,3 +31,10 @@ build/
 # Google Apps Script clasp credentials/config
 .clasprc.json
 .clasp.json
+
+# Shared Python package build products
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.ruff_cache/

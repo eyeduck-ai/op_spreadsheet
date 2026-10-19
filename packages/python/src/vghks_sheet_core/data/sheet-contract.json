@@ -1,0 +1,261 @@
+{
+  "contract_version": "1.1.0",
+  "timezone": "Asia/Taipei",
+  "gas_config": {
+    "SHEET_ALL": "All",
+    "SHEET_FU": "FU",
+    "LEGACY_SHEET_OP": "OP",
+    "SHEET_IVI": "IVI",
+    "FIELD_KEYS": [
+      "CHART_NO",
+      "NAME",
+      "TEL",
+      "HOSPITAL",
+      "TAG",
+      "COND",
+      "DATE",
+      "PLAN",
+      "MEMO",
+      "EVENT_ID",
+      "SYNC_ID"
+    ],
+    "SYSTEM_FIELD_KEYS": [
+      "EVENT_ID",
+      "SYNC_ID"
+    ],
+    "FIELD_HEADERS": {
+      "CHART_NO": "病歷號",
+      "NAME": "姓名",
+      "TEL": "TEL",
+      "HOSPITAL": "醫院",
+      "TAG": "Tag",
+      "COND": "Condition",
+      "DATE": "日期",
+      "PLAN": "Plan",
+      "MEMO": "心得",
+      "EVENT_ID": "CalendarEventId",
+      "SYNC_ID": "ScheduleSyncId"
+    },
+    "HEADERS": [
+      "病歷號",
+      "姓名",
+      "TEL",
+      "醫院",
+      "Tag",
+      "Condition",
+      "日期",
+      "Plan",
+      "心得",
+      "CalendarEventId",
+      "ScheduleSyncId"
+    ],
+    "MONTHLY_FIELD_KEYS": [
+      "TIME",
+      "HOSPITAL",
+      "CHART_NO",
+      "NAME",
+      "TEL",
+      "GA",
+      "SIDE",
+      "DIAGNOSIS",
+      "GRADE",
+      "PROCEDURE",
+      "IOL",
+      "IOL_TARGET",
+      "IOL_FINAL",
+      "AXIS",
+      "PLAN",
+      "MEMO",
+      "SN",
+      "CDE",
+      "ENERGY_TIME",
+      "ENERGY_PERCENT",
+      "REFRACTION",
+      "EVENT_ID",
+      "SYNC_ID"
+    ],
+    "MONTHLY_SYSTEM_FIELD_KEYS": [
+      "EVENT_ID",
+      "SYNC_ID"
+    ],
+    "MONTHLY_FIELD_HEADERS": {
+      "TIME": "日期／報到時間",
+      "HOSPITAL": "醫院",
+      "CHART_NO": "病歷號",
+      "NAME": "姓名",
+      "TEL": "TEL",
+      "GA": "GA",
+      "SIDE": "側別",
+      "DIAGNOSIS": "診斷",
+      "GRADE": "Grade",
+      "PROCEDURE": "術式",
+      "PLAN": "Plan",
+      "IOL": "IOL",
+      "IOL_TARGET": "IOL Target",
+      "IOL_FINAL": "IOL Final",
+      "AXIS": "Axis",
+      "MEMO": "心得",
+      "SN": "SN",
+      "CDE": "CDE",
+      "ENERGY_TIME": "Energy Time",
+      "ENERGY_PERCENT": "Energy %",
+      "REFRACTION": "屈光數據",
+      "EVENT_ID": "CalendarEventId",
+      "SYNC_ID": "ScheduleSyncId"
+    },
+    "MONTHLY_HEADERS": [
+      "日期／報到時間",
+      "醫院",
+      "病歷號",
+      "姓名",
+      "TEL",
+      "GA",
+      "側別",
+      "診斷",
+      "Grade",
+      "術式",
+      "IOL",
+      "IOL Target",
+      "IOL Final",
+      "Axis",
+      "Plan",
+      "心得",
+      "",
+      "SN",
+      "CDE",
+      "Energy Time",
+      "Energy %",
+      "屈光數據",
+      "CalendarEventId",
+      "ScheduleSyncId"
+    ],
+    "HOSPITAL_OPTIONS": [
+      "高榮",
+      "聯醫"
+    ],
+    "FU_TAG_OPTIONS": [
+      "FU",
+      "Complication",
+      "CATA",
+      "Cornea",
+      "Retina",
+      "Plasty",
+      "Neuro",
+      "Refraction",
+      "Suture IOL",
+      "IVI"
+    ],
+    "MONTHLY_GA_OPTIONS": [
+      "GA"
+    ],
+    "MONTHLY_SIDE_OPTIONS": [
+      "OD",
+      "OS",
+      "OU"
+    ],
+    "MONTHLY_DIAGNOSIS_OPTIONS": [
+      "CATA",
+      "Subluxated IOL",
+      "VH",
+      "ERM",
+      "RD",
+      "Ptosis",
+      "Dermatochalasis",
+      "Entropion"
+    ],
+    "MONTHLY_DIAGNOSIS_SUMMARY_GROUPS": [
+      {
+        "label": "CATA",
+        "keywords": [
+          "CATA",
+          "Cataract"
+        ]
+      },
+      {
+        "label": "Retina",
+        "keywords": [
+          "VH",
+          "ERM",
+          "Subluxation",
+          "Dislocation",
+          "RRD",
+          "TRD",
+          "Subluxated IOL",
+          "RD"
+        ]
+      },
+      {
+        "label": "Plasty",
+        "keywords": [
+          "Dermatochalasis",
+          "Ptosis",
+          "Dacryocystitis",
+          "Entropion"
+        ]
+      }
+    ],
+    "MONTHLY_PROCEDURE_OPTIONS": [
+      "Phaco-IOL",
+      "LenSx-Phaco-IOL",
+      "MSICS-IOL",
+      "VT",
+      "VT+MP",
+      "LMR",
+      "correction",
+      "Suture IOL"
+    ],
+    "PLAN_RED_KEYWORDS": [
+      "!"
+    ],
+    "PLAN_YELLOW_KEYWORDS": [
+      "#"
+    ],
+    "PLAN_GREEN_KEYWORDS": [
+      "APPLY"
+    ]
+  },
+  "date_header": "日期／報到時間",
+  "day_marker": "◆ 刀日",
+  "hospitals": [
+    "高榮",
+    "聯醫"
+  ],
+  "date_aliases": [
+    "時間",
+    "日期/報到時間"
+  ],
+  "event_header": "CalendarEventId",
+  "event_aliases": [
+    "日曆eventID",
+    "日曆apiEventID"
+  ],
+  "sync_header": "ScheduleSyncId",
+  "sync_id_pattern": "^[0-9a-f]{32}$",
+  "diagnosis_formula_marker": "SURGERY_MONTHLY_DIAGNOSIS_SUMMARY_V2",
+  "date_years": [
+    2000,
+    2099
+  ],
+  "archive": {
+    "title_pattern": "^刀表封存_[0-9]{4}$",
+    "header_row": 6,
+    "lock_key": "vghks.sheet.archive.lock",
+    "lock_id": 2147483646
+  },
+  "rules": {
+    "columns": "Resolve row-1 canonical headers and documented aliases; reject duplicate canonical headers.",
+    "day_header": "Full date at midnight, valid hospital, day marker and empty CalendarEventId.",
+    "route": "The nearest valid preceding day header supplies date and hospital, independent of tab title.",
+    "patient_hospital": "Monthly patient hospital cells are optional manual content: new rows are blank; updates and moves preserve existing values and formulas. Never backfill them from a day header.",
+    "identity": "Whole-row moves preserve both IDs; duplicated, orphaned or reassigned IDs block sync.",
+    "fu": "FU takes precedence over All. Undated FU has no event; clearing a bound date requires review.",
+    "cancelled": "Displayed MRN strikethrough, including rich text, keeps a grey event.",
+    "delete": "Two consecutive successful full reconciliations after disappearance; failures reset confirmation; archived IDs protect events.",
+    "calendar_writer": "Only the designated external worker mutates Calendar.",
+    "calendar_range": "Reconcile every supported monthly tab and FU/All, including past dates. Archive identities protect existing events without creating archive events."
+  },
+  "upstream": {
+    "bot": "924c9eca556a0fcd5ad83b439f957cecccd36643",
+    "gas": "29814a64d1d8453a2005fc868618af76d22653d5"
+  }
+}

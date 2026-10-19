@@ -7,7 +7,8 @@
 - GAS must not call Calendar or CalendarApp; only the designated external worker owns event mutations. Keep legacy trigger entrypoints safe no-ops.
 - Keep `tests/fixtures/sheet_contract.json` aligned with the platform's matching contract; run `node tests/sheet_contract.js` before deployment.
 - Duplicate `ScheduleSyncId` or `CalendarEventId` values must be treated as a sync diagnostic, not silently resolved to the first row.
-- Existing-data identity/header migrations belong to the Windows worker's automatic setup. Do not require GAS initialization, migration or handover menus. Keep only historical installed trigger names as harmless compatibility entrypoints; obsolete menus and internal scaffolding should be removed. Optional format repair works on existing sheets only.
+- Existing-data identity/header migrations belong to the main program and independent worker's automatic setup. Do not require GAS initialization, migration or handover menus. Keep only historical installed trigger names as harmless compatibility entrypoints; obsolete menus and internal scaffolding should be removed. Optional format repair works on existing sheets only.
+- Monthly patient hospital cells are optional manual content. Resolve campus from the nearest valid day header; never automatically fill or overwrite the patient cell. FU hospital fields retain their own semantics.
 - `OP` is a legacy sheet name only. Do not automatically rename it; prompt users to manually rename `OP` to `All`.
 - Migrations must preserve old data on conflict and report what was copied, removed, or left for manual review.
 - Keep `日曆eventID` and `日曆apiEventID` as legacy migration aliases only, not as canonical headers.

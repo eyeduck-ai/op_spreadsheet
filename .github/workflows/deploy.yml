@@ -15,7 +15,11 @@ permissions:
   contents: read
 
 jobs:
+  contract:
+    uses: ./.github/workflows/contract.yml
+
   deploy:
+    needs: contract
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
 
@@ -50,6 +54,7 @@ jobs:
           node tests/workflow_contract.js
           node tests/archive_contract.js
           node --check tools/verify_bound_parent.js
+          node tests/deploy_verification.js
 
       - name: Setup clasp credentials
         env:

@@ -2630,9 +2630,9 @@ function insertPatientAtBlockEnd_(
 
   const rowValues = Array(lastColumn).fill('');
   Object.keys(valuesByKey || {}).forEach(key => {
+    if (key === 'HOSPITAL') return; // Monthly patients inherit the containing day block.
     setRowFieldValue_(rowValues, columns, key, valuesByKey[key]);
   });
-  setRowFieldValue_(rowValues, columns, 'HOSPITAL', currentBlock.hospital);
   setRowFieldValue_(rowValues, columns, 'EVENT_ID', '');
   setRowFieldValue_(rowValues, columns, 'SYNC_ID', newScheduleSyncId_());
   sheet.getRange(targetRow, 1, 1, lastColumn).setValues([rowValues]);

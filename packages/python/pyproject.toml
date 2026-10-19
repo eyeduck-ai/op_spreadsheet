@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vghks-sheet-core"
+version = "1.1.0"
+description = "Versioned, network-free VGHKS sheet parsing and identity contract"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+vghks_sheet_core = ["data/*.json", "data/cases/*.json"]
