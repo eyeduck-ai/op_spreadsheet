@@ -20,6 +20,7 @@ from .schema import (
 SYNC_HEADER = "ScheduleSyncId"
 EVENT_HEADER = "CalendarEventId"
 OWNER_KEY = "vghks.calendar.owner"
+OWNER_METADATA_ID = 2147483645
 ALIASES = {**{label: EVENT_HEADER for label in EVENT_ALIASES}, "時間": DATE_HEADER, "日期/報到時間": DATE_HEADER}
 UID = re.compile(r"^[a-f0-9]{32}$")
 
@@ -31,6 +32,24 @@ def digest(value):
 
 def event_id(spreadsheet_id, sync_id):
     return "vghks" + digest([spreadsheet_id, sync_id])[:48]
+
+
+def calendar_day(event):
+    """Read an all-day or timed Calendar start as an Asia/Taipei date."""
+    start = (event or {}).get("start", {})
+    try:
+        if "date" in start:
+            return date.fromisoformat(start["date"])
+        value = datetime.fromisoformat(start.get("dateTime", "").replace("Z", "+00:00"))
+        return value.astimezone(TAIPEI).date() if value.tzinfo is not None else None
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def in_calendar_range(event, today):
+    """Past and unrecognizable events are never eligible for mutation."""
+    day = calendar_day(event)
+    return day is not None and day >= today
 
 
 def sheet_kind(sheet):

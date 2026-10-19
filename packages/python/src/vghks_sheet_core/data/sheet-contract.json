@@ -1,5 +1,5 @@
 {
-  "contract_version": "1.1.0",
+  "contract_version": "1.2.0",
   "timezone": "Asia/Taipei",
   "gas_config": {
     "SHEET_ALL": "All",
@@ -252,10 +252,18 @@
     "cancelled": "Displayed MRN strikethrough, including rich text, keeps a grey event.",
     "delete": "Two consecutive successful full reconciliations after disappearance; failures reset confirmation; archived IDs protect events.",
     "calendar_writer": "Only the designated external worker mutates Calendar.",
-    "calendar_range": "Reconcile every supported monthly tab and FU/All, including past dates. Archive identities protect existing events without creating archive events."
+    "calendar_range": "Scan complete supported monthly tabs and FU/All for identity safety. Reconcile only events dated today or later in Asia/Taipei. Never create, update or delete past Calendar events; preserve their bindings and skip their Calendar requests. Archive identities protect existing events without creating archive events.",
+    "calendar_host": "One registered host per spreadsheet and target calendar. Claim fixed DOCUMENT metadata ID atomically; include a machine-specific host fingerprint as well as worker and target IDs. A different host or copied database must stop, without automatic replacement."
   },
   "upstream": {
     "bot": "924c9eca556a0fcd5ad83b439f957cecccd36643",
     "gas": "29814a64d1d8453a2005fc868618af76d22653d5"
+  },
+  "calendar_policy": {
+    "timezone": "Asia/Taipei",
+    "starts": "today",
+    "past_events": "preserve",
+    "owner_metadata_key": "vghks.calendar.owner",
+    "owner_metadata_id": 2147483645
   }
 }

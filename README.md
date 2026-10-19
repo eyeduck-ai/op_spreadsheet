@@ -1,12 +1,12 @@
 # 手術排程與 FU 追蹤
 
-GAS **2026.10.19.2**，共用契約 **1.1.0**。
+GAS **2026.10.19.3**，共用契約 **1.2.0**。
 
 | 專案 | 負責範圍 |
 | --- | --- |
 | [vghks-bot](https://github.com/eyeduck-ai/vghks-bot) | 院內 SOAP、刀表預覽／更新、統計及封存 |
 | 本 repo | 線上刀表格式、排序、月份／刀日、FU 跨表操作及封存 |
-| [vghks-sheet2cal](https://github.com/eyeduck-ai/vghks-sheet2cal) | 指定主機常駐同步刀表至 Calendar |
+| [vghks-sheet2cal](https://github.com/eyeduck-ai/vghks-sheet2cal) | 單一主機常駐同步今天起的排程至 Calendar，過去事件保留 |
 
 ## 院區與日常操作
 

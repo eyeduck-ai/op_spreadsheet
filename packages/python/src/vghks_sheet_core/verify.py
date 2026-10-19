@@ -2,10 +2,12 @@
 import argparse
 import json
 import subprocess
+from datetime import date
 from importlib.resources import files
 from pathlib import Path
 
-from .calendar import arrival, headers, scan
+from .calendar import arrival, calendar_day, headers, in_calendar_range, scan
+from .contract import CONTRACT
 from .schema import DAY_MARKER, HOSPITALS, canonical_header, full_date, monthly_row, sheet_headers
 
 
@@ -21,6 +23,9 @@ def verify(gas_repo=None, node="node"):
     parsing, formatting = fixture("schema_parsing.json"), fixture("sheet_contract.json")
     workflows, archives = fixture("workflow_contract.json"), fixture("gas_archives.json")
     if gas_repo:
+        source = json.loads((Path(gas_repo) / "contracts/sheet-contract.json").read_text(encoding="utf-8"))
+        if source != CONTRACT:
+            raise ValueError("Installed core specification differs from the candidate GAS source")
         for script, function, expected in (("parser_contract", "parserContract", parsing),
                 ("sheet_contract", "sheetContract", formatting), ("workflow_contract", "workflowContract", workflows),
                 ("archive_contract", "archiveContract", archives)):
@@ -85,6 +90,14 @@ def verify(gas_repo=None, node="node"):
         if identities is not None and snapshot["identities"] != identities:
             raise ValueError(f"Archive {phase} loses identities used to protect events")
         identities = snapshot["identities"]
+        count += 1
+    scope = fixture("calendar_scope.json")
+    cutoff = date.fromisoformat(scope["today"])
+    for index, case in enumerate(scope["cases"]):
+        day = calendar_day(case["event"])
+        if ((day.isoformat() if day else None) != case["day"]
+                or in_calendar_range(case["event"], cutoff) != case["eligible"]):
+            raise ValueError(f"Calendar date scope case {index} differs")
         count += 1
     return count
 
