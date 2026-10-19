@@ -6,7 +6,7 @@ from datetime import date
 from importlib.resources import files
 from pathlib import Path
 
-from .calendar import arrival, calendar_day, headers, in_calendar_range, scan
+from .calendar import arrival, calendar_day, headers, in_calendar_range, scan, schedule_in_calendar_range
 from .contract import CONTRACT
 from .schema import DAY_MARKER, HOSPITALS, canonical_header, full_date, monthly_row, sheet_headers
 
@@ -98,6 +98,10 @@ def verify(gas_repo=None, node="node"):
         if ((day.isoformat() if day else None) != case["day"]
                 or in_calendar_range(case["event"], cutoff) != case["eligible"]):
             raise ValueError(f"Calendar date scope case {index} differs")
+        count += 1
+    for index, case in enumerate(scope["schedule_cases"]):
+        if schedule_in_calendar_range(case, cutoff) != case["eligible"]:
+            raise ValueError(f"Current schedule date scope case {index} differs")
         count += 1
     return count
 

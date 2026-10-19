@@ -1,14 +1,127 @@
 {
   "today": "2026-10-19",
   "cases": [
-    {"event": {"start": {"date": "2026-10-18"}}, "day": "2026-10-18", "eligible": false},
-    {"event": {"start": {"date": "2026-10-19"}}, "day": "2026-10-19", "eligible": true},
-    {"event": {"start": {"date": "2026-10-20"}}, "day": "2026-10-20", "eligible": true},
-    {"event": {"start": {"dateTime": "2026-10-18T16:00:00Z"}}, "day": "2026-10-19", "eligible": true},
-    {"event": {"start": {"dateTime": "2026-10-18T15:59:59Z"}}, "day": "2026-10-18", "eligible": false},
-    {"event": {"start": {"dateTime": "2026-10-19T23:30:00-07:00"}}, "day": "2026-10-20", "eligible": true},
-    {"event": {"start": {"dateTime": "2026-10-19T08:30:00"}}, "day": null, "eligible": false},
-    {"event": {"start": {"date": "invalid"}}, "day": null, "eligible": false},
-    {"event": {}, "day": null, "eligible": false}
+    {
+      "event": {
+        "start": {
+          "date": "2026-10-18"
+        }
+      },
+      "day": "2026-10-18",
+      "eligible": false
+    },
+    {
+      "event": {
+        "start": {
+          "date": "2026-10-19"
+        }
+      },
+      "day": "2026-10-19",
+      "eligible": true
+    },
+    {
+      "event": {
+        "start": {
+          "date": "2026-10-20"
+        }
+      },
+      "day": "2026-10-20",
+      "eligible": true
+    },
+    {
+      "event": {
+        "start": {
+          "dateTime": "2026-10-18T16:00:00Z"
+        }
+      },
+      "day": "2026-10-19",
+      "eligible": true
+    },
+    {
+      "event": {
+        "start": {
+          "dateTime": "2026-10-18T15:59:59Z"
+        }
+      },
+      "day": "2026-10-18",
+      "eligible": false
+    },
+    {
+      "event": {
+        "start": {
+          "dateTime": "2026-10-19T23:30:00-07:00"
+        }
+      },
+      "day": "2026-10-20",
+      "eligible": true
+    },
+    {
+      "event": {
+        "start": {
+          "dateTime": "2026-10-19T08:30:00"
+        }
+      },
+      "day": null,
+      "eligible": false
+    },
+    {
+      "event": {
+        "start": {
+          "date": "invalid"
+        }
+      },
+      "day": null,
+      "eligible": false
+    },
+    {
+      "event": {},
+      "day": null,
+      "eligible": false
+    }
+  ],
+  "schedule_cases": [
+    {
+      "date": "2026-10-18",
+      "eligible": false
+    },
+    {
+      "date": "2026-10-19",
+      "eligible": true
+    },
+    {
+      "date": "2026-10-20",
+      "eligible": true
+    },
+    {
+      "date": "",
+      "eligible": false
+    },
+    {
+      "date": null,
+      "eligible": false
+    },
+    {
+      "date": "invalid",
+      "eligible": false
+    },
+    {
+      "date": "2026-10-19",
+      "cached_event": {
+        "start": {
+          "date": "2026-10-18"
+        }
+      },
+      "frozen_past": true,
+      "eligible": true
+    },
+    {
+      "date": "2026-10-20",
+      "actual_event": {
+        "start": {
+          "dateTime": "2026-10-18T08:30:00+08:00"
+        }
+      },
+      "eligible": true
+    }
   ]
 }
