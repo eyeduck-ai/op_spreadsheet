@@ -73,7 +73,8 @@ def verify(gas_repo=None, node="node"):
         item = found[0]
         if ((item["date"], item["hospital"]) != (workflows[f"{phase}_date"], workflows[f"{phase}_hospital"])
                 or item["event_id"] != workflows["patient_event_id"] or arrival(item) != ("08:30", "")
-                or item["fields"]["人工備註"] != "人工欄位保留"):
+                or item["fields"]["人工備註"] != "人工欄位保留"
+                or item["fields"].get("醫院", "") != workflows["patient_hospital_cells"][phase]):
             raise ValueError(f"Workflow {phase} changes route, binding or manual content")
         count += 1
     identities = None

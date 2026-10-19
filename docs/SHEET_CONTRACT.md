@@ -1,27 +1,32 @@
-# 刀表契約與相容性更新
+# 共用刀表規格
 
-正式來源為 `contracts/sheet-contract.json`，契約版本為 **1.0.0**。`CONFIG.VERSION` 是 GAS 部署日期版本；兩者各自維護。公開規格及案例只包含欄位、規則與合成資料。
+契約版本 **1.1.0**。正式來源是 `contracts/sheet-contract.json`；GAS 的日期部署版號另行維護。
 
-主程式負責院內 SOAP 與刀表更新；GAS 負責格式、排序、刀日與封存；獨立 `vghks-sheet2cal` 負責 Calendar 寫入。Python 兩端安裝本 repo 的 `packages/python` 共用套件，固定完整 Git commit，不在執行中下載新規格。
+| 來源 | 用途 |
+| --- | --- |
+| contracts/sheet-contract.json | 欄位、別名、日期、院區、ID、同步及刪除規則 |
+| contracts/cases/ | 實際 GAS 匯出的合成解析、寫入與封存案例 |
+| packages/python/src/vghks_sheet_core/ | Python 共用解析、永久識別、共享基準與 Calendar 資料模型 |
+| tools/generate_contract.py | 生成 GAS CONFIG、Python 內嵌 JSON 與案例 |
+| contracts/consumers.json | 部署前交叉驗證的固定主程式候選 commit |
 
-## 正式來源與產物
+## 共通行為
 
-- `contracts/sheet-contract.json`：欄名、別名、型別語意、院區、永久 ID、列類型與刪除保護。
-- `contracts/cases/`：從實際 GAS 匯出的日期、欄位、時間、建立／搬列及原生封存案例。
-- `packages/python/src/vghks_sheet_core/`：不依賴 Google 或院內 SDK 的解析、識別與共享基準讀寫。
-- `tools/generate_contract.py`：由規格產生 `code.js` 的 CONFIG 區塊及 Python 套件內的規格／案例；其餘 GAS 解析演算法由相同案例驗證。
+- 依表頭名稱定位，保留自訂欄、公式、註記及人工保護。
+- 日期與院區由最近有效刀日決定。**月份患者醫院欄為可選人工內容；新列留白，不補填、不覆寫，搬列保留。** FU 使用自身醫院及日期。
+- ScheduleSyncId、CalendarEventId 隨整列搬移；重複、孤立或病人重新綁定需先核對。
+- 取消依病歷號的顯示刪節線判定，含富文字。
+- 獨立監控涵蓋過去與未來月份及 FU／All；刀日不建事件，無日期 FU 不建事件。已綁定 FU 清空日期需核對。
+- 封存保留 ID；未完成封存阻擋寫入。只有連續完整成功掃描確認缺列，才允許移除已確認擁有權的事件。
 
-欄位以表頭解析，保留自訂欄、公式與註記；重複正式欄名或永久 ID 需停止並核對。整列搬移保留兩個 ID；日期與院區由最近有效刀日決定。取消以病歷號顯示刪節線判定。FU 無日期不建立事件；已綁定 FU 清空日期保留事件並要求核對。封存保留 ID，未完成封存阻擋寫入；完整成功掃描的連續缺列確認才允許刪除。
+## 更新順序
 
-## 更新步驟
+1. 修改 JSON、對應實作與合成案例；新版患者欄位是否進入 Calendar 須明確定義。
+2. 執行 `python tools/generate_contract.py`，核對生成差異及真實 GAS 匯出。
+3. 跑 GAS 測試、`python -m vghks_sheet_core.verify --gas-repo .` 及固定主程式交叉驗證。
+4. 主程式與監控固定相同完整 GAS Git commit；同步更新依賴鎖及契約 manifest，各自執行回歸。
+5. GAS 部署等待相容性檢查；主程式 Release 使用成功 main 建置的原產物，監控另行發布與部署。
 
-1. 修改規格、對應演算法與合成案例，檢查新增欄位是否需要同步至日曆。
-2. 執行 `python tools/generate_contract.py`，並審閱生成差異。
-3. 執行 `node tests/formal_contract.js`、既有 GAS 測試及 `python -m vghks_sheet_core.verify --gas-repo .`。
-4. `tools/verify_consumer.py --bot-repo <checkout>` 核對指定主程式版本與候選契約，包含主程式及日曆解析的 82 個案例。
-5. 更新 Python 套件版本與各消費端固定的 Git commit，在各自 CI 執行回歸。
-6. GAS 的部署 job 必須等待相容性 job 成功；破壞性改動先發布可同時讀新舊格式的消費端，再遷移資料，最後移除舊格式。
+Python 套件隨部署保存規格，執行中不下載最新規格。兩個 Python 消費端的完整來源 commit、內嵌規格與案例皆需核對；GAS 的 consumer commit 是 CI 相容性候選，不是另一份規格來源。
 
-語意版本：新增相容能力遞增 minor；修正且保持語意相容時遞增 patch；移除欄位／別名或改變識別與取消／刪除語意時遞增 major。新 major 必須由消費端明確支援。僅更新一般主程式功能不要求 GAS 與監控同步升版。
-
-`contracts/consumers.json` 記錄部署閘門所驗證的主程式完整 commit。獨立監控自己的 CI 會取固定 GAS commit，執行真實匯出器與監控回歸；調整契約時須一併更新該依賴並確認 CI。
+新增相容能力遞增 minor，修正遞增 patch；移除欄位／別名或改變識別、取消、刪除語意遞增 major。破壞性更新先發布可讀新舊格式的消費端，再遷移資料，最後移除舊格式。

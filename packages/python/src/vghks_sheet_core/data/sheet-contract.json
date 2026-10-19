@@ -1,5 +1,5 @@
 {
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "timezone": "Asia/Taipei",
   "gas_config": {
     "SHEET_ALL": "All",
@@ -246,11 +246,13 @@
     "columns": "Resolve row-1 canonical headers and documented aliases; reject duplicate canonical headers.",
     "day_header": "Full date at midnight, valid hospital, day marker and empty CalendarEventId.",
     "route": "The nearest valid preceding day header supplies date and hospital, independent of tab title.",
+    "patient_hospital": "Monthly patient hospital cells are optional manual content: new rows are blank; updates and moves preserve existing values and formulas. Never backfill them from a day header.",
     "identity": "Whole-row moves preserve both IDs; duplicated, orphaned or reassigned IDs block sync.",
     "fu": "FU takes precedence over All. Undated FU has no event; clearing a bound date requires review.",
     "cancelled": "Displayed MRN strikethrough, including rich text, keeps a grey event.",
     "delete": "Two consecutive successful full reconciliations after disappearance; failures reset confirmation; archived IDs protect events.",
-    "calendar_writer": "Only the designated external worker mutates Calendar."
+    "calendar_writer": "Only the designated external worker mutates Calendar.",
+    "calendar_range": "Reconcile every supported monthly tab and FU/All, including past dates. Archive identities protect existing events without creating archive events."
   },
   "upstream": {
     "bot": "924c9eca556a0fcd5ad83b439f957cecccd36643",

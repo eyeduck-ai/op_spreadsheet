@@ -1,6 +1,6 @@
 'use strict';
 // Export cells produced by real GAS month/day/patient writes, then read them in
-// both Windows programs. Only the native Sheet service is synthetic.
+// the main program and shared Calendar parser. Only Sheet services are synthetic.
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path');
 const { call, evaluate, plain, FakeSheet, makeFakeSpreadsheet, context } = require('./smoke');
@@ -78,12 +78,14 @@ function workflowContract() {
     const newRow = call('insertPatientAtBlockEnd_', sheet, union,
       { CHART_NO: 'TEST001', NAME: '合成甲', TIME: '08:30', HOSPITAL: '高榮', EVENT_ID: 'must-not-copy' }, columns);
     assert.strictEqual(newRow, union.row + 1);
-    assert.strictEqual(sheet.valueAt(newRow, columns.HOSPITAL), '聯醫');
+    assert.strictEqual(sheet.valueAt(newRow, columns.HOSPITAL), '');
     assert.strictEqual(sheet.valueAt(newRow, columns.EVENT_ID), '');
     const syncId = sheet.valueAt(newRow, columns.SYNC_ID);
     sheet.setValueAt(newRow, columns.EVENT_ID, 'synthetic-original-event');
     sheet.setValueAt(newRow, 2, '人工欄位保留');
     const creation = sheets.map(cells);
+    // Optional manual values survive moves; routing still follows the day header.
+    sheet.setValueAt(newRow, columns.HOSPITAL, '聯醫');
 
     // Empty-display formulas and notes must force insertion of a complete row.
     const blankRow = newRow + 1;
@@ -105,12 +107,14 @@ function workflowContract() {
     assert.strictEqual(located.sheet, destination);
     assert.strictEqual(destination.valueAt(located.row, targetCols.EVENT_ID), 'synthetic-original-event');
     assert.strictEqual(destination.valueAt(located.row, targetCols.TIME), '08:30');
+    assert.strictEqual(destination.valueAt(located.row, targetCols.HOSPITAL), '聯醫');
     assert.strictEqual(destination.valueAt(located.row, 2), '人工欄位保留');
     assert.throws(() => call('locateCachedMonthlySchedule_', spreadsheet, { syncId }, { chartNo: 'WRONG' }), /病人已變更/);
     assert.strictEqual(call('scanScheduleIdentities_', spreadsheet).conflicts.length, 0);
     return { schema: 1, creation, moved: sheets.map(cells), patient_sync_id: syncId,
       patient_event_id: 'synthetic-original-event', creation_date: '2026-11-16', creation_hospital: '聯醫',
-      moved_date: '2026-12-07', moved_hospital: '高榮' };
+      moved_date: '2026-12-07', moved_hospital: '高榮',
+      patient_hospital_cells: { creation: '', moved: '聯醫' } };
   } finally {
     prototype.copyTo = savedCopy;
     context.applyMonthlyFormatting_ = savedFormat;

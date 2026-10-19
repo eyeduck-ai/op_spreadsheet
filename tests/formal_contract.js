@@ -21,4 +21,4 @@ for (const [script, fn, file] of [
   assert.deepStrictEqual(require('./' + script)[fn](),
     JSON.parse(fs.readFileSync(path.join(root, 'contracts/cases', file), 'utf8')));
 }
-console.log('Formal contract 1.0.0 passed: GAS fields, aliases, parsing, workflows and native archive exports');
+console.log(`Formal contract ${spec.contract_version} passed: GAS fields, aliases, parsing, workflows and native archive exports`);
