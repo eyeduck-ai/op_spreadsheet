@@ -28,4 +28,5 @@ jobs:
           node tests/workflow_contract.js
           node tests/monitor_handover.js
           node tests/archive_contract.js
+          node tests/deploy_verification.js
           git diff --check

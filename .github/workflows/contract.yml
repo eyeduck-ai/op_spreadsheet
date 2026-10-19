@@ -42,3 +42,4 @@ jobs:
           persist-credentials: false
       - run: python -m pip install ./.consumer-bot
       - run: python tools/verify_consumer.py --bot-repo .consumer-bot
+      - run: python -m vghks_sheet_core.verify --gas-repo .
