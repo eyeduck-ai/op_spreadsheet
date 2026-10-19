@@ -100,7 +100,7 @@ def verify(gas_repo=None, node="node"):
             raise ValueError(f"Calendar date scope case {index} differs")
         count += 1
     for index, case in enumerate(scope["schedule_cases"]):
-        if schedule_in_calendar_range({"date": case["date"]}, cutoff) != case["eligible"]:
+        if schedule_in_calendar_range(case, cutoff) != case["eligible"]:
             raise ValueError(f"Current schedule date scope case {index} differs")
         count += 1
     return count
