@@ -47,9 +47,17 @@ def calendar_day(event):
 
 
 def in_calendar_range(event, today):
-    """Past and unrecognizable events are never eligible for mutation."""
+    """Check an event date; update eligibility uses the requested schedule date."""
     day = calendar_day(event)
     return day is not None and day >= today
+
+
+def schedule_in_calendar_range(item, today):
+    """The current sheet date controls eligibility, regardless of event history."""
+    try:
+        return date.fromisoformat(item.get("date", "")) >= today
+    except (ValueError, TypeError):
+        return False
 
 
 def sheet_kind(sheet):
