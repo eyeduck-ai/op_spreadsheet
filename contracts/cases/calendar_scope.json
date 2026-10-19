@@ -123,5 +123,181 @@
       },
       "eligible": true
     }
+  ],
+  "reconciliation_cases": [
+    {
+      "date": "2026-10-18",
+      "previous": {
+        "status": "ready",
+        "resource": {
+          "start": {
+            "date": "2026-10-19"
+          }
+        }
+      },
+      "eligible": true
+    },
+    {
+      "date": "2026-10-18",
+      "previous": {
+        "status": "ready",
+        "resource": {
+          "start": {
+            "dateTime": "2026-10-20T08:30:00+08:00"
+          }
+        }
+      },
+      "eligible": true
+    },
+    {
+      "date": "2026-10-18",
+      "previous": {
+        "status": "ready",
+        "resource": {
+          "start": {
+            "date": "2026-10-18"
+          }
+        }
+      },
+      "eligible": false
+    },
+    {
+      "date": "2026-10-17",
+      "previous": {
+        "status": "ready",
+        "resource": {
+          "start": {
+            "date": "2026-10-18"
+          }
+        }
+      },
+      "eligible": false
+    },
+    {
+      "date": "2026-10-18",
+      "previous": {
+        "status": "pending",
+        "resource": {
+          "start": {
+            "date": "2026-10-18"
+          }
+        }
+      },
+      "eligible": true
+    },
+    {
+      "date": "2026-10-18",
+      "previous": {
+        "status": "pending",
+        "resource": {
+          "start": {
+            "date": "2026-10-20"
+          }
+        }
+      },
+      "eligible": true
+    },
+    {
+      "date": "2026-10-18",
+      "previous": {
+        "status": "deleted",
+        "resource": {
+          "start": {
+            "date": "2026-10-20"
+          }
+        }
+      },
+      "eligible": false
+    },
+    {
+      "date": "2026-10-18",
+      "previous": {
+        "status": "historical",
+        "frozen_past": true,
+        "resource": {
+          "start": {
+            "date": "2026-10-18"
+          }
+        }
+      },
+      "eligible": false
+    },
+    {
+      "date": "2026-10-18",
+      "eligible": false
+    },
+    {
+      "date": "2026-10-19",
+      "previous": {
+        "status": "ready",
+        "resource": {
+          "start": {
+            "date": "2026-10-18"
+          }
+        }
+      },
+      "eligible": true
+    },
+    {
+      "date": "2026-10-20",
+      "previous": {
+        "status": "historical",
+        "frozen_past": true,
+        "resource": {
+          "start": {
+            "date": "2026-10-18"
+          }
+        }
+      },
+      "eligible": true
+    },
+    {
+      "date": "",
+      "previous": {
+        "status": "pending",
+        "resource": {
+          "start": {
+            "date": "2026-10-20"
+          }
+        }
+      },
+      "eligible": false
+    },
+    {
+      "date": "invalid",
+      "previous": {
+        "status": "ready",
+        "resource": {
+          "start": {
+            "date": "2026-10-20"
+          }
+        }
+      },
+      "eligible": false
+    },
+    {
+      "date": null,
+      "previous": {
+        "status": "ready",
+        "resource": {
+          "start": {
+            "date": "2026-10-20"
+          }
+        }
+      },
+      "eligible": false
+    },
+    {
+      "date": "2026-10-18",
+      "previous": {
+        "status": "ready",
+        "resource": {
+          "start": {
+            "dateTime": "2026-10-18T16:00:00Z"
+          }
+        }
+      },
+      "eligible": true
+    }
   ]
 }

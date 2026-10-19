@@ -1,5 +1,5 @@
 {
-  "contract_version": "1.2.1",
+  "contract_version": "1.2.2",
   "timezone": "Asia/Taipei",
   "gas_config": {
     "SHEET_ALL": "All",
@@ -252,7 +252,7 @@
     "cancelled": "Displayed MRN strikethrough, including rich text, keeps a grey event.",
     "delete": "Two consecutive successful full reconciliations after disappearance; failures reset confirmation; archived IDs protect events.",
     "calendar_writer": "Only the designated external worker mutates Calendar.",
-    "calendar_range": "Scan complete supported monthly tabs and FU/All for identity safety. Eligibility follows the current schedule date in Asia/Taipei, including all of today. Skip Calendar requests while that date remains past. When a past schedule moves to today or later, resume reconciliation of the same bound Calendar event even if its cached or actual event date is past; preserve ScheduleSyncId and CalendarEventId. Missing-source past or undated events remain protected from deletion. Archive identities protect existing events without creating archive events.",
+    "calendar_range": "Scan complete supported monthly tabs and FU/All for identity safety. Reconcile current schedule dates today or later in Asia/Taipei, updating the same bound event when a past schedule returns to range. When a previously tracked today/future event is moved into the past, update that existing event once, verify it and persist completion; pending reconciliation survives failures and restarts. Confirmed past schedules then skip per-event Calendar requests. Never create a missing event for a past schedule. Preserve ScheduleSyncId and CalendarEventId. Missing-source past or undated events and archive identities remain protected from deletion.",
     "calendar_host": "One registered host per spreadsheet and target calendar. Claim fixed DOCUMENT metadata ID atomically; include a machine-specific host fingerprint as well as worker and target IDs. A different host or copied database must stop, without automatic replacement."
   },
   "upstream": {
@@ -265,7 +265,10 @@
     "past_events": "preserve_while_schedule_date_is_past",
     "owner_metadata_key": "vghks.calendar.owner",
     "owner_metadata_id": 2147483645,
-    "eligibility_source": "current_schedule_date",
-    "rescheduled_past_events": "update_existing_bound_event"
+    "eligibility_source": "current_schedule_date_and_pending_bound_transition",
+    "rescheduled_past_events": "update_existing_bound_event",
+    "rescheduled_into_past": "update_existing_once_then_skip",
+    "past_reconciliation_completion": "verified_event_and_persisted_ready_state",
+    "missing_past_event": "preserve_binding_without_creation"
   }
 }

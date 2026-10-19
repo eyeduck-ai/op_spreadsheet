@@ -60,6 +60,18 @@ def schedule_in_calendar_range(item, today):
         return False
 
 
+def schedule_requires_reconciliation(item, today, previous=None):
+    """Finish a bound move into the past once; confirmed past records stay idle."""
+    try:
+        day = date.fromisoformat(item.get("date", ""))
+    except (ValueError, TypeError):
+        return False
+    if day >= today:
+        return True
+    return bool(previous and previous.get("status") != "deleted" and (
+        previous.get("status") == "pending" or in_calendar_range(previous.get("resource"), today)))
+
+
 def sheet_kind(sheet):
     name = sheet["properties"]["title"]
     if re.fullmatch(r"\d{4}(?:0[1-9]|1[0-2])", name):
