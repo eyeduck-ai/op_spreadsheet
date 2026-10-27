@@ -6,7 +6,7 @@ from datetime import date
 from importlib.resources import files
 from pathlib import Path
 
-from .calendar import arrival, calendar_day, headers, in_calendar_range, scan, schedule_in_calendar_range, schedule_requires_reconciliation
+from .calendar import arrival, calendar_binding_compatible, calendar_day, headers, in_calendar_range, scan, schedule_in_calendar_range, schedule_requires_reconciliation
 from .contract import CONTRACT
 from .schema import DAY_MARKER, HOSPITALS, canonical_header, full_date, monthly_row, sheet_headers
 
@@ -73,7 +73,7 @@ def verify(gas_repo=None, node="node"):
                            "rows": [[literal(v) for v in row] for row in tab["rows"]]} for tab in workflows[phase]]}
         snapshot = scan(book)
         found = [item for item in snapshot["patients"] if item["uid"] == workflows["patient_sync_id"]]
-        if snapshot["issues"] or len(found) != 1:
+        if snapshot["issues"] or snapshot["row_issues"] or len(found) != 1:
             raise ValueError(f"Workflow {phase} has ambiguous identities")
         item = found[0]
         if ((item["date"], item["hospital"]) != (workflows[f"{phase}_date"], workflows[f"{phase}_hospital"])
@@ -106,6 +106,22 @@ def verify(gas_repo=None, node="node"):
     for index, case in enumerate(scope["reconciliation_cases"]):
         if schedule_requires_reconciliation(case, cutoff, case.get("previous")) != case["eligible"]:
             raise ValueError(f"Schedule reconciliation case {index} differs")
+        count += 1
+    binding = fixture("calendar_binding.json")
+    for index, case in enumerate(binding["cases"]):
+        if calendar_binding_compatible(case["item"], case["previous"]) != case["compatible"]:
+            raise ValueError(f"Calendar patient binding case {index} differs")
+        count += 1
+    labels = ["病歷號", "姓名", "日期", "ScheduleSyncId", "CalendarEventId"]
+    for index, case in enumerate(binding["scan_cases"]):
+        rows = [[literal(label) for label in labels]]
+        rows.extend([[literal(row.get(key, "")) for key in ("mrn", "name", "date", "uid", "event_id")]
+                     for row in case["rows"]])
+        snapshot = scan({"sheets": [{"properties": {"title": "FU", "sheetId": 1}, "rows": rows}]})
+        if (snapshot["row_issues"] != case["row_issues"]
+                or len(snapshot["issues"]) != case["global_issue_count"]
+                or len(snapshot["patients"]) != case["patient_count"]):
+            raise ValueError(f"Calendar row isolation case {index} differs")
         count += 1
     return count
 

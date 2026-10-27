@@ -1,0 +1,338 @@
+{
+  "cases": [
+    {
+      "label": "new schedule has no previous binding",
+      "item": {
+        "mrn": "",
+        "name": "合成甲"
+      },
+      "previous": null,
+      "compatible": true
+    },
+    {
+      "label": "blank MRN after campus move keeps name anchor",
+      "item": {
+        "mrn": "",
+        "name": "合成甲"
+      },
+      "previous": {
+        "patient": {
+          "mrn": "00123",
+          "name": "合成甲"
+        }
+      },
+      "compatible": true
+    },
+    {
+      "label": "new campus MRN replaces old MRN",
+      "item": {
+        "mrn": "99876",
+        "name": "合成甲"
+      },
+      "previous": {
+        "patient": {
+          "mrn": "00123",
+          "name": "合成甲"
+        }
+      },
+      "compatible": true
+    },
+    {
+      "label": "blank MRN later filled after a restart",
+      "item": {
+        "mrn": "99876",
+        "name": "合成甲"
+      },
+      "previous": {
+        "patient": {
+          "mrn": "",
+          "name": "合成甲"
+        }
+      },
+      "compatible": true
+    },
+    {
+      "label": "unchanged MRN anchors a corrected name",
+      "item": {
+        "mrn": "00123",
+        "name": "合成甲更正"
+      },
+      "previous": {
+        "patient": {
+          "mrn": "123",
+          "name": "合成甲"
+        }
+      },
+      "compatible": true
+    },
+    {
+      "label": "unchanged MRN permits temporarily blank name",
+      "item": {
+        "mrn": "00123",
+        "name": ""
+      },
+      "previous": {
+        "patient": {
+          "mrn": "123",
+          "name": "合成甲"
+        }
+      },
+      "compatible": true
+    },
+    {
+      "label": "MRN numeric normalization preserves existing binding",
+      "item": {
+        "mrn": "００１２３",
+        "name": "合成乙"
+      },
+      "previous": {
+        "patient": {
+          "mrn": "123",
+          "name": "合成甲"
+        }
+      },
+      "compatible": true
+    },
+    {
+      "label": "name unicode and whitespace normalization",
+      "item": {
+        "mrn": "",
+        "name": " 合成　Ａ  "
+      },
+      "previous": {
+        "patient": {
+          "mrn": "99876",
+          "name": "合成 A"
+        }
+      },
+      "compatible": true
+    },
+    {
+      "label": "different MRN and name reject reassignment",
+      "item": {
+        "mrn": "99876",
+        "name": "合成乙"
+      },
+      "previous": {
+        "patient": {
+          "mrn": "00123",
+          "name": "合成甲"
+        }
+      },
+      "compatible": false
+    },
+    {
+      "label": "blank MRN and different name reject reassignment",
+      "item": {
+        "mrn": "",
+        "name": "合成乙"
+      },
+      "previous": {
+        "patient": {
+          "mrn": "00123",
+          "name": "合成甲"
+        }
+      },
+      "compatible": false
+    },
+    {
+      "label": "both current anchors blank reject",
+      "item": {
+        "mrn": "",
+        "name": ""
+      },
+      "previous": {
+        "patient": {
+          "mrn": "00123",
+          "name": "合成甲"
+        }
+      },
+      "compatible": false
+    },
+    {
+      "label": "both prior anchors blank do not establish trust",
+      "item": {
+        "mrn": "00123",
+        "name": "合成甲"
+      },
+      "previous": {
+        "patient": {
+          "mrn": "",
+          "name": ""
+        }
+      },
+      "compatible": false
+    },
+    {
+      "label": "legacy cached event supports clearing MRN",
+      "item": {
+        "mrn": "",
+        "name": "合成甲"
+      },
+      "previous": {
+        "resource": {
+          "summary": "00123 | 合成甲 | 合成術式"
+        }
+      },
+      "compatible": true
+    },
+    {
+      "label": "legacy cached event supports new campus MRN",
+      "item": {
+        "mrn": "99876",
+        "name": "合成甲"
+      },
+      "previous": {
+        "resource": {
+          "summary": "00123 | 合成甲 | 合成術式"
+        }
+      },
+      "compatible": true
+    },
+    {
+      "label": "legacy cached event numeric MRN anchor",
+      "item": {
+        "mrn": "123",
+        "name": "合成乙"
+      },
+      "previous": {
+        "resource": {
+          "summary": "00123 | 合成甲 | 合成術式"
+        }
+      },
+      "compatible": true
+    },
+    {
+      "label": "legacy cached event rejects different patient",
+      "item": {
+        "mrn": "99876",
+        "name": "合成乙"
+      },
+      "previous": {
+        "resource": {
+          "summary": "00123 | 合成甲 | 合成術式"
+        }
+      },
+      "compatible": false
+    },
+    {
+      "label": "explicit patient overrides misleading cached summary",
+      "item": {
+        "mrn": "99876",
+        "name": "合成甲"
+      },
+      "previous": {
+        "patient": {
+          "mrn": "00123",
+          "name": "合成乙"
+        },
+        "resource": {
+          "summary": "99876 | 合成甲 | 合成術式"
+        }
+      },
+      "compatible": false
+    },
+    {
+      "label": "explicit empty patient does not reuse cached clinical data",
+      "item": {
+        "mrn": "00123",
+        "name": "合成甲"
+      },
+      "previous": {
+        "patient": {},
+        "resource": {
+          "summary": "00123 | 合成甲 | 合成術式"
+        }
+      },
+      "compatible": false
+    },
+    {
+      "label": "unstructured legacy summary cannot establish trust",
+      "item": {
+        "mrn": "00123",
+        "name": "合成甲"
+      },
+      "previous": {
+        "resource": {
+          "summary": "合成甲"
+        }
+      },
+      "compatible": false
+    },
+    {
+      "label": "legacy record with no event resource cannot establish trust",
+      "item": {
+        "mrn": "00123",
+        "name": "合成甲"
+      },
+      "previous": {
+        "identity": "mrn:123"
+      },
+      "compatible": false
+    }
+  ],
+  "scan_cases": [
+    {
+      "label": "invalid FU date quarantines one row only",
+      "rows": [
+        {
+          "uid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "mrn": "00123",
+          "name": "合成甲",
+          "date": "待確認"
+        },
+        {
+          "uid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "mrn": "",
+          "name": "合成乙",
+          "date": "2026/11/09"
+        }
+      ],
+      "row_issues": [
+        {
+          "uid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "sheet": "FU",
+          "row": 2,
+          "code": "invalid_fu_date",
+          "message": "追蹤日期無法辨識"
+        }
+      ],
+      "global_issue_count": 0,
+      "patient_count": 2
+    },
+    {
+      "label": "undated FU draft is not an error",
+      "rows": [
+        {
+          "uid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "mrn": "",
+          "name": "合成甲",
+          "date": ""
+        }
+      ],
+      "row_issues": [],
+      "global_issue_count": 0,
+      "patient_count": 1
+    },
+    {
+      "label": "duplicate IDs remain a global issue",
+      "rows": [
+        {
+          "uid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "mrn": "00123",
+          "name": "合成甲",
+          "date": "2026/11/09"
+        },
+        {
+          "uid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "mrn": "99876",
+          "name": "合成乙",
+          "date": "2026/11/10"
+        }
+      ],
+      "row_issues": [],
+      "global_issue_count": 1,
+      "patient_count": 2
+    }
+  ]
+}
