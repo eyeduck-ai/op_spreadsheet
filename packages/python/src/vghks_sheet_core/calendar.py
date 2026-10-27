@@ -96,13 +96,40 @@ def identity(mrn, name):
     return "mrn:" + patient_key(mrn) if mrn.strip() else "name:" + norm(name)
 
 
+def calendar_binding_compatible(item, previous):
+    """Check a patient anchor after the worker has verified stable schedule/event IDs.
+
+    A campus move can temporarily clear or replace the MRN. Either the normalized
+    MRN or name must still match the trusted previous patient. This is separate
+    from the clinical planner's strict MRN identity and never fills source cells.
+    """
+    if not previous:
+        return True
+    if "patient" in previous:
+        patient = previous.get("patient") or {}
+    else:
+        # Migrate v1.2.x worker records without treating cached MRNs as source data.
+        summary = (previous.get("resource") or {}).get("summary", "")
+        if not isinstance(summary, str):
+            return False
+        parts = summary.split(" | ", 2)
+        patient = {"mrn": parts[0], "name": parts[1]} if len(parts) >= 2 else {}
+    if not isinstance(patient, dict):
+        return False
+    mrn = patient_key(item.get("mrn") or "")
+    old_mrn = patient_key(patient.get("mrn") or "")
+    name = norm(item.get("name") or "")
+    old_name = norm(patient.get("name") or "")
+    return bool((mrn and old_mrn and mrn == old_mrn) or (name and old_name and name == old_name))
+
+
 def full_day(cell):
     return full_date(cell)
 
 
 def scan(book, include_fu=True):
     """Return all identities, eligible patients, archives and deletion safety diagnostics."""
-    patients, archive_ids, seen, events, issues, sheet_ids = [], set(), {}, {}, [], set()
+    patients, archive_ids, seen, events, issues, row_issues, sheet_ids = [], set(), {}, {}, [], [], set()
     has_fu = any(s["properties"]["title"] == "FU" for s in book.get("sheets", []))
     for sheet in book.get("sheets", []):
         kind = sheet_kind(sheet)
@@ -169,7 +196,8 @@ def scan(book, include_fu=True):
                 continue
             day = block["date"] if kind == "MONTHLY" else full_day(cell_at(row, cols["日期"]))
             if kind == "FU" and value(row, cols, "日期") and not day:
-                issues.append(ref + " 追蹤日期無法辨識")
+                row_issues.append({"uid": uid, "sheet": name, "row": index + 1,
+                                   "code": "invalid_fu_date", "message": "追蹤日期無法辨識"})
             hospital = block["hospital"] if kind == "MONTHLY" else value(row, cols, "醫院")
             cancelled = kind == "MONTHLY" and cancelled_cell(cell_at(row, cols["病歷號"]))
             patients.append({"uid": uid, "event_id": eid, "identity": identity(mrn, person),
@@ -180,7 +208,7 @@ def scan(book, include_fu=True):
                 "time_cell": cell_at(row, cols.get("日期／報到時間", -1)) if kind == "MONTHLY" else {},
                 "cancelled": cancelled, "fields": {k: value(row, cols, k) for k in cols}})
     return {"patients": patients, "archive_ids": archive_ids, "identities": set(seen),
-            "issues": issues, "sheet_ids": sheet_ids}
+            "issues": issues, "row_issues": row_issues, "sheet_ids": sheet_ids}
 
 
 def arrival(item):

@@ -1,5 +1,5 @@
 {
-  "contract_version": "1.2.2",
+  "contract_version": "1.3.0",
   "timezone": "Asia/Taipei",
   "gas_config": {
     "SHEET_ALL": "All",
@@ -247,13 +247,15 @@
     "day_header": "Full date at midnight, valid hospital, day marker and empty CalendarEventId.",
     "route": "The nearest valid preceding day header supplies date and hospital, independent of tab title.",
     "patient_hospital": "Monthly patient hospital cells are optional manual content: new rows are blank; updates and moves preserve existing values and formulas. Never backfill them from a day header.",
-    "identity": "Whole-row moves preserve both IDs; duplicated, orphaned or reassigned IDs block sync.",
+    "identity": "Whole-row moves preserve ScheduleSyncId and CalendarEventId. Duplicate or orphaned IDs and invalid day structure halt the workbook. An isolated patient binding conflict quarantines that row.",
     "fu": "FU takes precedence over All. Undated FU has no event; clearing a bound date requires review.",
     "cancelled": "Displayed MRN strikethrough, including rich text, keeps a grey event.",
-    "delete": "Two consecutive successful full reconciliations after disappearance; failures reset confirmation; archived IDs protect events.",
+    "delete": "Two consecutive complete successful full reconciliations after disappearance; any failure or quarantined row disables deletion and resets confirmation; archived IDs protect events.",
     "calendar_writer": "Only the designated external worker mutates Calendar.",
     "calendar_range": "Scan complete supported monthly tabs and FU/All for identity safety. Reconcile current schedule dates today or later in Asia/Taipei, updating the same bound event when a past schedule returns to range. When a previously tracked today/future event is moved into the past, update that existing event once, verify it and persist completion; pending reconciliation survives failures and restarts. Confirmed past schedules then skip per-event Calendar requests. Never create a missing event for a past schedule. Preserve ScheduleSyncId and CalendarEventId. Missing-source past or undated events and archive identities remain protected from deletion.",
-    "calendar_host": "One registered host per spreadsheet and target calendar. Claim fixed DOCUMENT metadata ID atomically; include a machine-specific host fingerprint as well as worker and target IDs. A different host or copied database must stop, without automatic replacement."
+    "calendar_host": "One registered host per spreadsheet and target calendar. Claim fixed DOCUMENT metadata ID atomically; include a machine-specific host fingerprint as well as worker and target IDs. A different host or copied database must stop, without automatic replacement.",
+    "calendar_patient_binding": "After verifying the stable schedule and event IDs, the Calendar worker accepts an equal normalized nonblank MRN or patient name from its trusted previous patient. A campus change may clear or replace the MRN while the name anchors the same patient; blank fields stay blank and are never filled from cache. If neither anchor matches, quarantine the row. Clinical main-program MRN identity checks remain strict.",
+    "calendar_row_isolation": "Invalid FU dates, cleared bound dates, patient binding conflicts and row-specific event validation failures quarantine only the affected rows. Healthy rows continue. Report sheet, one-based row and reason without clinical values; a partial cycle disables all deletions and resets missing-row confirmations. Structural ambiguity, host conflicts, archive locks and shared transport/authentication failures halt the workbook."
   },
   "upstream": {
     "bot": "924c9eca556a0fcd5ad83b439f957cecccd36643",
@@ -269,6 +271,9 @@
     "rescheduled_past_events": "update_existing_bound_event",
     "rescheduled_into_past": "update_existing_once_then_skip",
     "past_reconciliation_completion": "verified_event_and_persisted_ready_state",
-    "missing_past_event": "preserve_binding_without_creation"
+    "missing_past_event": "preserve_binding_without_creation",
+    "patient_binding": "stable_schedule_and_event_ids_with_equal_nonblank_normalized_mrn_or_name",
+    "missing_patient_fields": "preserve_source_blanks_and_sync_available_information",
+    "isolated_row_error": "quarantine_row_continue_healthy_rows_disable_deletions_reset_confirmations"
   }
 }
