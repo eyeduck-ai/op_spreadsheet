@@ -9,7 +9,7 @@
  * - annual_archive.js：私人備份與永久年度封存
  */
 const CONFIG = {
-  "VERSION": "2026.10.27",
+  "VERSION": "2026.11.10",
   "SHEET_ALL": "All",
   "SHEET_FU": "FU",
   "LEGACY_SHEET_OP": "OP",
@@ -410,7 +410,11 @@ function withSheetOperationLock_(callback, archiveOwner) {
     assertNativeArchiveAvailable_(archiveOwner || '');
     return callback();
   } finally {
-    lock.releaseLock();
+    try {
+      SpreadsheetApp.flush();
+    } finally {
+      lock.releaseLock();
+    }
   }
 }
 

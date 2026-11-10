@@ -227,8 +227,11 @@ function createMonthlySurgerySheet() {
     }
     const monthName = toCellText_(response.getResponseText());
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-    const result = createOrInitializeMonthlySheet_(spreadsheet, monthName);
-    reorderManagedSheets_(spreadsheet);
+    const result = withSheetOperationLock_(() => {
+      const current = createOrInitializeMonthlySheet_(spreadsheet, monthName);
+      reorderManagedSheets_(spreadsheet);
+      return current;
+    });
     spreadsheet.setActiveSheet(result.sheet);
     ui.alert(
       `${result.created ? '已建立' : '已更新格式'} ${monthName}；` +
@@ -832,30 +835,55 @@ function addSelectedMonthlyRowToFu() {
     }
 
     performance.mark('前置檢查');
-    const targetRow = Math.max(2, fuSheet.getLastRow() + 1);
-    if (targetRow > fuSheet.getMaxRows()) fuSheet.insertRowAfter(fuSheet.getMaxRows());
-    const values = Array(lastColumn).fill('');
-    setRowFieldValue_(values, columns, 'CHART_NO', source.snapshot.chartNo);
-    setRowFieldValue_(values, columns, 'NAME', source.snapshot.patientName);
-    setRowFieldValue_(values, columns, 'TEL', source.snapshot.tel);
-    setRowFieldValue_(values, columns, 'COND', source.snapshot.condition);
-    setRowFieldValue_(values, columns, 'PLAN', source.snapshot.plan);
-    setRowFieldValue_(values, columns, 'MEMO', source.snapshot.memo);
-    setRowFieldValue_(values, columns, 'SYNC_ID', newScheduleSyncId_());
-    fuSheet.getRange(targetRow, 1, 1, lastColumn).setValues([values]);
-    applyManagedRowFormat_(fuSheet, targetRow, 'FU', columns);
-    cache.put(
-      cacheKey,
-      JSON.stringify({ row: targetRow }),
-      CROSS_SHEET_CACHE_SECONDS
-    );
+    // Prompts can suspend execution and release GAS locks. Re-read and append
+    // only after confirmation, while cooperating GAS writers hold the same lock.
+    const saved = withSheetOperationLock_(() => {
+      assertNoActiveAnnualArchiveTransaction_();
+      assertScheduleIntegrity_(selected.spreadsheet, { allowRepairableStructureActions: true });
+      const currentSheet = getSheetById_(selected.spreadsheet, selected.sheet.getSheetId());
+      if (!currentSheet || currentSheet.getName() !== selected.sheet.getName()) {
+        throw new Error('月份來源分頁已變更，請重新操作。');
+      }
+      const current = getMonthlySnapshotFromRow_(currentSheet, selected.row);
+      if (current.sourceFingerprint !== source.sourceFingerprint ||
+          toCellText_(getRowFieldValue_(current.values, current.columns, 'SYNC_ID')) !==
+          toCellText_(getRowFieldValue_(source.values, source.columns, 'SYNC_ID'))) {
+        throw new Error('月份來源列已移動或變更，請重新選取後加入 FU。');
+      }
+      const target = getMainTrackingSheet_(selected.spreadsheet);
+      if (!target || target.getSheetId() !== fuSheet.getSheetId()) {
+        throw new Error('FU／All 目的分頁已變更，請重新操作。');
+      }
+      const currentColumns = getRequiredFuColumns_(target);
+      const width = Math.max(target.getLastColumn(), ...Object.values(currentColumns));
+      const reused = locateCachedFuSnapshot_(target, safeJsonParse_(cache.get(cacheKey), null),
+        current.snapshot, currentColumns, width);
+      if (reused) return { row: reused, reused: true, sheet: target, columns: currentColumns };
+      const targetRow = Math.max(2, target.getLastRow() + 1);
+      if (targetRow > target.getMaxRows()) target.insertRowAfter(target.getMaxRows());
+      const values = Array(width).fill('');
+      [['CHART_NO', 'chartNo'], ['NAME', 'patientName'], ['TEL', 'tel'], ['COND', 'condition'],
+        ['PLAN', 'plan'], ['MEMO', 'memo']].forEach(([key, field]) => {
+        setRowFieldValue_(values, currentColumns, key, current.snapshot[field]);
+      });
+      setRowFieldValue_(values, currentColumns, 'SYNC_ID', newScheduleSyncId_());
+      target.getRange(targetRow, 1, 1, width).setValues([values]);
+      applyManagedRowFormat_(target, targetRow, 'FU', currentColumns);
+      const written = target.getRange(targetRow, 1, 1, width).getValues()[0];
+      if (JSON.stringify(written) !== JSON.stringify(values)) {
+        throw new Error('FU 新列回讀不一致，請核對剛建立的資料列；未記錄為成功。');
+      }
+      cache.put(cacheKey, JSON.stringify({ row: targetRow }), CROSS_SHEET_CACHE_SECONDS);
+      return { row: targetRow, reused: false, sheet: target, columns: currentColumns };
+    });
     performance.mark('Sheet 寫入').log();
-    selected.spreadsheet.setActiveSheet(fuSheet);
-    fuSheet.setActiveRange(fuSheet.getRange(targetRow, columns.CHART_NO));
+    selected.spreadsheet.setActiveSheet(saved.sheet);
+    saved.sheet.setActiveRange(saved.sheet.getRange(saved.row, saved.columns.CHART_NO));
     SpreadsheetApp.getUi().alert(
-      `已建立 FU 第 ${targetRow} 列；醫院、Tag、日期與 CalendarEventId 保持空白。`
+      saved.reused ? `這次操作已建立 FU 第 ${saved.row} 列，已直接定位，未重複新增。` :
+        `已建立 FU 第 ${saved.row} 列；醫院、Tag、日期與 CalendarEventId 保持空白。`
     );
-    return { ok: true, row: targetRow, duplicates };
+    return { ok: true, row: saved.row, reused: saved.reused, duplicates };
   });
 }
 

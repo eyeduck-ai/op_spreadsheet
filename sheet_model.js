@@ -1097,13 +1097,18 @@ function ensureMonthlyHeaderPresentation_(sheet, row, columns, rowValues) {
   const dateFormula = typeof dateCell.getFormula === 'function'
     ? toCellText_(dateCell.getFormula())
     : '';
+  const dateValue = dateCell.getValue();
+  const currentDate = parseFullDate_(dateValue);
   if (
     !dateFormula &&
+    currentDate &&
+    currentDate.getTime() === classification.date.getTime() &&
     !(
-      dateCell.getValue() instanceof Date &&
-      !isNaN(dateCell.getValue().getTime())
+      dateValue instanceof Date &&
+      !isNaN(dateValue.getTime())
     )
   ) {
+    // A caller's snapshot must not restore a date the user has since cleared/changed.
     dateCell.setValue(classification.date);
   }
   dateCell.setNumberFormat('yyyy/m/d ddd');
@@ -1811,6 +1816,7 @@ function normalizeEditedTimes_(event, sheet, kind, columns) {
     1
   );
   const originalNotes = timeRange.getNotes();
+  const timeFormulas = timeRange.getFormulas();
   const updatedNotes = originalNotes.map(row => row.slice());
   let notesChanged = false;
   const normalizedByRow = {};
@@ -1843,7 +1849,7 @@ function normalizeEditedTimes_(event, sheet, kind, columns) {
         setSystemNote_(
           sheet.getRange(row, columns.CHART_NO),
           MONTHLY_STRUCTURE_NOTE_PREFIX,
-          '第一欄是完整日期但該列已有 CalendarEventId；系統未將它當作日期標題或報到時間。'
+          '刀日日期、院區或標記不完整，或混入 CalendarEventId；既有內容與公式保留，請人工核對。'
         );
         return;
       }
@@ -1866,7 +1872,8 @@ function normalizeEditedTimes_(event, sheet, kind, columns) {
       errors++;
       return;
     }
-    if (info.parsedTime && toCellText_(value) !== info.parsedTime.text) {
+    // Validate formula results, but only normalize literal user-entered times.
+    if (!timeFormulas[index][0] && info.parsedTime && toCellText_(value) !== info.parsedTime.text) {
       normalizedByRow[row] = info.parsedTime.text;
       normalized++;
     }
