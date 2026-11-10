@@ -691,7 +691,7 @@ function testIolListReadsOnlyRequestedDateDisplayRows() {
 }
 
 function testVersionAndModuleSplit() {
-  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.10.27');
+  assert.strictEqual(evaluate('CONFIG.VERSION'), '2026.11.10');
   assert.strictEqual(evaluate('typeof processRowChange'), 'function');
   assert.strictEqual(evaluate('typeof processCalendarStructureChange'), 'function');
   assert.strictEqual(evaluate('typeof createMonthlySurgerySheet'), 'function');
@@ -890,6 +890,246 @@ function testWholeMonthlyTimeNormalizationUsesBoundedBatchReads() {
   sheet.calls.setValues = 0;
   assert.strictEqual(call('normalizeEditedTimes_', event, sheet, 'MONTHLY', columns).normalized, 0);
   assert.strictEqual(sheet.calls.setValues, 0);
+}
+
+function testSingleTimeFormulaSurvivesManualEditFormatting() {
+  const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
+  const row = fields => headers.map(header => fields[header] ?? '');
+  const sheet = new FakeSheet('202611', 871, [headers,
+    row({ '日期／報到時間': new Date(2026, 10, 10), '醫院': '高榮', '病歷號': '◆ 刀日' }),
+    row({ '日期／報到時間': 0.375, '病歷號': 'SYN-FORMULA', '姓名': '合成排程' })]);
+  const columns = call('getRequiredMonthlyColumns_', sheet);
+  sheet.setFormulaAt(3, columns.TIME, '=TIME(9,0,0)');
+  sheet.setNoteAt(3, columns.TIME, '人工註記');
+  const before = JSON.stringify(sheet.rows);
+  call('processScheduleEdit', { range: sheet.getRange(3, columns.TIME) });
+  assert.strictEqual(sheet.formulaAt(3, columns.TIME), '=TIME(9,0,0)');
+  assert.strictEqual(sheet.noteAt(3, columns.TIME), '人工註記');
+  assert.strictEqual(JSON.stringify(sheet.rows), before);
+  assert.strictEqual(sheet.calls.setValues, 0);
+}
+
+function testMixedPastePreservesTimeAndDateFormulasAndIntentionalBlanks() {
+  const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
+  const row = fields => headers.map(header => fields[header] ?? '');
+  const sheet = new FakeSheet('202611', 872, [headers,
+    row({ '日期／報到時間': new Date(2026, 10, 10), '醫院': '聯醫', '病歷號': '◆ 刀日' }),
+    ...['0800', 0.375, '0930', '', '', '1000'].map((time, index) => row({
+      '日期／報到時間': time, '病歷號': `SYN-MIX-${index}`, '姓名': `合成排程${index}` }))]);
+  const columns = call('getRequiredMonthlyColumns_', sheet);
+  const formulas = { 2: '=DATE(2026,11,10)', 4: '=TIME(9,0,0)',
+    5: '=TEXT(TIME(9,30,0),"hhmm")', 6: '=""' };
+  Object.entries(formulas).forEach(([index, formula]) => sheet.setFormulaAt(Number(index), columns.TIME, formula));
+  call('processScheduleEdit', { range: sheet.getRange(2, 1, 7, headers.length) });
+  Object.entries(formulas).forEach(([index, formula]) => {
+    assert.strictEqual(sheet.formulaAt(Number(index), columns.TIME), formula);
+  });
+  assert.deepStrictEqual(sheet.rows.slice(2).map(values => values[columns.TIME - 1]),
+    ['08:00', 0.375, '0930', '', '', '10:00']);
+  sheet.rows.slice(2).forEach(values => {
+    assert.strictEqual(values[columns.HOSPITAL - 1], '');
+    assert.strictEqual(values[columns.GA - 1], '');
+    assert.strictEqual(values[columns.SYNC_ID - 1], '');
+    assert.strictEqual(values[columns.EVENT_ID - 1], '');
+  });
+}
+
+function testClearedDayHeaderCellsAndStaleDateSnapshotsNeverBackfill() {
+  const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
+  const row = fields => headers.map(header => fields[header] ?? '');
+  ['TIME', 'HOSPITAL', 'CHART_NO'].forEach(key => {
+    const sheet = new FakeSheet('202611', 873, [headers,
+      row({ '日期／報到時間': new Date(2026, 10, 10), '醫院': '高榮', '病歷號': '◆ 刀日' })]);
+    const columns = call('getRequiredMonthlyColumns_', sheet);
+    sheet.setFormulaAt(2, columns.TIME, '=DATE(2026,11,10)');
+    sheet.getRange(2, columns[key]).clearContent();
+    const before = JSON.stringify(sheet.rows);
+    call('processScheduleEdit', { range: sheet.getRange(2, columns[key]) });
+    assert.strictEqual(JSON.stringify(sheet.rows), before);
+    assert.strictEqual(sheet.valueAt(2, columns[key]), '');
+    assert.ok(sheet.noteAt(2, columns.CHART_NO).includes('不完整'));
+    if (key !== 'TIME') assert.strictEqual(sheet.formulaAt(2, columns.TIME), '=DATE(2026,11,10)');
+  });
+  ['', '2026/11/23'].forEach(current => {
+    const sheet = new FakeSheet('202611', 874, [headers,
+      row({ '日期／報到時間': '2026/11/10', '醫院': '高榮', '病歷號': '◆ 刀日' })]);
+    const columns = call('getRequiredMonthlyColumns_', sheet);
+    const snapshot = sheet.rows[1].slice();
+    sheet.setValueAt(2, columns.TIME, current);
+    call('ensureMonthlyHeaderPresentation_', sheet, 2, columns, snapshot);
+    assert.strictEqual(sheet.valueAt(2, columns.TIME), current);
+    assert.strictEqual(sheet.calls.setValues, 0);
+  });
+}
+
+function withFuAppendFixture(action) {
+  const headers = plain(evaluate('CONFIG.MONTHLY_HEADERS'));
+  const fuHeaders = plain(evaluate('CONFIG.HEADERS'));
+  const row = fields => headers.map(header => fields[header] ?? '');
+  const month = new FakeSheet('202611', 875, [headers,
+    row({ '日期／報到時間': new Date(2026, 10, 10), '醫院': '高榮', '病歷號': '◆ 刀日', ScheduleSyncId: 'a'.repeat(32) }),
+    row({ '病歷號': 'SYN-A', '姓名': '合成甲', ScheduleSyncId: 'b'.repeat(32) }),
+    row({ '病歷號': 'SYN-B', '姓名': '合成乙', ScheduleSyncId: 'c'.repeat(32) })]);
+  const fu = new FakeSheet('FU', 876, [fuHeaders]);
+  const spreadsheet = makeFakeSpreadsheet([month, fu]);
+  const state = { month, fu, spreadsheet, selected: 3, held: false, cache: new Map(), events: [],
+    columns: call('getRequiredMonthlyColumns_', month), fuColumns: call('getRequiredFuColumns_', fu) };
+  const saved = { spreadsheet: { ...context.SpreadsheetApp }, cache: context.CacheService,
+    locks: context.LockService, uuid: context.Utilities.getUuid, runMenu: evaluate('runMenuAction_'),
+    formatting: evaluate('applyMonthlyFormatting_'), reorder: evaluate('reorderManagedSheets_') };
+  month.getActiveRange = () => month.getRange(state.selected, 1);
+  fu.setActiveRange = () => {};
+  spreadsheet.getActiveSheet = () => month;
+  spreadsheet.setActiveSheet = () => {};
+  context.SpreadsheetApp.getActiveSpreadsheet = () => spreadsheet;
+  context.SpreadsheetApp.getUi = () => ({ Button: { OK: 'OK' }, ButtonSet: { OK_CANCEL: 'OK_CANCEL' },
+    prompt: () => {
+      assert.strictEqual(state.held, false, 'Prompts must precede the write lock');
+      return { getSelectedButton: () => 'OK', getResponseText: () => '202611' };
+    },
+    alert: (...args) => {
+      assert.strictEqual(state.held, false, 'Confirmation/result dialogs must be outside the write lock');
+      if (args[0] === '疑似重複追蹤' && state.onPrompt) state.onPrompt();
+      return 'OK';
+    } });
+  context.SpreadsheetApp.flush = () => {
+    assert.strictEqual(state.held, true);
+    state.events.push('flush');
+  };
+  context.CacheService = { getUserCache: () => ({
+    get: key => state.cache.get(key) || null,
+    put: (key, value) => { assert.strictEqual(state.held, true); state.cache.set(key, value); }
+  }) };
+  context.LockService = { getDocumentLock: () => {
+    let owned = false;
+    return {
+      tryLock: () => {
+        if (state.beforeAcquire) {
+          const hook = state.beforeAcquire; state.beforeAcquire = null; hook();
+        }
+        if (state.held) return false;
+        owned = state.held = true; state.events.push('lock'); return true;
+      },
+      releaseLock: () => {
+        assert.strictEqual(owned, true);
+        assert.strictEqual(state.events.at(-1), 'flush', 'Flush buffered writes before releasing the GAS lock');
+        state.held = owned = false; state.events.push('unlock');
+      }
+    };
+  } };
+  context.Utilities.getUuid = () => { assert.strictEqual(state.held, true); return crypto.randomUUID(); };
+  context.runMenuAction_ = (_label, callback) => callback();
+  const getRange = fu.getRange.bind(fu);
+  fu.getRange = (...args) => {
+    const range = getRange(...args), write = range.setValues.bind(range);
+    range.setValues = values => {
+      assert.strictEqual(state.held, true);
+      if (state.beforeWrite) {
+        const hook = state.beforeWrite; state.beforeWrite = null; hook();
+      }
+      write(values);
+      if (state.afterWrite) state.afterWrite(args[0]);
+      return range;
+    };
+    return range;
+  };
+  try {
+    return action(state);
+  } finally {
+    context.SpreadsheetApp = saved.spreadsheet;
+    context.CacheService = saved.cache;
+    context.LockService = saved.locks;
+    context.Utilities.getUuid = saved.uuid;
+    context.runMenuAction_ = saved.runMenu;
+    context.applyMonthlyFormatting_ = saved.formatting;
+    context.reorderManagedSheets_ = saved.reorder;
+  }
+}
+
+function testFuAppendRechecksLastRowAfterInterleavedWriter() {
+  withFuAppendFixture(state => {
+    let second;
+    state.beforeAcquire = () => {
+      state.selected = 4; second = call('addSelectedMonthlyRowToFu'); state.selected = 3;
+    };
+    const first = call('addSelectedMonthlyRowToFu');
+    assert.ok(first.ok && second.ok);
+    assert.notStrictEqual(first.row, second.row);
+    assert.deepStrictEqual(state.fu.rows.slice(1).map(values => values[state.fuColumns.CHART_NO - 1]).sort(), ['SYN-A', 'SYN-B']);
+    const ids = state.fu.rows.slice(1).map(values => values[state.fuColumns.SYNC_ID - 1]);
+    assert.strictEqual(new Set(ids).size, 2);
+    assert.ok(ids.every(id => /^[a-f0-9]{32}$/.test(id)));
+  });
+}
+
+function testFuAppendCompetingWriterCannotOverwriteLockedRowAndCanRetry() {
+  withFuAppendFixture(state => {
+    state.beforeWrite = () => {
+      state.selected = 4;
+      assert.throws(() => call('addSelectedMonthlyRowToFu'), /另一個刀表作業/);
+      state.selected = 3;
+    };
+    const first = call('addSelectedMonthlyRowToFu');
+    state.selected = 4;
+    const second = call('addSelectedMonthlyRowToFu');
+    assert.ok(first.ok && second.ok);
+    assert.notStrictEqual(first.row, second.row);
+    assert.deepStrictEqual(state.fu.rows.slice(1).map(values => values[state.fuColumns.CHART_NO - 1]), ['SYN-A', 'SYN-B']);
+  });
+}
+
+function testFuAppendSameRequestCompletedBeforeLockIsReused() {
+  withFuAppendFixture(state => {
+    let second;
+    state.beforeAcquire = () => { second = call('addSelectedMonthlyRowToFu'); };
+    const first = call('addSelectedMonthlyRowToFu');
+    assert.ok(second.ok && first.ok && first.reused);
+    assert.strictEqual(first.row, second.row);
+    assert.strictEqual(state.fu.rows.length, 2);
+  });
+}
+
+function testFuAppendRevalidatesSourceAfterConfirmationAndVerifiesReadback() {
+  ['patient', 'uid', 'readback'].forEach(caseName => withFuAppendFixture(state => {
+    if (caseName === 'readback') {
+      state.afterWrite = index => state.fu.setValueAt(index, state.fuColumns.NAME, '合成競爭修改');
+      assert.throws(() => call('addSelectedMonthlyRowToFu'), /回讀不一致/);
+    } else {
+      const snapshot = call('getMonthlySnapshotFromRow_', state.month, 3).snapshot;
+      const existing = Array(state.fu.rows[0].length).fill('');
+      [['CHART_NO', 'chartNo'], ['NAME', 'patientName'], ['TEL', 'tel'], ['COND', 'condition'],
+        ['PLAN', 'plan'], ['MEMO', 'memo']].forEach(([key, field]) => { existing[state.fuColumns[key] - 1] = snapshot[field]; });
+      existing[state.fuColumns.SYNC_ID - 1] = 'd'.repeat(32);
+      state.fu.rows.push(existing);
+      state.onPrompt = () => state.month.setValueAt(3, state.columns[caseName === 'uid' ? 'SYNC_ID' : 'CHART_NO'],
+        caseName === 'uid' ? 'e'.repeat(32) : 'SYN-CHANGED');
+      const before = JSON.stringify(state.fu.rows);
+      assert.throws(() => call('addSelectedMonthlyRowToFu'), /來源列已移動或變更/);
+      assert.strictEqual(JSON.stringify(state.fu.rows), before);
+    }
+    assert.strictEqual(state.cache.size, 0, 'Failed writes/verification must not become successful retry records');
+    assert.strictEqual(state.held, false);
+  }));
+}
+
+function testMonthCreationSerializesDayAppendsAfterPrompt() {
+  withFuAppendFixture(state => {
+    context.applyMonthlyFormatting_ = sheet => {
+      assert.strictEqual(state.held, true);
+      return { columns: call('getRequiredMonthlyColumns_', sheet) };
+    };
+    context.reorderManagedSheets_ = () => { assert.strictEqual(state.held, true); };
+    let second;
+    state.beforeAcquire = () => { second = call('createMonthlySurgerySheet'); };
+    const first = call('createMonthlySurgerySheet');
+    assert.ok(first.ok && second.ok);
+    assert.strictEqual(first.addedBlocks, 0);
+    assert.strictEqual(second.addedBlocks, 4);
+    const scan = call('scanMonthlyBlocks_', state.month, state.columns);
+    assert.strictEqual(scan.blocks.length, 5);
+    assert.strictEqual(call('scanScheduleIdentities_', state.spreadsheet).conflicts.length, 0);
+    assert.strictEqual(state.held, false);
+  });
 }
 
 
@@ -2881,6 +3121,14 @@ const tests = [
   testCurrentMenuHasNoCompletedMigrationOrLegacyOutput,
   testMonthlySheetNameRecognition,
   testTimeNormalizationVariants,
+  testSingleTimeFormulaSurvivesManualEditFormatting,
+  testMixedPastePreservesTimeAndDateFormulasAndIntentionalBlanks,
+  testClearedDayHeaderCellsAndStaleDateSnapshotsNeverBackfill,
+  testFuAppendRechecksLastRowAfterInterleavedWriter,
+  testFuAppendCompetingWriterCannotOverwriteLockedRowAndCanRetry,
+  testFuAppendSameRequestCompletedBeforeLockIsReused,
+  testFuAppendRevalidatesSourceAfterConfirmationAndVerifiesReadback,
+  testMonthCreationSerializesDayAppendsAfterPrompt,
   testMultiRowPasteNormalizesEveryMonthlyTimeCell,
   testWholeMonthlyTimeNormalizationUsesBoundedBatchReads,
   testUnifiedSortRoutesWithoutChangingSortImplementations,
